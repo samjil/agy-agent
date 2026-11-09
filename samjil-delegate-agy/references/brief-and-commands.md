@@ -10,7 +10,7 @@
 | `@upgrade: true` | With `@session` + a higher `@model`: start a new conversation and paste the previous question/answer pairs into it. |
 | `@raw: true` | Do not append the standard rules (translation, data conversion). |
 
-For tasks with `@cwd` the watcher appends these rules to the prompt automatically, so do not repeat them: do not commit, run commands in the foreground, touch only needed files, and write the final reply in the configured language (`reply-language.txt`, set by the installer; edit it or set `AGY_REPLY_LANGUAGE`).
+For tasks with `@cwd` the watcher appends these rules to the prompt automatically, so do not repeat them: do not commit, run commands in the foreground, touch only needed files, and write the final reply in the configured language (`reply-language.txt`, `auto` by default = the Windows region setting; write a language name such as `English` into it or set `AGY_REPLY_LANGUAGE` to fix it).
 
 ## submit-task.ps1
 

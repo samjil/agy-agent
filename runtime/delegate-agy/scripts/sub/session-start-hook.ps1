@@ -205,6 +205,10 @@ try {
     if ($collectActive) {
         Write-Output ("수집 모드: 위임 표본 {0}/{1} — 이 PC 의 위임 통계가 아직 적어서, 직접 처리 대상 1~4(맥락 필요·설계/가장 어려움·틀리면 비용 큼·Claude 전용 도구)가 아니면 토큰 비교 없이 위임한다." -f $collectN, $target)
     }
+    $recScript = Join-Path (Split-Path $PSScriptRoot -Parent) "record-estimate.ps1"
+    if (Test-Path -LiteralPath $recScript) {
+        Write-Output ("[예상 기록] 직접/위임을 정한 즉시(턴마다 한 번, 다른 도구 호출보다 먼저) 아래 명령으로 예상을 남긴다. 그 턴의 답변 끝에는 예상 줄을 쓰지 않는다. 기록 호출은 호출 수에 세지 않는다. 토큰은 1.3k 형식, 시간은 14s 1m30s 형식: powershell.exe -NoProfile -ExecutionPolicy Bypass -File ""{0}"" -Direct <토큰> -Delegate <토큰> -TimeDirect <시간> -TimeDelegate <시간> -Choice direct|delegate -Level low|medium|high" -f $recScript)
+    }
 } catch {
     # 훅 오류가 세션 시작을 막으면 안 된다.
 }

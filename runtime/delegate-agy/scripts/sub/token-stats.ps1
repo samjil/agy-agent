@@ -19,6 +19,10 @@ if (Test-Path -LiteralPath (Join-Path $PSScriptRoot "agy-layout.ps1")) {
     . (Join-Path $PSScriptRoot "agy-layout.ps1")
 }
 
+# 예상 기록 호출(record-estimate.ps1 ... -Choice ...)은 도구 호출 수와 경로(직접/위임/대화) 판정에서 뺀다.
+# 기록은 통계를 위한 부가 호출이라 센 호출 수에 들어가면 예상 식과 순수 대화 턴이 오염된다.
+$script:RecordEstimateCallPattern = 'record-estimate\.ps1.*-Choice'
+
 function Test-IsDelegationToolCall([string]$ToolName, $InputObj) {
     if ($ToolName -and $ToolName -notmatch '(?i)^(bash|powershell|cmd|terminal)$') {
         return $false
@@ -697,6 +701,7 @@ function Get-TokenTurnsFromSessionFile([string]$FilePath, [string]$ProjectName, 
             dur_sec           = $durSec
             choice            = $choice
             level             = $level
+            end_ts            = $(if ($tObj.event_times.Count -gt 0) { (@($tObj.event_times | ForEach-Object { $_.ToUniversalTime() }) | Sort-Object | Select-Object -Last 1).ToString('yyyy-MM-ddTHH:mm:ss.fffZ') } else { $null })
             task_ids          = if ($tObj.ContainsKey('task_ids') -and $null -ne $tObj.task_ids) { @($tObj.task_ids.Keys) } else { @() }
         }
         [void]$turns.Add($turnRow)
@@ -811,7 +816,7 @@ function Get-TokenTurnsFromSessionFile([string]$FilePath, [string]$ProjectName, 
                     }
                 }
 
-                if ($line -match '"id"\s*:\s*"(toolu_[A-Za-z0-9_-]+)"') {
+                if ($line -match '"id"\s*:\s*"(toolu_[A-Za-z0-9_-]+)"' -and $line -notmatch $script:RecordEstimateCallPattern) {
                     $toolMatches = [regex]::Matches($line, '"id"\s*:\s*"(toolu_[A-Za-z0-9_-]+)"')
                     foreach ($tm in $toolMatches) {
                         $tid = $tm.Groups[1].Value
@@ -1050,7 +1055,7 @@ function Get-ClaudeLiveTurnMetrics {
                 }
             }
 
-            if ($line -match '"id"\s*:\s*"(toolu_[A-Za-z0-9_-]+)"') {
+            if ($line -match '"id"\s*:\s*"(toolu_[A-Za-z0-9_-]+)"' -and $line -notmatch $script:RecordEstimateCallPattern) {
                 $toolMatches = [regex]::Matches($line, '"id"\s*:\s*"(toolu_[A-Za-z0-9_-]+)"')
                 foreach ($tm in $toolMatches) {
                     $tid = $tm.Groups[1].Value
@@ -1154,6 +1159,22 @@ function Get-ClaudeLiveTurnMetrics {
 # 둘째 기준은 예상들이 모두 크게 틀려 흩어짐이 넓을 때(기준선도 함께 넓어져 아무것도 안 잡힘)를 위한 안전장치다.
 # 위임 턴의 예상은 턴 전체를 잰 값이라, 뷰어 카드와 같은 방식으로 다른 작업 실측(d_tokens - d_related)을 빼서 위임한 일만의 예상과 비교한다
 # (빼고 나서 0 이하이면 위임 관련 호출 비율을 곱한다).
+# 위임한 턴의 예상(est_delegate)을 "위임한 일만의 예상"으로 맞춘다. 턴 예상에는 위임과 무관한 작업도 들어 있으므로
+# 그 턴의 다른 작업 실측(d_tokens - d_related)을 뺀다(0 이하이면 위임 관련 호출 ÷ 전체 호출 비율로 줄인다).
+# 위임 정확도의 분모(d_related)와 짝을 맞추는 값이다. 이상치 판정 · 예상 정확도 · 보정 비율이 모두 이 함수를 쓴다.
+# serve-viewer.ps1 의 Get-ViewerDelegateJobEstimate 가 같은 식이다(뷰어는 이 파일을 불러오지 않아 따로 둔다). 고치면 함께 고친다.
+function Get-TokenDelegateJobEstimate([double]$Est, $DTokens, $DRelated, $Calls, $CallsRelated) {
+    $dT = if ($null -ne $DTokens -and [string]$DTokens -ne '') { [double]$DTokens } else { $null }
+    $dR = if ($null -ne $DRelated -and [string]$DRelated -ne '') { [double]$DRelated } else { $dT }
+    $other = if ($null -ne $dT -and $null -ne $dR) { [Math]::Max(0.0, $dT - $dR) } else { 0.0 }
+    $job = $Est - $other
+    if ($job -gt 0.0) { return $job }
+    $cAll = if ($null -ne $Calls -and [string]$Calls -ne '') { [double]$Calls } else { 0.0 }
+    $cRel = if ($null -ne $CallsRelated -and [string]$CallsRelated -ne '') { [double]$CallsRelated } else { $cAll }
+    if ($cAll -gt 0.0) { return $Est * [Math]::Min(1.0, $cRel / $cAll) }
+    return $Est
+}
+
 function Get-TokenAnomalyFlags($Rows, [hashtable]$AgyMedians = @{}, [hashtable]$TaskInfo = @{}, [double]$AbsFactor = 5.0) {
     $result = @{}
     $allRows = @($Rows)
@@ -1199,15 +1220,7 @@ function Get-TokenAnomalyFlags($Rows, [hashtable]$AgyMedians = @{}, [hashtable]$
             if ($null -ne $effD -and $null -ne $estDel) {
                 $actual = [double]$effD
                 $est = [double]$estDel
-                $otherD = if ($null -ne $dTok -and [string]$dTok -ne '') { [Math]::Max(0.0, [double]$dTok - $effD) } else { 0.0 }
-                $jobEst = $est - $otherD
-                if ($jobEst -gt 0.0) {
-                    $est = $jobEst
-                } else {
-                    $cAll = _GetVal $r 'calls'
-                    $cRel = _GetVal $r 'calls_related'
-                    if ($null -ne $cAll -and $null -ne $cRel -and [double]$cAll -gt 0) { $est = $est * [Math]::Min(1.0, [double]$cRel / [double]$cAll) }
-                }
+                $est = Get-TokenDelegateJobEstimate $est $dTok $dRel (_GetVal $r 'calls') (_GetVal $r 'calls_related')
             }
         }
 
@@ -1442,7 +1455,7 @@ function Get-TokenCalibration {
         $delResult = Get-TheilSenEstimator -Points $delPoints -DefaultA 2500 -DefaultB 1000
 
         $accRows = @($db.Query(
-            "SELECT choice, est_direct, est_delegate, d_tokens, d_related, est_ver FROM token_turns WHERE calls >= 1 AND COALESCE(d_related, d_tokens) IS NOT NULL AND COALESCE(d_related, d_tokens) > 0 AND choice IS NOT NULL AND (CASE WHEN turn_ts LIKE '%T%' THEN turn_ts >= ? ELSE turn_ts >= ? END)",
+            "SELECT path, est_direct, est_delegate, d_tokens, d_related, calls, calls_related, est_ver FROM token_turns WHERE calls >= 1 AND COALESCE(d_related, d_tokens) IS NOT NULL AND COALESCE(d_related, d_tokens) > 0 AND path IN ('direct', 'delegate') AND (CASE WHEN turn_ts LIKE '%T%' THEN turn_ts >= ? ELSE turn_ts >= ? END)",
             [object[]]@($cutIso60, $cutSpace60)
         ))
         $dirRatios = New-Object System.Collections.ArrayList
@@ -1457,13 +1470,15 @@ function Get-TokenCalibration {
             if ($ver -ne 'v2') {
                 continue
             }
-            $ch = [string]$r['choice']
+            # 실제로 간 길(path)로 나눈다: 직접 턴은 직접 예상 ÷ 실제, 위임 턴은 위임한 일만의 예상 ÷ 위임 관련 실제(통계 화면과 같은 기준)
+            $pth = [string]$r['path']
             $d = [double]$r['d_tokens']
             $dDel = if ($r['d_related'] -ne $null -and $r['d_related'] -ne [DBNull]::Value) { [double]$r['d_related'] } else { $d }
-            if ($ch -eq 'direct' -and $null -ne $r['est_direct'] -and $r['est_direct'] -ne [DBNull]::Value) {
+            if ($pth -eq 'direct' -and $null -ne $r['est_direct'] -and $r['est_direct'] -ne [DBNull]::Value -and $d -gt 0) {
                 [void]$dirRatios.Add([double]$r['est_direct'] / $d)
-            } elseif ($ch -eq 'delegate' -and $null -ne $r['est_delegate'] -and $r['est_delegate'] -ne [DBNull]::Value) {
-                [void]$delRatios.Add([double]$r['est_delegate'] / $dDel)
+            } elseif ($pth -eq 'delegate' -and $null -ne $r['est_delegate'] -and $r['est_delegate'] -ne [DBNull]::Value -and $dDel -gt 0) {
+                $jobEstCal = Get-TokenDelegateJobEstimate ([double]$r['est_delegate']) $r['d_tokens'] $r['d_related'] $r['calls'] $r['calls_related']
+                [void]$delRatios.Add($jobEstCal / $dDel)
             }
         }
         $totalAccN = $dirRatios.Count + $delRatios.Count
@@ -1743,6 +1758,28 @@ function Get-TokenCalibration {
     }
 }
 
+# record-estimate.ps1 이 token_estimates 에 남긴 예상을 턴에 붙인다: 같은 프로젝트에서 턴이 시작한 뒤(turn_ts) 끝나기 전(end_ts)에 기록된 것.
+# 한 턴에 여러 번 기록했으면 마지막 것이 이긴다. 답변 끝 예상 줄(옛 방식)보다 기록이 우선한다. 몇 번을 돌려도 같은 결과(멱등)다.
+# 같은 프로젝트에서 세션 둘이 동시에 돌면 시각이 겹쳐 엉킬 수 있다(드물다). 붙인 턴 수를 돌려준다.
+function Merge-RecordedEstimates($Db, [int]$Days = 30) {
+    $cut = (Get-Date).ToUniversalTime().AddDays(-$Days).ToString("yyyy-MM-ddTHH:mm:ss")
+    $ests = @($Db.Query("SELECT recorded_at, project, est_direct, est_delegate, est_time_direct, est_time_delegate, choice, level FROM token_estimates WHERE recorded_at >= ? ORDER BY recorded_at ASC", [object[]]@($cut)))
+    $merged = 0
+    foreach ($e in $ests) {
+        $rec = [string]$e['recorded_at']
+        $lowIso = ([datetime]::Parse($rec, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AdjustToUniversal)).AddSeconds(-3).ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
+        $rows = @($Db.Query("SELECT file, turn_ts FROM token_turns WHERE project = ? AND turn_ts LIKE '%T%' AND turn_ts <= ? AND end_ts IS NOT NULL AND end_ts >= ? ORDER BY turn_ts DESC LIMIT 1", [object[]]@([string]$e['project'], $rec, $lowIso)))
+        if ($rows.Count -eq 0) { continue }
+        $val = { param($k) if ($e[$k] -eq $null -or $e[$k] -eq [DBNull]::Value) { $null } else { $e[$k] } }
+        [void]$Db.Execute(
+            "UPDATE token_turns SET est_direct = ?, est_delegate = ?, est_time_direct = ?, est_time_delegate = ?, est_ver = 'v2', choice = COALESCE(?, choice), level = COALESCE(?, level) WHERE file = ? AND turn_ts = ?",
+            [object[]]@((& $val 'est_direct'), (& $val 'est_delegate'), (& $val 'est_time_direct'), (& $val 'est_time_delegate'), (& $val 'choice'), (& $val 'level'), [string]$rows[0]['file'], [string]$rows[0]['turn_ts'])
+        )
+        $merged++
+    }
+    return $merged
+}
+
 function Update-TokenStats {
     param(
         [string]$DbPath = "",
@@ -1849,8 +1886,8 @@ function Update-TokenStats {
                     Invoke-AgyDbTransaction $db {
                         foreach ($t in $scanTurns) {
                             [void]$db.Execute(
-                                "INSERT INTO token_turns (file, turn_ts, project, path, calls, submits, polls, out_tokens, d_tokens, est_direct, est_delegate, choice, est_ver, cr_tokens, dur_sec, est_time_direct, est_time_delegate, calls_related, d_related, level) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(file, turn_ts) DO UPDATE SET project=excluded.project, path=excluded.path, calls=excluded.calls, submits=excluded.submits, polls=excluded.polls, out_tokens=excluded.out_tokens, d_tokens=COALESCE(excluded.d_tokens, token_turns.d_tokens), est_direct=excluded.est_direct, est_delegate=excluded.est_delegate, choice=excluded.choice, est_ver=excluded.est_ver, cr_tokens=excluded.cr_tokens, dur_sec=excluded.dur_sec, est_time_direct=excluded.est_time_direct, est_time_delegate=excluded.est_time_delegate, calls_related=excluded.calls_related, d_related=COALESCE(excluded.d_related, token_turns.d_related), level=COALESCE(excluded.level, token_turns.level)",
-                                [object[]]@($t.file, $t.turn_ts, $t.project, $t.path, [long]$t.calls, [long]$t.submits, [long]$t.polls, [long]$t.out_tokens, $(if ($null -eq $t.d_tokens) { $null } else { [long]$t.d_tokens }), $(if ($null -eq $t.est_direct) { $null } else { [double]$t.est_direct }), $(if ($null -eq $t.est_delegate) { $null } else { [double]$t.est_delegate }), $t.choice, $t.est_ver, $(if ($null -eq $t.cr_tokens) { $null } else { [long]$t.cr_tokens }), $(if ($null -eq $t.dur_sec) { $null } else { [long]$t.dur_sec }), $(if ($null -eq $t.est_time_direct) { $null } else { [long]$t.est_time_direct }), $(if ($null -eq $t.est_time_delegate) { $null } else { [long]$t.est_time_delegate }), $(if ($null -eq $t.calls_related) { $null } else { [long]$t.calls_related }), $(if ($null -eq $t.d_related) { $null } else { [long]$t.d_related }), $t.level)
+                                "INSERT INTO token_turns (file, turn_ts, project, path, calls, submits, polls, out_tokens, d_tokens, est_direct, est_delegate, choice, est_ver, cr_tokens, dur_sec, est_time_direct, est_time_delegate, calls_related, d_related, level, end_ts) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(file, turn_ts) DO UPDATE SET project=excluded.project, path=excluded.path, calls=excluded.calls, submits=excluded.submits, polls=excluded.polls, out_tokens=excluded.out_tokens, d_tokens=COALESCE(excluded.d_tokens, token_turns.d_tokens), est_direct=excluded.est_direct, est_delegate=excluded.est_delegate, choice=excluded.choice, est_ver=excluded.est_ver, cr_tokens=excluded.cr_tokens, dur_sec=excluded.dur_sec, est_time_direct=excluded.est_time_direct, est_time_delegate=excluded.est_time_delegate, calls_related=excluded.calls_related, d_related=COALESCE(excluded.d_related, token_turns.d_related), level=COALESCE(excluded.level, token_turns.level), end_ts=COALESCE(excluded.end_ts, token_turns.end_ts)",
+                                [object[]]@($t.file, $t.turn_ts, $t.project, $t.path, [long]$t.calls, [long]$t.submits, [long]$t.polls, [long]$t.out_tokens, $(if ($null -eq $t.d_tokens) { $null } else { [long]$t.d_tokens }), $(if ($null -eq $t.est_direct) { $null } else { [double]$t.est_direct }), $(if ($null -eq $t.est_delegate) { $null } else { [double]$t.est_delegate }), $t.choice, $t.est_ver, $(if ($null -eq $t.cr_tokens) { $null } else { [long]$t.cr_tokens }), $(if ($null -eq $t.dur_sec) { $null } else { [long]$t.dur_sec }), $(if ($null -eq $t.est_time_direct) { $null } else { [long]$t.est_time_direct }), $(if ($null -eq $t.est_time_delegate) { $null } else { [long]$t.est_time_delegate }), $(if ($null -eq $t.calls_related) { $null } else { [long]$t.calls_related }), $(if ($null -eq $t.d_related) { $null } else { [long]$t.d_related }), $t.level, $t.end_ts)
                             )
                             if ($t.task_ids) {
                                 foreach ($tid in $t.task_ids) {
@@ -1871,6 +1908,9 @@ function Update-TokenStats {
                     }
                 }
             }
+
+            # 결정 시점에 기록한 예상(record-estimate.ps1)을 그 시각에 진행 중이던 턴에 붙인다
+            try { [void](Merge-RecordedEstimates $db) } catch {}
 
             # 기존 행 est_ver 채우기 (est 값은 있고 est_ver 가 NULL 인 행은 v1)
             [void]$db.Execute("UPDATE token_turns SET est_ver = 'v1' WHERE (est_ver IS NULL OR est_ver = '') AND (est_direct IS NOT NULL OR est_delegate IS NOT NULL)", $null)

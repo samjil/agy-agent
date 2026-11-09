@@ -1,6 +1,6 @@
 # Full original rules (Korean)
 
-The author's complete working rules for this skill, in Korean. Optional reading; the English SKILL.md and the other reference files are enough for normal use. Where this text mentions `install.ps1` or the GitHub repository, the pack's `Install.cmd` does the same job.
+The author's complete working rules for this skill, in Korean. Optional reading; the English SKILL.md and the other reference files are enough for normal use. Where this text mentions `install.ps1` or the GitHub repository, that is the installer described in the English SKILL.md.
 
 
 # samjil-delegate-agy: Antigravity CLI 위임 (설계·최고 난이도는 직접, 나머지는 위임 + 필수 검토)

@@ -14,7 +14,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$USERPROFILE/.samjil/de
 | `DEAD` | 1 | not running: start it |
 | `MANUAL_STOP` | 2 | the user stopped it with `stop-agy.ps1`: ask before starting |
 
-Anything else (empty output, error) means the check failed. Do not read that as "running". Ask the user to run `Install.cmd` again.
+Anything else (empty output, error) means the check failed. Do not read that as "running". Ask the user to run the installer (`install.ps1`) again.
 
 ## Start (hidden, no console window)
 

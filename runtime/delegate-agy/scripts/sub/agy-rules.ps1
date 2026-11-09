@@ -25,19 +25,32 @@ $script:AgyStandardRuleList = @(
        Text = "Write the final reply and any report in Korean (keep code, paths, commands and raw error text as is)." }
 )
 
-# 답변 언어: 환경변수 AGY_REPLY_LANGUAGE, 없으면 <delegate-agy>\reply-language.txt 의 첫 줄, 둘 다 없으면 Korean(기존 동작).
-# 배포 팩의 설치기가 PC 언어에 맞춰 이 파일을 적는다. 값은 "Korean", "English" 처럼 영어 단어 하나를 쓴다.
+# Windows 지역(형식) 설정(CultureInfo.CurrentCulture)의 언어 영어 이름: ko-KR -> Korean, ja-JP -> Japanese. 알 수 없으면 English.
+# 시험에서 이 함수를 덮어써 PC 언어를 흉내 낸다.
+function Get-AgyOsLanguage {
+    try {
+        $ci = [System.Globalization.CultureInfo]::CurrentCulture
+        if ($ci.Name -eq "") { return "English" }
+        if (-not $ci.IsNeutralCulture -and $ci.Parent -and $ci.Parent.Name) { $ci = $ci.Parent }
+        $name = ([string]$ci.EnglishName -replace '\s*\(.*$', '').Trim()
+        if ($name -match '^[A-Za-z][A-Za-z \-]{1,30}$') { return $name }
+    } catch {}
+    return "English"
+}
+
+# 답변 언어: 환경변수 AGY_REPLY_LANGUAGE, 없으면 <delegate-agy>\reply-language.txt 의 첫 줄.
+# 값은 "Korean", "English" 처럼 영어 단어 하나이고, 비었거나 "auto" 거나 이상한 값이면 PC 의 Windows 지역(형식) 설정을 따른다(Get-AgyOsLanguage).
+# 배포 팩의 설치기는 이 파일에 auto 를 적는다. 그래서 PC 지역 설정을 바꾸면 답변 언어도 따라간다.
 function Get-AgyReplyLanguage {
-    $lang = [string]$env:AGY_REPLY_LANGUAGE
-    if (-not $lang.Trim()) {
+    $lang = ([string]$env:AGY_REPLY_LANGUAGE).Trim()
+    if (-not $lang) {
         $f = Join-Path $PSScriptRoot "..\..\reply-language.txt"
         if (Test-Path -LiteralPath $f -PathType Leaf) {
-            try { $lang = [string](@(Get-Content -LiteralPath $f -Encoding UTF8 -TotalCount 1)[0]) } catch { $lang = "" }
+            try { $lang = ([string](@(Get-Content -LiteralPath $f -Encoding UTF8 -TotalCount 1)[0])).Trim() } catch { $lang = "" }
         }
     }
-    $lang = $lang.Trim()
-    if ($lang -notmatch '^[A-Za-z][A-Za-z \-]{1,30}$') { return "Korean" }
-    return $lang
+    if ($lang -match '^[A-Za-z][A-Za-z \-]{1,30}$' -and $lang -ine "auto") { return $lang }
+    return (Get-AgyOsLanguage)
 }
 
 # 지시어 값이 참인가: true / yes / 1 / on / 예
@@ -57,6 +70,7 @@ function Add-AgyStandardRules([string]$Prompt, [bool]$HasFolder, [bool]$Raw = $f
     $replyLang = Get-AgyReplyLanguage
     foreach ($r in $script:AgyStandardRuleList) {
         if ([regex]::IsMatch([string]$Prompt, $r.Pattern)) { continue }
+        if ($r.Name -eq "korean" -and [regex]::IsMatch([string]$Prompt, '(?i)\bin\s+' + [regex]::Escape($replyLang) + '\b')) { continue }
         $ruleText = if ($r.Name -eq "korean") { $r.Text.Replace("in Korean", "in $replyLang") } else { $r.Text }
         [void]$lines.Add($ruleText)
         [void]$added.Add($r.Name)

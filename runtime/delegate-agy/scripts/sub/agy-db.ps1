@@ -211,7 +211,7 @@ function Initialize-AgySqlite {
 
 # 표나 열을 더하면 이 숫자를 올린다. 이미 있는 DB 는 user_version 이 이 값보다 낮을 때만 스키마를 다시 확인하므로, 안 올리면 새 표가 만들어지지 않는다.
 #   1: tasks · agy_sessions · meta   2: + token_files · token_turns · token_task_links(토큰 통계)   3: + cum_* · usage_basis(이어 보낸 세션 토큰 분리)   4: + calls_related · d_related(위임 관련 호출 및 증가량 분리)   6: + anomaly(이상치)
-$script:AgyDbSchemaVersion = 6
+$script:AgyDbSchemaVersion = 7
 $script:AgyDbSchemaSql = @(
     "CREATE TABLE IF NOT EXISTS tasks (
         task_id TEXT PRIMARY KEY NOT NULL,
@@ -257,7 +257,17 @@ $script:AgyDbSchemaSql = @(
     "CREATE TABLE IF NOT EXISTS token_task_links (
         task_id TEXT PRIMARY KEY,
         file TEXT,
-        turn_ts TEXT)"
+        turn_ts TEXT)",
+    "CREATE TABLE IF NOT EXISTS token_estimates (
+        id INTEGER PRIMARY KEY,
+        recorded_at TEXT NOT NULL,
+        project TEXT,
+        est_direct REAL,
+        est_delegate REAL,
+        est_time_direct INTEGER,
+        est_time_delegate INTEGER,
+        choice TEXT,
+        level TEXT)"
 )
 
 # 기록 한 건의 칸과 순서. New-QaRecord(common.ps1)와 뷰어 API 가 같은 목록을 쓴다.
@@ -287,7 +297,8 @@ function Initialize-AgyDbSchema($Db, [string]$Path = "") {
         @{ Name = "calls_related"; Type = "INTEGER" },
         @{ Name = "d_related"; Type = "INTEGER" },
         @{ Name = "level"; Type = "TEXT" },
-        @{ Name = "anomaly"; Type = "TEXT" }
+        @{ Name = "anomaly"; Type = "TEXT" },
+        @{ Name = "end_ts"; Type = "TEXT" }
     )
     foreach ($col in $neededCols) {
         if ($cols.Count -gt 0 -and -not $cols.ContainsKey($col.Name)) {

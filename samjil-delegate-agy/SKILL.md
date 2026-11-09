@@ -1,11 +1,11 @@
 ---
 name: samjil-delegate-agy
-description: "Delegate coding and routine tasks to the Antigravity CLI (agy) through a local watcher to save Claude quota. Claude keeps the design and the hardest part and reviews every result. Use when the user says 'delegate', 'ask agy', 'let agy do it', 'save quota', or turns delegate mode on. Windows only. Run Install.cmd once first."
-summary: "Save Claude quota: Claude designs and reviews, the Antigravity CLI (agy) does the routine work."
-version: "1.0.0"
-tags: [delegation, antigravity, agy, claude-code, quota, windows]
-keywords: [delegate to agy, antigravity cli, save claude quota, subagent, background watcher]
-docs_url: "https://github.com/samjil/agy-agent"
+description: "Delegate coding and routine tasks to the Antigravity CLI (agy) through a local watcher to save Claude quota. Claude keeps the design and the hardest part and reviews every result. Use when the user says 'delegate', 'ask agy', 'let agy do it', 'save quota', or turns delegate mode on. Windows only; needs a one-time local runtime install (see Setup)."
+license: MIT
+compatibility: "Windows 10/11 with Windows PowerShell 5.1, Claude Code, and the Antigravity CLI (agy) installed and signed in."
+metadata:
+  version: "1.0.0"
+  homepage: "https://github.com/samjil/agy-agent"
 ---
 
 # samjil-delegate-agy
@@ -21,9 +21,11 @@ test -f "$USERPROFILE/.samjil/delegate-agy/scripts/submit-task.ps1" && echo READ
 ```
 
 - `READY`: continue.
-- `MISSING`: the one-time installer has not run. Tell the user in one line, then run it. If an `install.ps1` sits in the parent folder of this skill folder (the unzipped pack), run:
-  `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "<parent of this skill folder>/install.ps1"`
-  Otherwise ask the user to double-click `Install.cmd` in the unzipped pack. Do not download or run scripts from anywhere else. Until it is installed, do the work yourself.
+- `MISSING`: this skill is only the rules; the local runtime (watcher and scripts) comes from the public repository <https://github.com/samjil/agy-agent>. Tell the user in one line and ask before installing. With their OK, run its `install.ps1`:
+  - from a local copy of the repository (a clone or an unzipped download) that the user points you to: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "<repo folder>\install.ps1"`, or
+  - straight from the web: `powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/samjil/agy-agent/main/install.ps1 | iex"`.
+
+  Do not download or run scripts from anywhere else. Until it is installed, do the work yourself.
 
 If `agy` itself is missing or not signed in, the installer says so. The user fixes that once (install Antigravity CLI, run `agy` once to sign in). Never install or sign in for them.
 
@@ -108,7 +110,7 @@ When you answer in Korean, use the Korean tags and the plain-language reasons in
 ## 6. Switch off, remove, more
 
 - Stop the watcher: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$USERPROFILE/.samjil/delegate-agy/scripts/stop-agy.ps1"`.
-- Remove everything: double-click `Uninstall.cmd` (also removes the always-on hook).
+- Remove the skills, tools and the always-on hook: run `uninstall.ps1` from the same repository (`powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "irm https://raw.githubusercontent.com/samjil/agy-agent/main/uninstall.ps1 | iex"` or the local file). Task history under `~/.samjil` is kept; delete it by hand to remove that too.
 - Dashboard of delegated tasks: `http://127.0.0.1:8787` (start it with `viewer/ensure-viewer-running.ps1` under `~/.samjil`).
 - Troubleshooting, logs, stuck tasks: `references/watcher.md`.
 - The author's complete original rules (Korean, long): `references/full-rules-ko.md`. Read only when a case above does not cover it.

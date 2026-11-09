@@ -434,12 +434,17 @@ if (Test-Path -LiteralPath $delegateHome) {
     if (-not $ReplyLanguage -and (Test-Path -LiteralPath $langFile)) {
         $ReplyLanguage = ([string](@(Get-Content -LiteralPath $langFile -Encoding UTF8 -TotalCount 1)[0])).Trim()   # re-running keeps the chosen language
     }
-    if (-not $ReplyLanguage) {
-        $ReplyLanguage = if ((Get-Culture).TwoLetterISOLanguageName -eq "ko") { "Korean" } else { "English" }
-    }
-    if ($ReplyLanguage -notmatch '^[A-Za-z][A-Za-z \-]{1,30}$') { $ReplyLanguage = "English" }
+    # "auto" (the default) follows the Windows region (format) setting at run time, so changing the PC region changes agy's answers too.
+    if (-not $ReplyLanguage -or $ReplyLanguage -notmatch '^[A-Za-z][A-Za-z \-]{1,30}$') { $ReplyLanguage = "auto" }
     [System.IO.File]::WriteAllText($langFile, $ReplyLanguage + "`r`n", (New-Object System.Text.UTF8Encoding($false)))
-    Write-Host "[+] agy answers in: $ReplyLanguage (edit $langFile to change)" -ForegroundColor Green
+    $shown = $ReplyLanguage
+    if ($ReplyLanguage -ieq "auto") {
+        try {
+            . (Join-Path $delegateHome "scripts\sub\agy-rules.ps1")
+            $shown = "auto, currently " + (Get-AgyOsLanguage) + ", from the Windows region setting"
+        } catch {}
+    }
+    Write-Host "[+] agy answers in: $shown (edit $langFile to change; write a language name such as English to fix it)" -ForegroundColor Green
 }
 
 $agyOk = $true
@@ -486,7 +491,7 @@ if (-not $Full) {
         foreach ($p in $problems) { Write-Host "   - $p" -ForegroundColor Yellow }
     }
     Write-Host "  Skills : ~/.claude/skills/ (samjil-delegate-agy, samjil-handoff, samjil-git-commit)" -ForegroundColor Gray
-    Write-Host "  Tools  : ~/.samjil/   Remove everything: Uninstall.cmd" -ForegroundColor Gray
+    Write-Host "  Tools  : ~/.samjil/   Remove skills and tools: Uninstall.cmd" -ForegroundColor Gray
     if (-not $AlwaysOn) { Write-Host "  Mode   : on request. For delegation in every session run: Install.cmd -AlwaysOn" -ForegroundColor Gray }
     Write-Host "==========================================================" -ForegroundColor Cyan
 }

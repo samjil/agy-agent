@@ -1160,7 +1160,7 @@ function Get-TokenStatsData {
                         $dailyMap[$item.DateStr].delegate_turns++
                         # v2 턴만 보정 비율에 포함
                         if ($isV2 -and $estDelegateVal -ne $null -and $effD -ne $null -and $effD -gt 0) {
-                            [void]$delegateRatios.Add($estDelegateVal / $effD)
+                            [void]$delegateRatios.Add((& $delegateJobEstimate $r $estDelegateVal) / $effD)
                         }
                         if ($durSecVal -ne $null) {
                             [void]$delegateDurSecList.Add($durSecVal)
@@ -1274,7 +1274,7 @@ function Get-TokenStatsData {
                             }
                         } elseif ($p -eq 'delegate') {
                             if ($estDelegateVal -ne $null -and $effD -ne $null -and $effD -gt 0) {
-                                [void]$weeklyMap[$wk].delegate.Add($estDelegateVal / $effD)
+                                [void]$weeklyMap[$wk].delegate.Add((& $delegateJobEstimate $r $estDelegateVal) / $effD)
                             }
                             if ($turnAgyElapsedMap.ContainsKey($fKey) -and $estTimeDelVal -ne $null) {
                                 $agyElapsed = $turnAgyElapsedMap[$fKey]
@@ -1303,7 +1303,8 @@ function Get-TokenStatsData {
 
                     $estVerVal = if ($hasEstVerCol -and $r['est_ver'] -ne $null -and $r['est_ver'] -ne [DBNull]::Value) { [string]$r['est_ver'] } else { if (-not $hasEstVerCol) { 'v2' } else { $null } }
 
-                    $estVal = if ($p -eq 'direct') { $estDirectVal } elseif ($p -eq 'delegate') { $estDelegateVal } else { $null }
+                    # 위임 턴의 예상은 위임한 일만의 예상으로 맞춘다(실제 d_related 와 같은 범위라서 예상 ÷ 실제가 맞는다)
+                    $estVal = if ($p -eq 'direct') { $estDirectVal } elseif ($p -eq 'delegate') { $(if ($estDelegateVal -ne $null) { & $delegateJobEstimate $r $estDelegateVal } else { $null }) } else { $null }
                     $ratioVal = if ($estVal -ne $null -and $effD -ne $null -and $effD -gt 0) {
                         [Math]::Round($estVal / $effD, 2)
                     } else { $null }
@@ -1445,6 +1446,19 @@ function Get-TokenStatsData {
     }
 }
 
+# 위임한 턴의 예상(est_delegate)을 "위임한 일만의 예상"으로 맞춘다(token-stats.ps1 의 Get-TokenDelegateJobEstimate 와 같은 식. 고치면 함께 고친다).
+function Get-ViewerDelegateJobEstimate([double]$Est, $DTokens, $DRelated, $Calls, $CallsRelated) {
+    $dT = if ($null -ne $DTokens -and $DTokens -ne [DBNull]::Value -and [string]$DTokens -ne '') { [double]$DTokens } else { $null }
+    $dR = if ($null -ne $DRelated -and $DRelated -ne [DBNull]::Value -and [string]$DRelated -ne '') { [double]$DRelated } else { $dT }
+    $other = if ($null -ne $dT -and $null -ne $dR) { [Math]::Max(0.0, $dT - $dR) } else { 0.0 }
+    $job = $Est - $other
+    if ($job -gt 0.0) { return $job }
+    $cAll = if ($null -ne $Calls -and $Calls -ne [DBNull]::Value -and [string]$Calls -ne '') { [double]$Calls } else { 0.0 }
+    $cRel = if ($null -ne $CallsRelated -and $CallsRelated -ne [DBNull]::Value -and [string]$CallsRelated -ne '') { [double]$CallsRelated } else { $cAll }
+    if ($cAll -gt 0.0) { return $Est * [Math]::Min(1.0, $cRel / $cAll) }
+    return $Est
+}
+
 function Get-ViewerQaRecordsJson([string]$DbPath, [string]$DataDir = "", [long]$Since = 0) {
     if (-not (Test-Path -LiteralPath $DbPath)) { return ('{{{"records":[],"seq":{0},"total":0}}' -f $Since) }
     if (-not (Get-Command Open-AgyDb -ErrorAction SilentlyContinue)) {
@@ -1518,9 +1532,16 @@ function Get-ViewerQaRecordsJson([string]$DbPath, [string]$DataDir = "", [long]$
             $dCols = @($db.Query("PRAGMA table_info(token_turns)", $null) | ForEach-Object { [string]$_['name'] })
             $dExpr = if ($dCols -contains 'd_related') { "COALESCE(d_related, d_tokens)" } else { "d_tokens" }
             $dVerFilter = if ($dCols -contains 'est_ver') { " AND est_ver = 'v2'" } else { "" }
-            $delRows = @($db.Query("SELECT est_delegate, $dExpr AS d FROM token_turns WHERE path = 'delegate' AND est_delegate IS NOT NULL AND $dExpr IS NOT NULL AND $dExpr > 0$dVerFilter", $null))
+            $callsRelSel = if ($dCols -contains 'calls_related') { "calls_related" } else { "NULL AS calls_related" }
+            $dRelSel = if ($dCols -contains 'd_related') { "d_related" } else { "NULL AS d_related" }
+            $delRows = @($db.Query("SELECT est_delegate, $dExpr AS d, d_tokens, $dRelSel, calls, $callsRelSel FROM token_turns WHERE path = 'delegate' AND est_delegate IS NOT NULL AND $dExpr IS NOT NULL AND $dExpr > 0$dVerFilter", $null))
             $delRatiosCal = New-Object System.Collections.ArrayList
-            foreach ($dr in $delRows) { if ([double]$dr['d'] -gt 0) { [void]$delRatiosCal.Add([double]$dr['est_delegate'] / [double]$dr['d']) } }
+            foreach ($dr in $delRows) {
+                if ([double]$dr['d'] -gt 0) {
+                    $jobEstQa = Get-ViewerDelegateJobEstimate ([double]$dr['est_delegate']) $dr['d_tokens'] $dr['d_related'] $dr['calls'] $dr['calls_related']
+                    [void]$delRatiosCal.Add($jobEstQa / [double]$dr['d'])
+                }
+            }
             if ($delRatiosCal.Count -ge 5) {
                 $dm = Get-TokenMedianValue $delRatiosCal
                 if ($dm -ne $null) { $ratioDelegateCal = [Math]::Max(0.2, [Math]::Min(5.0, [double]$dm)) }
