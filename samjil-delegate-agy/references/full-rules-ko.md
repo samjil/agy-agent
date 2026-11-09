@@ -508,7 +508,7 @@ powershell.exe -NoProfile -File "$USERPROFILE\.samjil\delegate-agy\scripts\submi
 
 [4. 검증 및 답변 형식 (DIGEST)]
 - 검증 명령: <실행할 테스트/타입체크/빌드 명령어>
-  - 이 PC 처럼 백신이 PowerShell 연쇄 실행을 오탐해 종료시키는 환경(2026-11-05 AhnLab V3, `Execution/MDP.Powershell`)에서는 검증에 `tests\run-all.ps1 -Fast` 를 쓰게 하고 e2e·긴 시험은 위임 안에서 돌리지 않게 한다. 전체 시험은 위임이 끝난 뒤 Claude 가 한 번만 돌린다.
+  - 백신이 PowerShell 연쇄 실행을 오탐해 종료시키는 환경에서는 검증에 빠른 시험만 쓰게 하고 e2e·긴 시험은 위임 안에서 돌리지 않게 한다. 전체 시험은 위임이 끝난 뒤 Claude 가 한 번만 돌린다.
 - 보고 형식: 상세 실행 로그가 길면 `<보고서 경로>`에 따로 적고, 최종 답변 본문에는 [상태 · 변경 파일:줄 · 테스트/검증 실측 1줄 요약 · 우려 사항]만 간결하게 작성할 것.
 CLAUDE_TASK_EOF
 ```

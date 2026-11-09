@@ -192,7 +192,7 @@ function Invoke-Migrate {
     Write-Host ("이전을 마쳤습니다: 끝난 기록 {0}건, 사용량만 있는 작업 {1}건, 세션 {2}건" -f $records.Count, $usageIds.Count, $expectSess) -ForegroundColor Green
     Info ("  건너뜀 - 깨진 줄 {0}, 작업 ID 없는 줄 {1}, 중복 {2}, 깨진 세션 {3}" -f $broken, $noId, $dupes, $brokenSessions)
     Info "  원본 보관: $legacy"
-    Info "  다음: 설치본을 동기화하고(sync-installed.ps1) 워처·뷰어를 다시 켜세요."
+    Info "  다음: 워처·뷰어를 다시 켜세요(설치본이 오래됐다면 install.ps1 을 먼저 다시 실행)."
 }
 
 function Invoke-Rollback {
