@@ -1,0 +1,502 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>Agy Agent</title>
+<link rel="icon" type="image/png" sizes="64x64" href="favicon-64.png?v=8">
+<link rel="icon" type="image/png" sizes="32x32" href="favicon-32.png?v=8">
+<link rel="icon" type="image/png" sizes="16x16" href="favicon-16.png?v=8">
+<link rel="apple-touch-icon" sizes="180x180" href="apple-touch-icon.png?v=8">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+KR:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+<link rel="stylesheet" id="hljs-dark" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css">
+<link rel="stylesheet" id="hljs-light" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github.min.css" disabled>
+<!-- 화면 테마(시스템 따라가기 / 라이트 / 다크)를 첫 그리기 전에 정한다. 늦게 정하면 어두운 화면이 번쩍 보였다 바뀐다.
+     같은 규칙이 app.js 의 resolveTheme 에도 있다(tests/viewer/theme.tests.js 가 둘을 같이 확인한다). -->
+<script id="theme-init">
+(function () {
+  var pref = "system";
+  try { var v = localStorage.getItem("samjil-viewer-theme"); if (v === "light" || v === "dark") { pref = v; } } catch (e) {}
+  var light = false;
+  try { light = Boolean(window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches); } catch (e) {}
+  var theme = pref === "system" ? (light ? "light" : "dark") : pref;
+  var root = document.documentElement;
+  root.setAttribute("data-theme", theme);
+  root.setAttribute("data-theme-pref", pref);
+  document.getElementById("hljs-dark").disabled = (theme !== "dark");
+  document.getElementById("hljs-light").disabled = (theme !== "light");
+})();
+</script>
+<link rel="stylesheet" href="style.css?v=74">
+</head>
+<body>
+  <!-- 단색 선 아이콘 모음. 이모지 대신 써서 OS마다 모양이 달라지지 않게 한다. -->
+  <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
+    <symbol id="i-home" viewBox="0 0 24 24"><path d="M4 11.5 12 5l8 6.5"/><path d="M6.5 10v9h11v-9"/></symbol>
+    <symbol id="i-delegate" viewBox="0 0 24 24"><path d="M4 7h10"/><path d="M4 12h7"/><path d="M4 17h10"/><path d="m15 9 4 3-4 3"/></symbol>
+    <symbol id="i-handoff" viewBox="0 0 24 24"><path d="M5 8h12l-3-3"/><path d="M19 16H7l3 3"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m14 6-6 6 6 6"/></symbol>
+    <symbol id="i-theme-system" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="11" rx="2"/><path d="M9 20h6"/><path d="M12 16v4"/></symbol>
+    <symbol id="i-theme-light" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.5"/><path d="M12 4v2"/><path d="M12 18v2"/><path d="M4 12h2"/><path d="M18 12h2"/><path d="m6.3 6.3 1.4 1.4"/><path d="m16.3 16.3 1.4 1.4"/><path d="m17.7 6.3-1.4 1.4"/><path d="m7.7 16.3-1.4 1.4"/></symbol>
+    <symbol id="i-theme-dark" viewBox="0 0 24 24"><path d="M19 14.5A7 7 0 0 1 9.5 5a7 7 0 1 0 9.5 9.5Z"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M19 12a7 7 0 1 1-2.05-4.95"/><path d="M19 5v4h-4"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="m20 20-4.5-4.5"/></symbol>
+    <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16"/><path d="M4 12h16"/><path d="M4 17h16"/></symbol>
+    <symbol id="i-thread" viewBox="0 0 24 24"><path d="M6 5v14"/><circle cx="6" cy="5" r="1.5"/><circle cx="6" cy="19" r="1.5"/><path d="M10 9h8"/><path d="M10 15h6"/></symbol>
+    <symbol id="i-feed" viewBox="0 0 24 24"><path d="M5 6h14"/><path d="M5 12h14"/><path d="M5 18h9"/></symbol>
+    <symbol id="i-single" viewBox="0 0 24 24"><path d="M7 4h7l4 4v12H7z"/><path d="M14 4v4h4"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M4 7h6l2 2h8v9H4z"/></symbol>
+    <symbol id="i-chart" viewBox="0 0 24 24"><path d="M4 19h16"/><path d="M7 16v-4"/><path d="M12 16V8"/><path d="M17 16v-6"/></symbol>
+    <symbol id="i-hourglass" viewBox="0 0 24 24"><path d="M5 4h14"/><path d="M5 20h14"/><path d="M7 4v4.5l5 3.5-5 3.5V20"/><path d="M17 4v4.5l-5 3.5 5 3.5V20"/></symbol>
+  </svg>
+
+  <div class="app-container" id="app-container">
+    <!-- 좌측 사이드바 -->
+    <aside class="app-sidebar" id="app-sidebar">
+      <div class="sidebar-header">
+        <a href="#/dashboard" class="sidebar-brand" id="sidebar-brand" title="홈(대시보드)으로 이동">
+          <span class="brand-mark" aria-hidden="true"><img class="brand-logo" src="logo.png?v=9" alt="Agy Agent 로고" width="32" height="32"></span>
+          <div class="brand-info">
+            <span class="brand-title">Agy Agent</span>
+            <span class="brand-sub">위임과 협의 기록</span>
+          </div>
+        </a>
+        <button id="sidebar-collapse-btn" class="icon-btn sidebar-toggle-btn" title="사이드바 접기/펼치기" aria-label="사이드바 접기">
+          <svg class="icon"><use href="#i-chevron"/></svg>
+        </button>
+      </div>
+
+      <!-- 1차 네비게이션 -->
+      <nav class="sidebar-primary-nav" role="tablist">
+        <button class="nav-item active" data-nav="dashboard" id="nav-btn-dashboard" role="tab" aria-selected="true" title="대시보드">
+          <svg class="icon nav-icon"><use href="#i-home"/></svg>
+          <span class="nav-label">대시보드</span>
+        </button>
+        <button class="nav-item" data-nav="stats" id="nav-btn-stats" role="tab" aria-selected="false" title="통계">
+          <svg class="icon nav-icon"><use href="#i-chart"/></svg>
+          <span class="nav-label">통계</span>
+        </button>
+        <button class="nav-item" data-nav="qa" id="nav-btn-qa" role="tab" aria-selected="false" title="에이전트 위임">
+          <svg class="icon nav-icon"><use href="#i-delegate"/></svg>
+          <span class="nav-label">에이전트 위임</span>
+        </button>
+        <button class="nav-item" data-nav="handoff" id="nav-btn-handoff" role="tab" aria-selected="false" title="에이전트 협의">
+          <svg class="icon nav-icon"><use href="#i-handoff"/></svg>
+          <span class="nav-label">에이전트 협의</span>
+        </button>
+      </nav>
+
+      <!-- 2차 컨텍스트 패널 -->
+      <div class="sidebar-sub-section" id="sidebar-sub-section">
+        <!-- 1) 대시보드: 최근 세션 바로가기 -->
+        <div class="sub-panel" id="sidebar-sub-dashboard">
+          <div class="sub-panel-header">
+            <span class="sub-panel-title">최근 세션</span>
+          </div>
+          <div class="quick-links-list" id="quick-sessions-list">
+            <span class="empty-hint">불러오는 중</span>
+          </div>
+        </div>
+
+        <!-- 2) 에이전트 위임: 세션 목록 -->
+        <div class="sub-panel" id="sidebar-sub-qa" style="display: none;">
+          <div class="sub-panel-header">
+            <span class="sub-panel-title">프로젝트</span>
+            <span class="sub-panel-count" id="qa-session-count">0</span>
+          </div>
+
+          <div class="sub-search-wrap">
+            <input type="search" id="qa-session-search" placeholder="프로젝트 이름으로 찾기" autocomplete="off" aria-label="프로젝트 검색">
+          </div>
+
+          <div class="sub-filters-row">
+            <select id="modelfilter" title="모델 필터" aria-label="모델 필터">
+              <option value="">모든 모델</option>
+            </select>
+            <select id="statusfilter" title="상태 필터" aria-label="상태 필터">
+              <option value="">모든 상태</option>
+              <option value="OK">성공만</option>
+              <option value="ERROR">실패만</option>
+            </select>
+          </div>
+          <div class="sub-sort-row"><label for="qa-tree-sort">정렬</label><select id="qa-tree-sort" aria-label="프로젝트 정렬"></select></div>
+          <div class="tree-time-legend" aria-label="시각 표시: 앞은 세션, 뒤는 위임"><span><i class="tt-dot tt-session"></i>세션 시각</span><span><i class="tt-dot tt-agy"></i>위임 시각</span></div>
+
+          <div class="project-list-wrap" id="qa-session-list" role="list"></div>
+        </div>
+
+        <!-- 3) 에이전트 협의: 프로젝트 목록 -->
+        <div class="sub-panel" id="sidebar-sub-handoff" style="display: none;">
+          <div class="sub-panel-header">
+            <span class="sub-panel-title">프로젝트</span>
+            <span class="sub-panel-count" id="handoff-project-count">0</span>
+          </div>
+
+          <div class="sub-search-wrap">
+            <input type="search" id="handoff-project-search" placeholder="프로젝트·세션 이름으로 찾기" autocomplete="off" aria-label="프로젝트 검색">
+          </div>
+
+          <div class="sub-filters-row">
+            <select id="handoff-dir-filter" title="방향 필터" aria-label="방향 필터">
+              <option value="">모든 방향</option>
+              <option value="c2a">Claude → agy</option>
+              <option value="a2c">agy → Claude</option>
+            </select>
+            <select id="handoff-status-filter" title="상태 필터" aria-label="상태 필터">
+              <option value="">모든 상태</option>
+              <option value="보냄">보냄</option>
+              <option value="읽음">읽음</option>
+              <option value="처리됨">처리됨</option>
+              <option value="확인함">확인함</option>
+              <option value="보류">보류</option>
+            </select>
+          </div>
+          <div class="sub-sort-row"><label for="handoff-tree-sort">정렬</label><select id="handoff-tree-sort" aria-label="프로젝트 정렬"></select></div>
+          <div class="tree-time-legend" aria-label="시각 표시: 앞은 세션, 뒤는 협의"><span><i class="tt-dot tt-session"></i>세션 시각</span><span><i class="tt-dot tt-agy"></i>협의 시각</span></div>
+
+          <div class="project-list-wrap" id="handoff-project-list" role="list">
+            <p class="empty-hint">프로젝트 불러오는 중</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- 사이드바 하단: 워처 상태와 갱신 -->
+      <div class="sidebar-footer">
+        <div class="watcher-status-card" id="watcher-status-card" title="agy 워처 상태">
+          <span class="status-pulse-dot" id="watcher-pulse-dot"></span>
+          <span class="status-text" id="watcher-status-text">워처 확인 중</span>
+          <button type="button" id="watcher-start" class="watcher-start-btn" title="워처를 지금 켭니다 (창 없이 실행)" hidden>켜기</button>
+        </div>
+        <p class="watcher-start-msg" id="watcher-start-msg" role="status" aria-live="polite" hidden></p>
+        <div class="theme-switch" id="theme-switch" role="group" aria-label="화면 테마">
+          <button type="button" data-theme-pref="system" aria-pressed="true" title="기기의 라이트/다크 설정을 따라갑니다(기본)"><svg class="icon"><use href="#i-theme-system"/></svg><span>시스템</span></button>
+          <button type="button" data-theme-pref="light" aria-pressed="false" title="항상 라이트 모드"><svg class="icon"><use href="#i-theme-light"/></svg><span>라이트</span></button>
+          <button type="button" data-theme-pref="dark" aria-pressed="false" title="항상 다크 모드"><svg class="icon"><use href="#i-theme-dark"/></svg><span>다크</span></button>
+        </div>
+        <div class="sidebar-controls">
+          <label class="auto-refresh-label" title="5초마다 자동 갱신">
+            <input type="checkbox" id="autorefresh" checked> 5초마다 갱신
+          </label>
+          <button id="refresh" class="icon-btn sidebar-refresh-btn" title="지금 새로고침" aria-label="지금 새로고침">
+            <svg class="icon"><use href="#i-refresh"/></svg>
+          </button>
+        </div>
+        <p class="sidebar-note"><code>127.0.0.1</code> 전용. <code>~/.samjil/</code>의 기록을 읽기만 합니다.</p>
+      </div>
+    </aside>
+
+    <!-- 우측 메인 영역 -->
+    <div class="app-main-layout">
+      <header class="app-topbar">
+        <div class="topbar-left">
+          <button id="topbar-menu-toggle" class="icon-btn topbar-menu-toggle" title="사이드바 열기/닫기" aria-label="메뉴 열기">
+            <svg class="icon"><use href="#i-menu"/></svg>
+          </button>
+          <div class="topbar-breadcrumb">
+            <span class="breadcrumb-item" id="topbar-category">홈</span>
+            <span class="breadcrumb-sep" aria-hidden="true">/</span>
+            <span class="breadcrumb-item active" id="topbar-current">대시보드</span>
+          </div>
+        </div>
+        <div class="topbar-right">
+          <span id="topbar-count" class="topbar-count">불러오는 중</span>
+          <span id="topbar-updated" class="topbar-updated"></span>
+        </div>
+      </header>
+
+      <main class="main-content-scroll" id="main-content-scroll">
+        <!-- =============================================================== -->
+        <!-- 1. 대시보드: 지금 / 확인 필요 / 최근 활동 / 누적 통계             -->
+        <!-- =============================================================== -->
+        <section id="view-dashboard" class="view-panel active">
+          <div class="dash">
+            <!-- 지금: 이 화면에서 유일하게 강한 요소 -->
+            <section class="now" id="dash-now" data-state="loading" aria-live="polite">
+              <div class="now-status">
+                <span class="now-dot" aria-hidden="true"></span>
+                <span id="now-status-text">상태 확인 중</span>
+                <span class="now-aside" id="now-aside"></span>
+              </div>
+              <p class="now-title" id="now-title">잠시만 기다려 주세요</p>
+              <div class="now-meta" id="now-meta"></div>
+              <div class="outcome-strip" id="outcome-strip" aria-label="최근 위임 결과"></div>
+            </section>
+
+            <section class="dash-block">
+              <header class="dash-block-head">
+                <h2>확인 필요</h2>
+                <span class="dash-count" id="dash-attention-count"></span>
+              </header>
+              <ol class="row-list" id="dash-attention"></ol>
+            </section>
+
+            <section class="dash-block">
+              <header class="dash-block-head">
+                <h2>최근 활동</h2>
+                <div class="dash-links">
+                  <button class="text-btn" id="btn-view-all-qa">위임 기록 전체</button>
+                  <button class="text-btn" id="btn-view-all-handoff">협의 전체</button>
+                </div>
+              </header>
+              <ol class="row-list" id="dash-timeline"></ol>
+            </section>
+
+            <section class="dash-block">
+              <header class="dash-block-head">
+                <h2>누적</h2>
+              </header>
+              <dl class="stat-line" id="dash-stats"></dl>
+              <div class="model-bars" id="model-bars-container"></div>
+            </section>
+          </div>
+        </section>
+
+        <!-- =============================================================== -->
+        <!-- 2. 토큰·위임 통계                                               -->
+        <!-- =============================================================== -->
+        <section id="view-stats" class="view-panel" style="display: none;">
+          <div class="stats-page-container">
+            <!-- 1) 헤더 및 컨트롤 -->
+            <header class="stats-header">
+              <div class="stats-header-title-wrap">
+                <h2 class="stats-page-title">토큰·위임 통계</h2>
+                <span class="stats-updated-text" id="stats-updated-time">갱신: -</span>
+              </div>
+              <div class="stats-header-controls">
+                <div class="stats-days-segment" role="group" aria-label="기간 선택">
+                  <button type="button" class="segment-btn" data-days="7">7일</button>
+                  <button type="button" class="segment-btn active" data-days="30">30일</button>
+                  <button type="button" class="segment-btn" data-days="60">60일</button>
+                </div>
+                <button type="button" id="stats-refresh-btn" class="stats-action-btn">지금 갱신</button>
+                <label class="stats-toggle-label">
+                  <input type="checkbox" id="stats-table-toggle"> 표로 보기
+                </label>
+              </div>
+            </header>
+
+            <!-- 수집 모드 안내 띠 (active 일 때만 표시) -->
+            <div id="stats-collect-banner" class="stats-collect-banner" style="display: none;">
+              <div class="stats-collect-head">
+                <span class="stats-collect-title" id="stats-collect-title">수집 중 · 위임 표본 0/20</span>
+                <span class="stats-collect-desc" id="stats-collect-desc">일정 수준이 모일 때까지 위임을 우선합니다. 20건이 되면 이 표시가 사라지고 보정식이 이 PC 의 패턴으로 바뀝니다.</span>
+              </div>
+              <div class="stats-collect-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                <div class="stats-collect-fill" id="stats-collect-fill" style="width: 0%;"></div>
+              </div>
+            </div>
+
+            <!-- 빈 상태 안내 -->
+            <div id="stats-empty-state" class="stats-empty-card" style="display: none;">
+              <p class="stats-empty-msg">아직 모인 통계가 없습니다. 위임이나 직접 처리 답변 끝에 '예상 토큰'이 적히면 다음 갱신 때 여기에 쌓입니다.<br>위임을 20건 하면 보정식이 이 PC 에 맞춰집니다.</p>
+              <button type="button" id="stats-empty-refresh-btn" class="stats-action-btn">지금 갱신</button>
+            </div>
+
+            <!-- 데이터 본문 영역 -->
+            <div id="stats-content-wrap">
+              <!-- 2) 헤드라인 -->
+              <section class="stats-headline-card">
+                <div class="stats-headline-hero">
+                  <span class="stats-hero-label">토큰 증감 (직접 대비, 추정)</span>
+                  <div class="stats-hero-number stats-loading" id="stats-hero-saved">불러오는 중…</div>
+                  <p class="stats-hero-sub" id="stats-hero-desc">최근 30일 · 불러오는 중…</p>
+                </div>
+                <div class="stats-headline-divider" aria-hidden="true"></div>
+                <div class="stats-headline-summary">
+                  <div class="stats-summary-line" id="stats-sum-success">위임 성공률 -</div>
+                  <div class="stats-summary-line" id="stats-sum-accuracy">예상 정확도 -</div>
+                  <div class="stats-summary-line" id="stats-sum-formula">표본 0턴 · 보정식 -</div>
+                  <div class="stats-summary-line" id="stats-sum-cache" style="display: none;"></div>
+                  <div class="stats-summary-line" id="stats-sum-time">처리 시간 -</div>
+                </div>
+              </section>
+
+              <!-- 3) 차트 1: 위임 성공·실패 -->
+              <section class="stats-card" id="card-chart-tasks">
+                <div class="stats-card-head">
+                  <h3 class="stats-card-title">위임 성공·실패</h3>
+                  <div class="stats-legend">
+                    <span class="legend-item"><span class="legend-swatch ok"></span>성공</span>
+                    <span class="legend-item"><span class="legend-swatch err"></span>실패</span>
+                  </div>
+                </div>
+                <div class="stats-chart-viewport" id="chart-tasks-view"></div>
+                <div class="stats-table-viewport" id="table-tasks-view" style="display: none;"></div>
+              </section>
+
+              <!-- 4) 차트 2: 토큰 증감(+ 증가·더 소모 / - 감소·절약) -->
+              <section class="stats-card" id="card-chart-savings">
+                <div class="stats-card-head">
+                  <h3 class="stats-card-title">토큰 증감 (직접 대비, 추정)</h3>
+                  <div class="stats-legend">
+                    <span class="legend-item"><span class="legend-swatch ok"></span>- 감소(절약)</span>
+                    <span class="legend-item"><span class="legend-swatch err"></span>+ 증가(더 소모)</span>
+                    <span class="legend-item"><span class="legend-line cum"></span>누적</span>
+                  </div>
+                </div>
+                <div class="stats-chart-viewport" id="chart-savings-view"></div>
+                <div class="stats-table-viewport" id="table-savings-view" style="display: none;"></div>
+              </section>
+
+              <!-- 5) 차트 3: 예상은 얼마나 맞았나 -->
+              <section class="stats-card" id="card-chart-accuracy">
+                <div class="stats-card-head">
+                  <h3 class="stats-card-title">예상은 얼마나 맞았나</h3>
+                  <div class="stats-legend">
+                    <span class="legend-item"><span class="legend-line claude"></span>직접</span>
+                    <span class="legend-item"><span class="legend-line agy"></span>위임</span>
+                    <span class="legend-item"><span class="legend-line dashed"></span>정확(1.0)</span>
+                  </div>
+                </div>
+                <div class="stats-chart-viewport" id="chart-accuracy-view"></div>
+                <div class="stats-table-viewport" id="table-accuracy-view" style="display: none;"></div>
+              </section>
+
+              <!-- 6) 차트 4: 호출 수와 실제 토큰 -->
+              <section class="stats-card" id="card-chart-scatter">
+                <div class="stats-card-head">
+                  <h3 class="stats-card-title">호출 수와 실제 토큰</h3>
+                  <div class="stats-legend">
+                    <span class="legend-item"><span class="legend-marker circle claude"></span>직접</span>
+                    <span class="legend-item"><span class="legend-marker square agy"></span>위임</span>
+                    <span class="legend-item stats-scatter-crossover" id="stats-scatter-crossover"></span>
+                  </div>
+                </div>
+                <div class="stats-chart-viewport" id="chart-scatter-view"></div>
+                <div class="stats-table-viewport" id="table-scatter-view" style="display: none;"></div>
+              </section>
+
+              <!-- 7) 차트 5: 처리 시간: 예상은 얼마나 맞았나 -->
+              <section class="stats-card" id="card-chart-time-accuracy">
+                <div class="stats-card-head">
+                  <h3 class="stats-card-title">처리 시간: 예상은 얼마나 맞았나</h3>
+                  <div class="stats-legend">
+                    <span class="legend-item"><span class="legend-line claude"></span>직접</span>
+                    <span class="legend-item"><span class="legend-line agy"></span>위임</span>
+                    <span class="legend-item"><span class="legend-line dashed"></span>정확(1.0)</span>
+                  </div>
+                </div>
+                <div class="stats-chart-viewport" id="chart-time-accuracy-view"></div>
+                <div class="stats-table-viewport" id="table-time-accuracy-view" style="display: none;"></div>
+              </section>
+
+              <!-- 8) 표: 최근 20턴 -->
+              <section class="stats-card" id="card-table-recent">
+                <div class="stats-card-head">
+                  <h3 class="stats-card-title">최근 20턴</h3>
+                </div>
+                <div class="stats-recent-table-wrap">
+                  <table class="stats-recent-table" id="stats-recent-table">
+                    <thead>
+                      <tr>
+                        <th title="턴이 시작된 시각(마우스를 올리면 연·초까지 보입니다)">시각</th>
+                        <th title="Claude Code 프로젝트 폴더 이름(마우스를 올리면 전체 이름이 보입니다)">프로젝트</th>
+                        <th title="누가 처리했는지: 직접(Claude가 직접) · 위임(agy에 맡김) · 대화(도구를 부르지 않은 답)">처리 방식</th>
+                        <th class="num" title="그 턴에서 Claude가 부른 도구(파일 읽기·명령 실행 등) 횟수">도구 호출</th>
+                        <th class="num" title="도구를 부를 때마다 대화 전체를 다시 읽은 양(캐시 읽기)의 합. 참고용이고 절약 계산에는 넣지 않습니다">컨텍스트 재읽기</th>
+                        <th class="num" title="답변 끝에 적은, 선택한 처리 방식의 Claude 토큰 예상">예상 토큰</th>
+                        <th class="num" title="그 턴에서 실제로 늘어난 컨텍스트(새로 읽은 것과 쓴 것)">실제 토큰</th>
+                        <th class="num" title="예상 ÷ 실제. 1.0배에 가까울수록 정확하고, 1보다 작으면 예상이 낮았습니다">예상 정확도</th>
+                        <th class="num" title="다른 쪽으로 처리했을 때(예상)와 비교한 토큰 증감(추정). + 는 늘어난 것(더 소모), - 는 줄어든 것(절약)">증감</th>
+                        <th class="num" title="답변 끝에 적은 처리 시간 예상">예상 시간</th>
+                        <th class="num" title="직접: Claude가 일한 시간 · 위임: agy가 처리한 시간">실제 시간</th>
+                        <th class="num" title="그 턴에서 Claude가 일한 시간(사용자 응답을 기다린 긴 빈 구간은 뺌)">Claude 작업 시간</th>
+                      </tr>
+                    </thead>
+                    <tbody id="stats-recent-tbody"></tbody>
+                  </table>
+                </div>
+              </section>
+
+              <p class="stats-footnote">증감은 실제 사용량에서 위임한 일을 직접 했다면(또는 직접 한 일을 위임했다면)의 예상을 뺀 추정값입니다. + 는 늘어난 것(더 소모), - 는 줄어든 것(절약)입니다. 한 턴에 설계·검토가 섞이면 위임 비용이 부풀고, 위임하는 일은 원래 큰 일이라 선택 편향이 있어 실제와 다를 수 있습니다.</p>
+            </div>
+
+            <!-- Hover Tooltip -->
+            <div id="stats-tooltip" class="stats-tooltip" style="display: none;" role="tooltip"></div>
+          </div>
+        </section>
+
+        <!-- =============================================================== -->
+        <!-- 3. 에이전트 위임                                                -->
+        <!-- =============================================================== -->
+        <section id="view-qa" class="view-panel" style="display: none;">
+          <div class="detail-session-header" id="qa-detail-header">
+            <div class="session-header-top">
+              <div class="session-title-wrap">
+                <h2 class="session-main-title" id="qa-current-session-title">전체 세션 피드</h2>
+                <span class="session-count-tag" id="qa-current-session-count">0건</span>
+              </div>
+              <label class="session-search-box">
+                <svg class="icon inner-search-icon" aria-hidden="true"><use href="#i-search"/></svg>
+                <input type="search" id="search" placeholder="질문, 답변, 모델, 경로에서 찾기" autocomplete="off" aria-label="현재 목록 검색">
+              </label>
+            </div>
+            <div class="session-meta-chips" id="qa-session-meta-chips">
+              <span class="meta-chip" id="chip-qa-models">모델: 전체</span>
+              <span class="meta-chip" id="chip-qa-status">상태: 전체</span>
+              <span class="meta-chip" id="chip-qa-time">최근 작업: -</span>
+              <span class="meta-chip saved-tokens" id="chip-qa-saved">Claude 토큰 증감: -</span>
+            </div>
+            <div class="qa-session-chips" id="qa-session-chips" role="group" aria-label="agy 세션 고르기" hidden></div>
+          </div>
+
+          <div class="chat-stream-container" id="qa-cards-wrap">
+            <div id="cards"><p class="empty">기록을 불러오는 중입니다.</p></div>
+            <div class="load-more-wrap">
+              <button id="loadmore" hidden>50건 더 보기</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- =============================================================== -->
+        <!-- 3. 에이전트 협의                                             -->
+        <!-- =============================================================== -->
+        <section id="view-handoff" class="view-panel" style="display: none;">
+          <div class="detail-session-header" id="handoff-detail-header">
+            <div class="session-header-top">
+              <div class="session-title-wrap">
+                <h2 class="session-main-title" id="handoff-current-project-title">프로젝트를 선택하세요</h2>
+                <span class="session-count-tag" id="handoff-current-project-count">0개</span>
+              </div>
+              <label class="session-search-box">
+                <svg class="icon inner-search-icon" aria-hidden="true"><use href="#i-search"/></svg>
+                <input type="search" id="handoff-search" placeholder="번호, 제목, 상태에서 찾기" autocomplete="off" aria-label="메시지 검색">
+              </label>
+            </div>
+            <div class="session-meta-chips" id="handoff-session-meta-chips">
+              <span class="party-legend"><i class="party-claude"></i><span id="handoff-legend-claude">Claude 보냄</span></span>
+              <span class="party-legend"><i class="party-agy"></i><span id="handoff-legend-agy">agy 보냄</span></span>
+            </div>
+          </div>
+
+          <div id="handoff-auto-bar" class="auto-bars" style="display: none;" role="status" aria-live="polite"></div>
+
+          <div class="handoff-content-wrap">
+            <details id="handoff-brief-card" class="brief-card" style="display: none;">
+              <summary>
+                <span class="brief-title">프로젝트 맥락 <code><span id="brief-project-name"></span>/BRIEF.md</code></span>
+                <span class="brief-toggle-tip">펼치기</span>
+              </summary>
+              <div id="handoff-brief-content" class="brief-content md"></div>
+            </details>
+
+            <div id="handoff-cards" class="handoff-chat-stream">
+              <p class="empty">프로젝트를 선택해 주세요.</p>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+  <script src="app.js?v=95"></script>
+</body>
+</html>
