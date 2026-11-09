@@ -31,8 +31,8 @@ If `agy` itself is missing or not signed in, the installer says so. The user fix
 
 ## 1. When to delegate
 
-- **Default (on request):** delegate when the user asks ("ask agy", "delegate this", "use agy for the rest") or says delegate mode is on for this conversation.
-- **Always-on:** if the session start context contains `[samjil-delegate-agy]`, the user installed with `-AlwaysOn`: delegate by default for every task.
+- **On request (always applies):** delegate when the user asks ("ask agy", "delegate this", "use agy for the rest") or says delegate mode is on for this conversation.
+- **Always-on (the default install):** if the session start context contains `[samjil-delegate-agy]`, the installer registered the session hook: delegate by default for every task. If that context is missing, the user installed with `-AlwaysOff`: delegate only on request.
 
 ## 2. Who does what
 

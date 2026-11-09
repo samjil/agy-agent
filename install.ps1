@@ -40,9 +40,11 @@ $Uninstall = $false
 $HandoffAutoHook = ($env:SAMJIL_HANDOFF_AUTO_HOOK -eq "1")
 # -Full: the author's complete setup (~/.claude/skills becomes a junction to ~/.agents/skills, Antigravity skills.json,
 #        legacy cleanup, session hook always on). Default (simple): copy the skills into ~/.claude/skills and the runtime
-#        into ~/.samjil, touching nothing else. Env: SAMJIL_FULL=1 / SAMJIL_ALWAYS_ON=1 for `irm | iex`.
+#        into ~/.samjil, plus one SessionStart hook entry in ~/.claude/settings.json (backed up first). Env: SAMJIL_FULL=1 for `irm | iex`.
+# -AlwaysOff: do not register the SessionStart hook (default: registered, so Claude delegates by default in every session)
+#        and remove it if an earlier install registered it. Env: SAMJIL_ALWAYS_OFF=1. (-AlwaysOn is still accepted and means the default.)
 $Full = ($env:SAMJIL_FULL -eq "1")
-$AlwaysOn = ($env:SAMJIL_ALWAYS_ON -eq "1")
+$AlwaysOff = ($env:SAMJIL_ALWAYS_OFF -eq "1")
 $NoStart = $false
 $SkipChecks = $false
 $ReplyLanguage = ""
@@ -53,7 +55,9 @@ if ($args) {
         } elseif ($args[$i] -eq "-Full") {
             $Full = $true
         } elseif ($args[$i] -eq "-AlwaysOn") {
-            $AlwaysOn = $true
+            $AlwaysOff = $false
+        } elseif ($args[$i] -eq "-AlwaysOff") {
+            $AlwaysOff = $true
         } elseif ($args[$i] -eq "-NoStart") {
             $NoStart = $true
         } elseif ($args[$i] -eq "-SkipChecks") {
@@ -67,6 +71,8 @@ if ($args) {
         }
     }
 }
+
+$AlwaysOn = -not $AlwaysOff
 
 if ($Uninstall) {
     $uninstallScript = Join-Path $ScriptDir "uninstall.ps1"
@@ -301,7 +307,14 @@ if (Test-Path $srcRuntime) {
         if (Test-Path $regSession) {
             try { $hookPresent = ((& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $regSession -Check 2>&1 | Out-String).Trim() -eq "PRESENT") } catch {}
         }
-        if ((Test-Path $regSession) -and ($AlwaysOn -or $Full -or $hookPresent)) {
+        if ((Test-Path $regSession) -and $AlwaysOff -and $hookPresent) {
+            try {
+                $offOut = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $regSession -Remove 2>&1 | Out-String).Trim()
+                Write-Host "[+] SessionStart hook removed (-AlwaysOff): $offOut" -ForegroundColor Green
+            } catch {
+                Write-Warning "SessionStart hook removal failed: $_"
+            }
+        } elseif ((Test-Path $regSession) -and $AlwaysOn) {
             try {
                 $sessOut = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $regSession 2>&1 | Out-String).Trim()
                 Write-Host "[+] agy 워처 SessionStart 훅 등록: $sessOut (~/.claude/settings.json)" -ForegroundColor Green
@@ -492,7 +505,8 @@ if (-not $Full) {
     }
     Write-Host "  Skills : ~/.claude/skills/ (samjil-delegate-agy, samjil-handoff, samjil-git-commit)" -ForegroundColor Gray
     Write-Host "  Tools  : ~/.samjil/   Remove skills and tools: Uninstall.cmd" -ForegroundColor Gray
-    if (-not $AlwaysOn) { Write-Host "  Mode   : on request. For delegation in every session run: Install.cmd -AlwaysOn" -ForegroundColor Gray }
+    if ($AlwaysOn) { Write-Host "  Mode   : always on (Claude delegates by default in every session). Switch to on-request: Install.cmd -AlwaysOff" -ForegroundColor Gray }
+    else { Write-Host "  Mode   : on request (-AlwaysOff). Delegation happens when you ask. Switch back: Install.cmd" -ForegroundColor Gray }
     Write-Host "==========================================================" -ForegroundColor Cyan
 }
 
