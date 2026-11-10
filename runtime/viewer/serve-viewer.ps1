@@ -19,7 +19,8 @@ param(
     [int]$Port          = 8787,
     [switch]$NoBrowser  = $false,
     [switch]$NoAgent    = $false,
-    [int]$WatcherCheckSeconds = 60
+    [int]$WatcherCheckSeconds = 60,
+    [switch]$WorkerMode = $false  # 같은 프로세스의 일꾼으로 돌 때. 사용자는 쓰지 않는다
 )
 
 $OutputEncoding = [System.Text.Encoding]::UTF8
@@ -714,6 +715,9 @@ if ($agyProgressLib) { . $agyProgressLib }
 # 번역 캐시 읽기 함수(Read-TranslationCache)도 같이 쓴다. 인자 없이 불러서 함수만 정의된다.
 $processTranslateLib = Find-DelegateScript "sub\process-translate.ps1"
 if ($processTranslateLib) { . $processTranslateLib }
+# 질문마다 예상 기록을 강제하는 규칙(Claude Code PreToolUse HTTP 훅 /api/estimate-guard 가 쓴다). 못 찾으면 그 API 는 항상 통과시킨다.
+$estimateGuardLib = Find-DelegateScript "sub\estimate-guard-lib.ps1"
+if ($estimateGuardLib) { . $estimateGuardLib }
 $tokenStatsLib = Find-DelegateScript "sub\token-stats.ps1"
 if ($tokenStatsLib) {
     $savedRuntimeDir = $RuntimeDir
@@ -866,6 +870,7 @@ function Get-ClaudeLiveTaskInfo {
         $js.MaxJsonLength = [int]::MaxValue
 
         $turnStartIdx = -1
+        $turnStartTs = ""
         for ($i = $firstTaskLineIdx; $i -ge 0; $i--) {
             $l = $lines[$i].Trim()
             if ($l.StartsWith('{"type":"user"') -or $l.StartsWith('{"type": "user"') -or $l -match '"type"\s*:\s*"user"') {
@@ -874,6 +879,7 @@ function Get-ClaudeLiveTaskInfo {
                         $uObj = $js.DeserializeObject($l)
                         if (Test-TokenStatsRealUser $uObj) {
                             $turnStartIdx = $i
+                            $turnStartTs = [string]$uObj['timestamp']
                             break
                         }
                     } catch {}
@@ -908,6 +914,15 @@ function Get-ClaudeLiveTaskInfo {
         $liveMetrics = $null
         if (Get-Command Get-ClaudeLiveTurnMetrics -ErrorAction SilentlyContinue) {
             $liveMetrics = Get-ClaudeLiveTurnMetrics -Lines $turnLines -BaselineCtx $baselineCtx
+        }
+
+        # 결정 시점에 기록한 예상(record-estimate)은 위임을 보내기 전에 이미 정해져 있으므로 진행 중 카드에도 붙인다(답변 끝 예상 줄보다 우선)
+        if ($liveMetrics -is [System.Collections.IDictionary] -and $turnStartTs -and (Get-Command Get-RecordedEstimate -ErrorAction SilentlyContinue)) {
+            # 위임을 보낸 시각(작업 번호 claude_<epoch>_N)까지의 기록 중 그 위임을 보낸 질문의 것(뒤에 다른 질문이 기록해도 바뀌지 않는다)
+            $subTs = ""
+            if ($TaskId -match '^claude_(\d{9,11})_\d+') { $subTs = [DateTimeOffset]::FromUnixTimeSeconds([long]$Matches[1] + 2).UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ss.fffZ") }
+            $recEst = Get-RecordedEstimate $AgyDbPath (Split-Path (Split-Path $matchedFile.FullName -Parent) -Leaf) $turnStartTs $subTs
+            if ($recEst) { foreach ($ek in @($recEst.Keys)) { $ev = $recEst.Item($ek); if ($null -ne $ev) { $liveMetrics.set_Item($ek, $ev) } } }
         }
 
         $fileLwt = (Get-Item -LiteralPath $matchedFile.FullName).LastWriteTimeUtc
@@ -958,12 +973,58 @@ function Get-IsoWeekStringValue([DateTime]$dt) {
     return ("{0:D4}-W{1:D2}" -f $thursday.Year, $weekNum)
 }
 
+# 통계가 오래됐는지: 대화 기록 파일(*.jsonl) 중 가장 늦게 바뀐 시각이 마지막 수집(calibration.json 을 쓴 시각)보다 SlackSec 초 넘게 뒤이면 true.
+# 수집한 적이 없거나(calibration.json 없음) 대화 폴더가 없으면 false(처음 수집은 사용자가 "지금 갱신"으로 한다). 수집기는 끝난 턴만 확정하므로 진행 중이던 턴은 끝난 뒤 이 판정으로 다시 잡힌다.
+# 화면 데이터가 바뀌었는지 가늠하는 도장: 위임 기록(updated_seq) · 질문 행 · 예상 기록 · 작업 연결의 개수와 최댓값 · 합계, 마지막 수집 시각(calibration.json).
+# 같은 도장이면 무거운 API(위임 기록 전체, 토큰 통계)를 다시 만들지 않고 메모리에 둔 응답을 그대로 준다(새 창 · 새로고침이 빨라진다).
+# DB 파일 수정 시각은 워처가 수시로 쓰는 기록 때문에 계속 바뀌어 쓰지 않는다.
+function Get-ViewerDataStamp([string]$DbPath, [string]$DataDir) {
+    try {
+        if (-not (Test-Path -LiteralPath $DbPath)) { return "" }
+        $parts = New-Object System.Collections.ArrayList
+        $sdb = Open-AgyDb $DbPath
+        try {
+            foreach ($q in @(
+                "SELECT MAX(updated_seq) AS a, COUNT(*) AS b, '' AS c FROM tasks",
+                "SELECT COUNT(*) AS a, MAX(turn_ts) AS b, SUM(COALESCE(d_tokens, 0)) + SUM(COALESCE(est_direct, 0)) + SUM(COALESCE(calls, 0)) AS c FROM token_turns",
+                "SELECT MAX(id) AS a, COUNT(*) AS b, '' AS c FROM token_estimates",
+                "SELECT MAX(task_id) AS a, COUNT(*) AS b, '' AS c FROM token_task_links")) {
+                try { foreach ($row in @($sdb.Query($q, $null))) { [void]$parts.Add(("{0}/{1}/{2}" -f $row['a'], $row['b'], $row['c'])) } } catch { [void]$parts.Add("-") }
+            }
+        } finally { $sdb.Dispose() }
+        $cal = New-Object System.IO.FileInfo((Join-Path $DataDir "calibration.json"))
+        if ($cal.Exists) { [void]$parts.Add([string]$cal.LastWriteTimeUtc.Ticks) }
+        return ($parts -join "|")
+    } catch { return "" }
+}
+
+function Test-TokenStatsStale([string]$DataDir, [string]$ClaudeProjectsDir, [double]$SlackSec = 20) {
+    try {
+        if (-not $DataDir -or -not $ClaudeProjectsDir) { return $false }
+        $cal = Join-Path $DataDir "calibration.json"
+        if (-not (Test-Path -LiteralPath $cal) -or -not (Test-Path -LiteralPath $ClaudeProjectsDir)) { return $false }
+        $calTime = (Get-Item -LiteralPath $cal).LastWriteTime
+        $newest = [datetime]::MinValue
+        foreach ($d in @(Get-ChildItem -LiteralPath $ClaudeProjectsDir -Directory -ErrorAction SilentlyContinue)) {
+            foreach ($f in @(Get-ChildItem -LiteralPath $d.FullName -Filter "*.jsonl" -File -ErrorAction SilentlyContinue)) {
+                if ($f.LastWriteTime -gt $newest) { $newest = $f.LastWriteTime }
+            }
+        }
+        return ($newest -gt $calTime.AddSeconds($SlackSec))
+    } catch { return $false }
+}
+
+$script:TokenStatsAggCache = @{}
+
 function Get-TokenStatsData {
     param(
         [string]$DbPath = "",
         [string]$DataDir = "",
         [int]$Days = 30,
-        [DateTime]$Now = [DateTime]::MinValue
+        [DateTime]$Now = [DateTime]::MinValue,
+        [int]$RecentPage = 1,
+        [int]$RecentPageSize = 20,
+        [string]$RecentPath = ""
     )
 
     if ($Days -ne 7 -and $Days -ne 30 -and $Days -ne 60) {
@@ -972,41 +1033,55 @@ function Get-TokenStatsData {
     if ($Now -eq [DateTime]::MinValue) {
         $Now = [DateTime]::Now
     }
+    if ($RecentPageSize -lt 1) {
+        $RecentPageSize = 1
+    } elseif ($RecentPageSize -gt 100) {
+        $RecentPageSize = 100
+    }
+    if ($RecentPath -ne 'direct' -and $RecentPath -ne 'delegate' -and $RecentPath -ne 'chat') {
+        $RecentPath = ""
+    }
+    if ($RecentPage -lt 1) {
+        $RecentPage = 1
+    }
 
     $endDate = $Now.Date
     $startDate = $endDate.AddDays(-($Days - 1))
 
-    $dailyMap = [ordered]@{}
-    $cur = $startDate
-    while ($cur -le $endDate) {
-        $dStr = $cur.ToString("yyyy-MM-dd")
-        $dailyMap[$dStr] = [ordered]@{
-            date           = $dStr
-            ok             = 0
-            fail           = 0
-            saved          = 0
-            cum_saved      = 0
-            direct_turns   = 0
-            delegate_turns = 0
-        }
-        $cur = $cur.AddDays(1)
+    # 집계 캐시 키: DB 파일, WAL 파일, calibration.json 의 수정 시각과 크기, 기간(days), 기준일(endDate)
+    $dbTicks = 0L; $dbLen = 0L
+    if ($DbPath -and (Test-Path -LiteralPath $DbPath)) {
+        try {
+            $fi = Get-Item -LiteralPath $DbPath
+            $dbTicks = $fi.LastWriteTimeUtc.Ticks
+            $dbLen = $fi.Length
+        } catch {}
     }
-
-    $calObj = $null
-    $updated = $null
+    $walTicks = 0L; $walLen = 0L
+    $walPath = $DbPath + "-wal"
+    if ($DbPath -and (Test-Path -LiteralPath $walPath)) {
+        try {
+            $wfi = Get-Item -LiteralPath $walPath
+            $walTicks = $wfi.LastWriteTimeUtc.Ticks
+            $walLen = $wfi.Length
+        } catch {}
+    }
+    $calTicks = 0L; $calLen = 0L
     if ($DataDir) {
         $calFile = Join-Path $DataDir "calibration.json"
         if (Test-Path -LiteralPath $calFile) {
             try {
-                $rawCal = [System.IO.File]::ReadAllText($calFile, [System.Text.Encoding]::UTF8)
-                $calObj = ConvertFrom-Json -InputObject $rawCal
-                if ($calObj -and $calObj.updated) {
-                    $updated = [string]$calObj.updated
-                }
+                $cfi = Get-Item -LiteralPath $calFile
+                $calTicks = $cfi.LastWriteTimeUtc.Ticks
+                $calLen = $cfi.Length
             } catch {}
         }
     }
+    $cacheKey = "$DbPath|$Days|$($endDate.ToString('yyyy-MM-dd'))|$dbTicks|$dbLen|$walTicks|$walLen|$calTicks|$calLen"
+    $cached = if ($script:TokenStatsAggCache -and $script:TokenStatsAggCache.ContainsKey($cacheKey)) { $script:TokenStatsAggCache[$cacheKey] } else { $null }
 
+    $calObj = $null
+    $updated = $null
     $delegateOk = 0
     $delegateFail = 0
     $directTurns = 0
@@ -1014,83 +1089,145 @@ function Get-TokenStatsData {
     $netSaved = 0
     $ratioDirect = $null
     $ratioDelegate = $null
-    $weeklyMap = [ordered]@{}
+    $summary = $null
+    $dailyList = @()
+    $weeklyList = @()
     $points = New-Object System.Collections.ArrayList
+    $turnAgyElapsedMap = @{}
+    $turnTaskMap = @{}
     $recent = New-Object System.Collections.ArrayList
+    $recentTotal = 0
+    $recentPages = 1
+    $hasTurns = $false
+
+    if ($cached) {
+        $summary           = $cached.summary
+        $dailyList         = $cached.daily
+        $weeklyList        = $cached.weekly_accuracy
+        $points            = $cached.points
+        $calObj            = $cached.calibration
+        $updated           = $cached.updated
+        $turnAgyElapsedMap = $cached.turnAgyElapsedMap
+        $turnTaskMap       = $cached.turnTaskMap
+        $hasTurns          = $cached.hasTurns
+    } else {
+        $dailyMap = [ordered]@{}
+        $cur = $startDate
+        while ($cur -le $endDate) {
+            $dStr = $cur.ToString("yyyy-MM-dd")
+            $dailyMap[$dStr] = [ordered]@{
+                date           = $dStr
+                ok             = 0
+                fail           = 0
+                saved          = 0
+                cum_saved      = 0
+                direct_turns   = 0
+                delegate_turns = 0
+            }
+            $cur = $cur.AddDays(1)
+        }
+        if ($DataDir) {
+            $calFile = Join-Path $DataDir "calibration.json"
+            if (Test-Path -LiteralPath $calFile) {
+                try {
+                    $rawCal = [System.IO.File]::ReadAllText($calFile, [System.Text.Encoding]::UTF8)
+                    $calObj = ConvertFrom-Json -InputObject $rawCal
+                    if ($calObj -and $calObj.updated) {
+                        $updated = [string]$calObj.updated
+                    }
+                } catch {}
+            }
+        }
+        $weeklyMap = [ordered]@{}
+    }
 
     if ($DbPath -and (Test-Path -LiteralPath $DbPath) -and (Get-Command Open-AgyDb -ErrorAction SilentlyContinue)) {
         $db = $null
         try {
             $db = Open-AgyDb $DbPath
 
-            # 1) tasks 표: 위임 성공/실패 집계
-            $hasTasks = $false
+            # 정렬 및 필터 가속을 위한 인덱스 보장
             try {
-                [void]$db.Query("SELECT 1 FROM tasks LIMIT 1", $null)
-                $hasTasks = $true
+                [void]$db.Execute("CREATE INDEX IF NOT EXISTS idx_token_turns_ts ON token_turns(turn_ts DESC)", $null)
+                [void]$db.Execute("CREATE INDEX IF NOT EXISTS idx_token_turns_path_ts ON token_turns(path, turn_ts DESC)", $null)
             } catch {}
 
-            if ($hasTasks) {
-                $taskRows = @($db.Query("SELECT timestamp, status FROM tasks", $null))
-                foreach ($tr in $taskRows) {
-                    $ldt = ConvertTo-LocalDateValue ([string]$tr['timestamp'])
-                    if ($ldt -and $ldt.Date -ge $startDate -and $ldt.Date -le $endDate) {
-                        $dStr = $ldt.ToString("yyyy-MM-dd")
-                        $st = [string]$tr['status']
-                        $isOk = ($st -eq 'OK')
-                        if ($dailyMap.Contains($dStr)) {
-                            if ($isOk) { $dailyMap[$dStr].ok++ } else { $dailyMap[$dStr].fail++ }
+            if (-not $cached) {
+                # 1) tasks 표: 위임 성공/실패 집계
+                $hasTasks = $false
+                try {
+                    [void]$db.Query("SELECT 1 FROM tasks LIMIT 1", $null)
+                    $hasTasks = $true
+                } catch {}
+
+                if ($hasTasks) {
+                    $taskRows = @($db.Query("SELECT timestamp, status FROM tasks", $null))
+                    foreach ($tr in $taskRows) {
+                        $ldt = ConvertTo-LocalDateValue ([string]$tr['timestamp'])
+                        if ($ldt -and $ldt.Date -ge $startDate -and $ldt.Date -le $endDate) {
+                            $dStr = $ldt.ToString("yyyy-MM-dd")
+                            $st = [string]$tr['status']
+                            $isOk = ($st -eq 'OK')
+                            if ($dailyMap.Contains($dStr)) {
+                                if ($isOk) { $dailyMap[$dStr].ok++ } else { $dailyMap[$dStr].fail++ }
+                            }
+                            if ($isOk) { $delegateOk++ } else { $delegateFail++ }
                         }
-                        if ($isOk) { $delegateOk++ } else { $delegateFail++ }
                     }
                 }
             }
 
             # 2) token_turns 표
-            $hasTurns = $false
-            try {
-                [void]$db.Query("SELECT 1 FROM token_turns LIMIT 1", $null)
-                $hasTurns = $true
-            } catch {}
+            if (-not $cached) {
+                try {
+                    [void]$db.Query("SELECT 1 FROM token_turns LIMIT 1", $null)
+                    $hasTurns = $true
+                } catch {}
+            }
 
+            $turnCols = @()
             if ($hasTurns) {
-                $turnCols = @()
                 try {
                     $turnCols = @($db.Query("PRAGMA table_info(token_turns)", $null) | ForEach-Object { [string]$_['name'] })
                 } catch {}
-                $hasEstVerCol = ($turnCols -contains 'est_ver')
-                $hasCrTokensCol = ($turnCols -contains 'cr_tokens')
-                $hasDurSecCol = ($turnCols -contains 'dur_sec')
-                $hasEstTimeDirCol = ($turnCols -contains 'est_time_direct')
-                $hasEstTimeDelCol = ($turnCols -contains 'est_time_delegate')
-                $hasCallsRelatedCol = ($turnCols -contains 'calls_related')
-                $hasDRelatedCol = ($turnCols -contains 'd_related')
+            }
+            $hasEstVerCol = ($turnCols -contains 'est_ver')
+            $hasCrTokensCol = ($turnCols -contains 'cr_tokens')
+            $hasDurSecCol = ($turnCols -contains 'dur_sec')
+            $hasEstTimeDirCol = ($turnCols -contains 'est_time_direct')
+            $hasEstTimeDelCol = ($turnCols -contains 'est_time_delegate')
+            $hasCallsRelatedCol = ($turnCols -contains 'calls_related')
+            $hasDRelatedCol = ($turnCols -contains 'd_related')
+            $hasEndTsCol = ($turnCols -contains 'end_ts')
+            $hasEstKindCol = ($turnCols -contains 'est_kind')
+            $hasChoiceReasonCol = ($turnCols -contains 'choice_reason')
+            $hasChoiceCol = ($turnCols -contains 'choice')
+            $hasLevelCol = ($turnCols -contains 'level')
 
-                # Tasks 연결 표에서 각 턴의 agy 최대 작업 시간 (MAX elapsed_sec) 조회
-                $turnAgyElapsedMap = @{}
-                # 위임 턴의 실제 시간: 위임 카드와 같은 기준(agy 처리 + Claude 쪽). agy 는 그 턴 작업 중 가장 긴 것(동시에 돌면 겹침),
-                # Claude 쪽은 턴 시간 x (위임 관련 호출 / 전체 호출). 둘 다 없으면 $null.
-                $delegateJobEstimate = {
-                    param($row, [double]$fullEst)
-                    $dT = if ($row['d_tokens'] -ne $null -and $row['d_tokens'] -ne [DBNull]::Value) { [double]$row['d_tokens'] } else { $null }
-                    $dR = if ($hasDRelatedCol -and $row['d_related'] -ne $null -and $row['d_related'] -ne [DBNull]::Value) { [double]$row['d_related'] } else { $dT }
-                    $other = if ($dT -ne $null -and $dR -ne $null) { [Math]::Max(0.0, $dT - $dR) } else { 0.0 }
-                    $job = $fullEst - $other
-                    if ($job -gt 0) { return $job }
-                    $cAll = if ($row['calls'] -ne $null -and $row['calls'] -ne [DBNull]::Value) { [double]$row['calls'] } else { 0.0 }
-                    $cRel = if ($hasCallsRelatedCol -and $row['calls_related'] -ne $null -and $row['calls_related'] -ne [DBNull]::Value) { [double]$row['calls_related'] } else { $cAll }
-                    if ($cAll -gt 0) { return $fullEst * [Math]::Min(1.0, $cRel / $cAll) }
-                    return $fullEst
-                }
-                $delegateTotalSec = {
-                    param($row, $agySec)
-                    $cAll = if ($row['calls'] -ne $null -and $row['calls'] -ne [DBNull]::Value) { [double]$row['calls'] } else { 0.0 }
-                    $cRel = if ($hasCallsRelatedCol -and $row['calls_related'] -ne $null -and $row['calls_related'] -ne [DBNull]::Value) { [double]$row['calls_related'] } else { $cAll }
-                    $dur = if ($hasDurSecCol -and $row['dur_sec'] -ne $null -and $row['dur_sec'] -ne [DBNull]::Value) { [double]$row['dur_sec'] } else { $null }
-                    $cl = if ($dur -ne $null -and $cAll -gt 0) { $dur * [Math]::Min(1.0, $cRel / $cAll) } else { $null }
-                    if ($agySec -eq $null -and $cl -eq $null) { return $null }
-                    return [double]$(if ($agySec -ne $null) { $agySec } else { 0.0 }) + [double]$(if ($cl -ne $null) { $cl } else { 0.0 })
-                }
+            # Tasks 연결 표에서 각 턴의 agy 최대 작업 시간 (MAX elapsed_sec) 조회
+            # 위임 턴의 실제 시간: 위임 카드와 같은 기준(agy 처리 + Claude 쪽). agy 는 그 턴 작업 중 가장 긴 것(동시에 돌면 겹침),
+            # Claude 쪽은 턴 시간 x (위임 관련 호출 / 전체 호출). 둘 다 없으면 $null.
+            # 예상은 질문을 받을 때 정해 기록한 값 그대로 쓴다(위임/직접 결정의 근거라 나중에 바뀌면 안 된다). 예전에는 턴 전체 예상에서
+            # 위임과 무관한 작업의 실측을 빼 "위임한 일만의 예상"으로 맞췄지만, 통계 단위가 질문이 된 뒤로는 결정 시점 값을 그대로 비교한다.
+            $delegateJobEstimate = {
+                param($row, [double]$fullEst)
+                return $fullEst
+            }
+            $delegateJobTimeEstimate = {
+                param($row, [double]$fullEst)
+                return $fullEst
+            }
+            $delegateTotalSec = {
+                param($row, $agySec)
+                $cAll = if ($row['calls'] -ne $null -and $row['calls'] -ne [DBNull]::Value) { [double]$row['calls'] } else { 0.0 }
+                $cRel = if ($hasCallsRelatedCol -and $row['calls_related'] -ne $null -and $row['calls_related'] -ne [DBNull]::Value) { [double]$row['calls_related'] } else { $cAll }
+                $dur = if ($hasDurSecCol -and $row['dur_sec'] -ne $null -and $row['dur_sec'] -ne [DBNull]::Value) { [double]$row['dur_sec'] } else { $null }
+                $cl = if ($dur -ne $null -and $cAll -gt 0) { $dur * [Math]::Min(1.0, $cRel / $cAll) } else { $null }
+                if ($agySec -eq $null -and $cl -eq $null) { return $null }
+                return [double]$(if ($agySec -ne $null) { $agySec } else { 0.0 }) + [double]$(if ($cl -ne $null) { $cl } else { 0.0 })
+            }
+
+            if (-not $cached -and $hasTurns) {
                 $hasLinks = $false
                 try {
                     [void]$db.Query("SELECT 1 FROM token_task_links LIMIT 1", $null)
@@ -1098,7 +1235,7 @@ function Get-TokenStatsData {
                 } catch {}
                 if ($hasLinks) {
                     try {
-                        $linkElapsedRows = @($db.Query("SELECT l.file, l.turn_ts, MAX(tk.elapsed_sec) AS max_elapsed FROM token_task_links l INNER JOIN tasks tk ON l.task_id = tk.task_id WHERE tk.elapsed_sec IS NOT NULL GROUP BY l.file, l.turn_ts", $null))
+                        $linkElapsedRows = @($db.Query("SELECT l.file, l.turn_ts, MAX(CAST(tk.elapsed_sec AS REAL)) AS max_elapsed FROM token_task_links l INNER JOIN tasks tk ON l.task_id = tk.task_id WHERE tk.elapsed_sec IS NOT NULL GROUP BY l.file, l.turn_ts", $null))
                         foreach ($ler in $linkElapsedRows) {
                             $k = ([string]$ler['file']) + "|" + ([string]$ler['turn_ts'])
                             $turnAgyElapsedMap[$k] = [double]$ler['max_elapsed']
@@ -1243,11 +1380,10 @@ function Get-TokenStatsData {
 
                     $tSaved = $null
                     if ($effD -ne $null) {
+                        # 손익은 위임한 질문만 센다: 절약 = 직접 했을 때의 예상(결정 시점 값) - 위임으로만 쓴 실제 토큰. 화면의 증감은 부호를 뒤집어 보인다.
+                        # 직접 처리한 질문의 토큰은 원래 써야 할 토큰이라 손익과 관계없고, agy 토큰도 넣지 않는다.
                         if ($p -eq 'delegate' -and $estDirectVal -ne $null) {
-                            # 위임 카드와 같은 기준: 턴 예상에서 그 턴의 다른 작업 실측을 빼 위임한 일만의 직접 예상을 구한다(0 이하이면 호출 비율)
-                            $tSaved = [int][Math]::Round((& $delegateJobEstimate $r ($estDirectVal / $effectiveRatioDirect)) - $effD)
-                        } elseif ($p -eq 'direct' -and $estDelegateVal -ne $null) {
-                            $tSaved = [int][Math]::Round(($estDelegateVal / $effectiveRatioDelegate) - $effD)
+                            $tSaved = [int][Math]::Round($estDirectVal) - [int][Math]::Round($effD)
                         }
                     }
                     if ($tSaved -ne $null) {
@@ -1286,8 +1422,50 @@ function Get-TokenStatsData {
                     }
                 }
 
-                # 3) Recent 20 turns overall
-                $recentRows = @($db.Query("SELECT * FROM token_turns ORDER BY turn_ts DESC LIMIT 20", $null))
+                # 3) Recent turns with paging and path filter 준비 (task links)
+                try {
+                    $linkRows = @($db.Query("SELECT file, turn_ts, task_id FROM token_task_links ORDER BY task_id ASC", $null))
+                    foreach ($lr in $linkRows) {
+                        $k = ([string]$lr['file']) + "|" + ([string]$lr['turn_ts'])
+                        if (-not $turnTaskMap.ContainsKey($k)) {
+                            $turnTaskMap[$k] = New-Object System.Collections.ArrayList
+                        }
+                        [void]$turnTaskMap[$k].Add([string]$lr['task_id'])
+                    }
+                } catch {}
+            }
+
+            # 3) Recent turns with paging and path filter
+            if ($hasTurns) {
+                $countSql = "SELECT COUNT(*) AS cnt FROM token_turns"
+                $countArgs = $null
+                if ($RecentPath) {
+                    $countSql += " WHERE path = ?"
+                    $countArgs = [object[]]@($RecentPath)
+                }
+                $cntRows = @($db.Query($countSql, $countArgs))
+                if ($cntRows.Count -gt 0 -and $null -ne $cntRows[0]['cnt'] -and $cntRows[0]['cnt'] -ne [DBNull]::Value) {
+                    $recentTotal = [int]$cntRows[0]['cnt']
+                }
+                $recentPages = [int][Math]::Max(1, [Math]::Ceiling([double]$recentTotal / [double]$RecentPageSize))
+                if ($RecentPage -gt $recentPages) {
+                    $RecentPage = $recentPages
+                }
+                if ($RecentPage -lt 1) {
+                    $RecentPage = 1
+                }
+                $offset = [int64](($RecentPage - 1) * $RecentPageSize)
+
+                $selectSql = "SELECT * FROM token_turns"
+                $selectArgs = $null
+                if ($RecentPath) {
+                    $selectSql += " WHERE path = ? ORDER BY turn_ts DESC LIMIT ? OFFSET ?"
+                    $selectArgs = [object[]]@($RecentPath, [int64]$RecentPageSize, $offset)
+                } else {
+                    $selectSql += " ORDER BY turn_ts DESC LIMIT ? OFFSET ?"
+                    $selectArgs = [object[]]@([int64]$RecentPageSize, $offset)
+                }
+                $recentRows = @($db.Query($selectSql, $selectArgs))
                 foreach ($r in $recentRows) {
                     $p = [string]$r['path']
                     $fKey = ([string]$r['file']) + "|" + ([string]$r['turn_ts'])
@@ -1303,23 +1481,34 @@ function Get-TokenStatsData {
 
                     $estVerVal = if ($hasEstVerCol -and $r['est_ver'] -ne $null -and $r['est_ver'] -ne [DBNull]::Value) { [string]$r['est_ver'] } else { if (-not $hasEstVerCol) { 'v2' } else { $null } }
 
-                    # 위임 턴의 예상은 위임한 일만의 예상으로 맞춘다(실제 d_related 와 같은 범위라서 예상 ÷ 실제가 맞는다)
-                    $estVal = if ($p -eq 'direct') { $estDirectVal } elseif ($p -eq 'delegate') { $(if ($estDelegateVal -ne $null) { & $delegateJobEstimate $r $estDelegateVal } else { $null }) } else { $null }
+                    # 직접 처리했어도 생길 공통분(위임 무관 작업)을 뺀 값끼리 비교한다: 위임 턴은 예상(직접·위임)에서 공통분을 빼고 실제는 위임 관련분(d_related)을 쓴다
+                    $estDirectNet = $estDirectVal
+                    $estDelegateNet = $estDelegateVal
+                    $commonTok = $null
+                    if ($p -eq 'delegate') {
+                        if ($estDirectVal -ne $null) { $estDirectNet = & $delegateJobEstimate $r $estDirectVal }
+                        if ($estDelegateVal -ne $null) { $estDelegateNet = & $delegateJobEstimate $r $estDelegateVal }
+                        if ($dTokensVal -ne $null -and $dRelatedVal -ne $null) { $commonTok = [int][Math]::Max(0.0, $dTokensVal - $dRelatedVal) }
+                    }
+                    $estVal = if ($p -eq 'direct') { $estDirectNet } elseif ($p -eq 'delegate') { $estDelegateNet } else { $null }
                     $ratioVal = if ($estVal -ne $null -and $effD -ne $null -and $effD -gt 0) {
                         [Math]::Round($estVal / $effD, 2)
                     } else { $null }
 
                     $tSaved = $null
                     if ($effD -ne $null) {
-                        if ($p -eq 'delegate' -and $estDirectVal -ne $null) {
-                            # 위임 카드와 같은 기준: 턴 예상에서 그 턴의 다른 작업 실측을 빼 위임한 일만의 직접 예상을 구한다(0 이하이면 호출 비율)
-                            $tSaved = [int][Math]::Round((& $delegateJobEstimate $r ($estDirectVal / $effectiveRatioDirect)) - $effD)
-                        } elseif ($p -eq 'direct' -and $estDelegateVal -ne $null) {
-                            $tSaved = [int][Math]::Round(($estDelegateVal / $effectiveRatioDelegate) - $effD)
+                        if ($p -eq 'delegate' -and $estDirectNet -ne $null) {
+                            # 위임 질문의 증감 = 위임으로만 쓴 실제 - 직접 했을 때의 예상(위임해서 아낀/더 쓴 토큰. 맨 위 손익과 같은 기준)
+                            # 표의 증감은 "실제 - 그 턴이 간 길의 예상"(표에 보이는 값끼리, 보정 비율은 곱하지 않는다): 위임 턴은 공통분을 뺀 예상 위임(표의 위임 칸). 화면의 증감은 saved 의 부호를 뒤집어 보인다
+                            $tSaved = [int][Math]::Round($estDirectNet) - [int][Math]::Round($effD)
+                        } elseif ($p -eq 'direct' -and $estDirectVal -ne $null) {
+                            # 직접 턴: 예상 직접이 얼마나 빗나갔는지(위임 예상과 비교하지 않는다)
+                            $tSaved = [int][Math]::Round($estDirectVal) - [int][Math]::Round($effD)
                         }
                     }
 
                     $crTokensVal = if ($hasCrTokensCol -and $r['cr_tokens'] -ne $null -and $r['cr_tokens'] -ne [DBNull]::Value) { [int]$r['cr_tokens'] } else { $null }
+                    $endTsVal = if ($hasEndTsCol -and $r['end_ts'] -ne $null -and $r['end_ts'] -ne [DBNull]::Value) { [string]$r['end_ts'] } else { $null }
 
                     $estTimeVal = $null
                     if ($p -eq 'direct' -and $hasEstTimeDirCol -and $r['est_time_direct'] -ne $null -and $r['est_time_direct'] -ne [DBNull]::Value) {
@@ -1337,22 +1526,61 @@ function Get-TokenStatsData {
                         $delTotalR = if ($agyForTurn -ne $null) { & $delegateTotalSec $r $agyForTurn } else { $null }
                         if ($delTotalR -ne $null) { $actualTimeVal = [int][Math]::Round($delTotalR) }
                     }
+                    # 위임 질문인데 agy 작업과 연결되지 않아 위임 시간을 모르면(대화 기록에 작업 번호가 안 남은 경우 등) 그 질문에 걸린 시간 전체를 위임 시간으로 본다
+                    $delTimeIsWhole = $false
+                    if ($p -eq 'delegate' -and $null -eq $actualTimeVal -and $null -ne $durSecVal) { $actualTimeVal = $durSecVal; $delTimeIsWhole = $true }
+
+                    # 시간도 같은 기준: 예상 시간(직접·위임)에서 위임 턴은 위임 무관 Claude 시간을 빼고, 증감 = 실제 - 다른 쪽으로 했다면의 예상(+ 늘어남 · - 절약)
+                    $estTimeDirRaw = if ($hasEstTimeDirCol -and $r['est_time_direct'] -ne $null -and $r['est_time_direct'] -ne [DBNull]::Value) { [double]$r['est_time_direct'] } else { $null }
+                    $estTimeDelRaw = if ($hasEstTimeDelCol -and $r['est_time_delegate'] -ne $null -and $r['est_time_delegate'] -ne [DBNull]::Value) { [double]$r['est_time_delegate'] } else { $null }
+                    $estTimeDirNet = $estTimeDirRaw
+                    $estTimeDelNet = $estTimeDelRaw
+                    if ($p -eq 'delegate') {
+                        if ($estTimeDirRaw -ne $null) { $estTimeDirNet = & $delegateJobTimeEstimate $r $estTimeDirRaw }
+                        if ($estTimeDelRaw -ne $null) { $estTimeDelNet = & $delegateJobTimeEstimate $r $estTimeDelRaw }
+                    }
+                    # 시간 증감은 두 가지(표에 보이는 값끼리): 직접 = 직접 시간 - 예상 직접 시간, 위임 = 위임 시간 - 예상 위임 시간. + 는 예상보다 더 걸림
+                    # 실제 시간은 그 질문이 간 길 한쪽에만 있다: 직접 질문은 직접 시간, 위임 질문은 위임 시간. 증감도 그 길의 예상과만 비교한다(토큰 증감과 같은 기준)
+                    $timeDeltaDirect = if ($p -ne 'delegate' -and $durSecVal -ne $null -and $estTimeDirNet -ne $null) { [int]$durSecVal - [int][Math]::Round($estTimeDirNet) } else { $null }
+                    $estTimeDelForDelta = if ($delTimeIsWhole) { $estTimeDelRaw } else { $estTimeDelNet }
+                    $timeDeltaDelegate = if ($p -eq 'delegate' -and $actualTimeVal -ne $null -and $estTimeDelForDelta -ne $null) { [int]$actualTimeVal - [int][Math]::Round($estTimeDelForDelta) } else { $null }
+
+                    $rowTaskIds = @(if ($turnTaskMap.ContainsKey($fKey)) { $turnTaskMap[$fKey].ToArray() } else { @() })
 
                     [void]$recent.Add([ordered]@{
-                        ts            = [string]$r['turn_ts']
-                        path          = $p
-                        calls         = $effCalls
-                        calls_related = $callsRelatedVal
-                        estimate      = if ($estVal -ne $null) { [int]$estVal } else { $null }
-                        actual        = if ($effD -ne $null) { [int]$effD } else { $null }
-                        ratio         = $ratioVal
-                        saved         = $tSaved
-                        project       = [string]$r['project']
-                        est_ver       = $estVerVal
-                        cr_tokens     = $crTokensVal
-                        est_time      = $estTimeVal
-                        actual_time   = $actualTimeVal
-                        claude_wall   = $durSecVal
+                        ts                = [string]$r['turn_ts']
+                        end_ts            = $endTsVal
+                        path              = $p
+                        calls             = $effCalls
+                        calls_related     = $callsRelatedVal
+                        calls_total       = $callsVal
+                        estimate          = if ($estVal -ne $null) { [int]$estVal } else { $null }
+                        est_direct        = if ($estDirectVal -ne $null) { [int]$estDirectVal } else { $null }
+                        est_delegate      = if ($estDelegateVal -ne $null) { [int]$estDelegateVal } else { $null }
+                        est_direct_net    = if ($estDirectNet -ne $null) { [int][Math]::Round($estDirectNet) } else { $null }
+                        est_delegate_net  = if ($estDelegateNet -ne $null) { [int][Math]::Round($estDelegateNet) } else { $null }
+                        actual            = if ($effD -ne $null) { [int]$effD } else { $null }
+                        actual_total      = if ($dTokensVal -ne $null) { [int]$dTokensVal } else { $null }
+                        common_tokens     = $commonTok
+                        ratio             = $ratioVal
+                        saved             = $tSaved
+                        project           = [string]$r['project']
+                        est_ver           = $estVerVal
+                        est_kind          = $(if ($hasEstKindCol -and $null -ne $r['est_kind'] -and $r['est_kind'] -ne [DBNull]::Value) { [string]$r['est_kind'] } else { $null })
+                        choice_reason     = $(if ($hasChoiceReasonCol -and $null -ne $r['choice_reason'] -and $r['choice_reason'] -ne [DBNull]::Value) { [string]$r['choice_reason'] } else { $null })
+                        choice            = $(if ($hasChoiceCol -and $null -ne $r['choice'] -and $r['choice'] -ne [DBNull]::Value) { [string]$r['choice'] } else { $null })
+                        task_ids          = $rowTaskIds
+                        level             = $(if ($hasLevelCol -and $null -ne $r['level'] -and $r['level'] -ne [DBNull]::Value) { [string]$r['level'] } else { $null })
+                        cr_tokens         = $crTokensVal
+                        est_time          = $estTimeVal
+                        est_time_direct   = if ($estTimeDirRaw -ne $null) { [int]$estTimeDirRaw } else { $null }
+                        est_time_delegate = if ($estTimeDelRaw -ne $null) { [int]$estTimeDelRaw } else { $null }
+                        est_time_direct_net   = if ($estTimeDirNet -ne $null) { [int][Math]::Round($estTimeDirNet) } else { $null }
+                        est_time_delegate_net = if ($estTimeDelNet -ne $null) { [int][Math]::Round($estTimeDelNet) } else { $null }
+                        actual_time       = $actualTimeVal
+                        time_delta_direct   = $timeDeltaDirect
+                        time_delta_delegate = $timeDeltaDelegate
+                        claude_wall       = $durSecVal
                     })
                 }
             }
@@ -1361,88 +1589,115 @@ function Get-TokenStatsData {
         }
     }
 
-    $dailyList = @()
-    $runningCum = 0
-    foreach ($k in $dailyMap.Keys) {
-        $item = $dailyMap[$k]
-        $runningCum += [int]$item.saved
-        $item.cum_saved = $runningCum
-        $dailyList += $item
-    }
+    if (-not $cached) {
+        $dailyList = @()
+        $runningCum = 0
+        foreach ($k in $dailyMap.Keys) {
+            $item = $dailyMap[$k]
+            $runningCum += [int]$item.saved
+            $item.cum_saved = $runningCum
+            $dailyList += $item
+        }
 
-    $weeklyList = @()
-    $sortedWeeks = @($weeklyMap.Keys | Sort-Object)
-    foreach ($wk in $sortedWeeks) {
-        $dirMed = if ($weeklyMap[$wk].direct -and $weeklyMap[$wk].direct.Count -gt 0) {
-            [Math]::Round([double](Get-TokenMedianValue $weeklyMap[$wk].direct), 2)
-        } else { $null }
-        $delMed = if ($weeklyMap[$wk].delegate -and $weeklyMap[$wk].delegate.Count -gt 0) {
-            [Math]::Round([double](Get-TokenMedianValue $weeklyMap[$wk].delegate), 2)
-        } else { $null }
-        $timeDirMed = if ($weeklyMap[$wk].time_direct -and $weeklyMap[$wk].time_direct.Count -gt 0) {
-            [Math]::Round([double](Get-TokenMedianValue $weeklyMap[$wk].time_direct), 2)
-        } else { $null }
-        $timeDelMed = if ($weeklyMap[$wk].time_delegate -and $weeklyMap[$wk].time_delegate.Count -gt 0) {
-            [Math]::Round([double](Get-TokenMedianValue $weeklyMap[$wk].time_delegate), 2)
-        } else { $null }
-        $weeklyList += [ordered]@{
-            week          = $wk
-            direct        = $dirMed
-            delegate      = $delMed
-            time_direct   = $timeDirMed
-            time_delegate = $timeDelMed
+        $weeklyList = @()
+        $sortedWeeks = @($weeklyMap.Keys | Sort-Object)
+        foreach ($wk in $sortedWeeks) {
+            $dirMed = if ($weeklyMap[$wk].direct -and $weeklyMap[$wk].direct.Count -gt 0) {
+                [Math]::Round([double](Get-TokenMedianValue $weeklyMap[$wk].direct), 2)
+            } else { $null }
+            $delMed = if ($weeklyMap[$wk].delegate -and $weeklyMap[$wk].delegate.Count -gt 0) {
+                [Math]::Round([double](Get-TokenMedianValue $weeklyMap[$wk].delegate), 2)
+            } else { $null }
+            $timeDirMed = if ($weeklyMap[$wk].time_direct -and $weeklyMap[$wk].time_direct.Count -gt 0) {
+                [Math]::Round([double](Get-TokenMedianValue $weeklyMap[$wk].time_direct), 2)
+            } else { $null }
+            $timeDelMed = if ($weeklyMap[$wk].time_delegate -and $weeklyMap[$wk].time_delegate.Count -gt 0) {
+                [Math]::Round([double](Get-TokenMedianValue $weeklyMap[$wk].time_delegate), 2)
+            } else { $null }
+            $weeklyList += [ordered]@{
+                week          = $wk
+                direct        = $dirMed
+                delegate      = $delMed
+                time_direct   = $timeDirMed
+                time_delegate = $timeDelMed
+            }
+        }
+
+        $totTasks = $delegateOk + $delegateFail
+        $successRate = if ($totTasks -gt 0) { [Math]::Round($delegateOk / $totTasks, 2) } else { $null }
+        $samples = $directTurns + $delegateTurns
+
+        $collectObj = [ordered]@{
+            active     = $false
+            delegate_n = 0
+            target     = 20
+        }
+        if ($calObj -and $calObj.collect) {
+            $c = $calObj.collect
+            $collectObj.active = [bool]$c.active
+            if ($c.delegate_n -ne $null) { $collectObj.delegate_n = [int]$c.delegate_n }
+            if ($c.target -ne $null) { $collectObj.target = [int]$c.target }
+        }
+
+        if (-not $timeSummary) {
+            $timeSummary = [ordered]@{
+                direct_avg_s        = $null
+                delegate_agy_avg_s  = $null
+                delegate_turn_avg_s = $null
+                ratio_time_direct   = $null
+                ratio_time_delegate = $null
+            }
+        }
+
+        $summary = [ordered]@{
+            delegate_ok    = $delegateOk
+            delegate_fail  = $delegateFail
+            success_rate   = $successRate
+            delegate_turns = $delegateTurns
+            direct_turns   = $directTurns
+            net_saved      = $netSaved
+            ratio_direct   = $ratioDirect
+            ratio_delegate = $ratioDelegate
+            samples        = $samples
+            collect        = $collectObj
+            time           = $timeSummary
+        }
+
+        # 집계 결과 캐시 보관 (최대 10개까지 유지)
+        if (-not $script:TokenStatsAggCache) { $script:TokenStatsAggCache = @{} }
+        if ($script:TokenStatsAggCache.Count -gt 10) { $script:TokenStatsAggCache.Clear() }
+        $script:TokenStatsAggCache[$cacheKey] = @{
+            summary           = $summary
+            daily             = @($dailyList)
+            weekly_accuracy   = @($weeklyList)
+            points            = @($points)
+            calibration       = $calObj
+            updated           = $updated
+            turnAgyElapsedMap = $turnAgyElapsedMap
+            turnTaskMap       = $turnTaskMap
+            hasTurns          = $hasTurns
         }
     }
 
-    $totTasks = $delegateOk + $delegateFail
-    $successRate = if ($totTasks -gt 0) { [Math]::Round($delegateOk / $totTasks, 2) } else { $null }
-    $samples = $directTurns + $delegateTurns
-
-    $collectObj = [ordered]@{
-        active     = $false
-        delegate_n = 0
-        target     = 20
-    }
-    if ($calObj -and $calObj.collect) {
-        $c = $calObj.collect
-        $collectObj.active = [bool]$c.active
-        if ($c.delegate_n -ne $null) { $collectObj.delegate_n = [int]$c.delegate_n }
-        if ($c.target -ne $null) { $collectObj.target = [int]$c.target }
-    }
-
-    if (-not $timeSummary) {
-        $timeSummary = [ordered]@{
-            direct_avg_s        = $null
-            delegate_agy_avg_s  = $null
-            delegate_turn_avg_s = $null
-            ratio_time_direct   = $null
-            ratio_time_delegate = $null
-        }
-    }
-
-    $summary = [ordered]@{
-        delegate_ok    = $delegateOk
-        delegate_fail  = $delegateFail
-        success_rate   = $successRate
-        delegate_turns = $delegateTurns
-        direct_turns   = $directTurns
-        net_saved      = $netSaved
-        ratio_direct   = $ratioDirect
-        ratio_delegate = $ratioDelegate
-        samples        = $samples
-        collect        = $collectObj
-        time           = $timeSummary
+    if (-not $hasTurns) {
+        if ($RecentPage -gt $recentPages) { $RecentPage = $recentPages }
+        if ($RecentPage -lt 1) { $RecentPage = 1 }
     }
 
     return [ordered]@{
-        days            = $Days
-        updated         = $updated
-        calibration     = $calObj
-        summary         = $summary
-        daily           = @($dailyList)
-        weekly_accuracy = @($weeklyList)
-        points          = @($points)
-        recent          = @($recent)
+        days             = $Days
+        updated          = $updated
+        calibration      = $calObj
+        summary          = $summary
+        daily            = @($dailyList)
+        weekly_accuracy  = @($weeklyList)
+        points           = @($points)
+        recent           = @($recent)
+        recent_page      = $RecentPage
+        recent_page_size = $RecentPageSize
+        recent_total     = $recentTotal
+        recent_pages     = $recentPages
+        recent_path      = $RecentPath
     }
 }
 
@@ -1616,17 +1871,14 @@ function Get-ViewerQaRecordsJson([string]$DbPath, [string]$DataDir = "", [long]$
                 $estDirect = if ($hasEstDirect) { [long]$firstRow['est_direct'] } else { $null }
                 $estDirectAdj = $null
                 if ($hasEstDirect) {
-                    $fullDir = [double]$firstRow['est_direct'] / $ratioDirect
-                    $jobDir = $fullDir - [double]$otherTokens
-                    $estDirectAdj = if ($jobDir -gt 0) { [long][Math]::Round($jobDir) } else { [long][Math]::Round($fullDir * $relFrac) }
+                    # 질문을 받을 때 기록한 예상 그대로(보정 비율을 곱하거나 다른 작업 몫을 빼지 않는다. 결정의 근거라 나중에 바뀌면 안 된다)
+                    $estDirectAdj = [long][Math]::Round([double]$firstRow['est_direct'])
                 }
                 $turnSaved = if ($estDirectAdj -ne $null) { [long]($estDirectAdj - $effD) } else { $null }
                 $hasEstDelegate = ($firstRow['est_delegate'] -ne $null -and $firstRow['est_delegate'] -ne [DBNull]::Value)
                 $estDelegateAdj = $null
                 if ($hasEstDelegate) {
-                    $fullDel = [double]$firstRow['est_delegate'] / $ratioDelegateCal
-                    $jobDel = $fullDel - [double]$otherTokens
-                    $estDelegateAdj = if ($jobDel -gt 0) { [long][Math]::Round($jobDel) } else { [long][Math]::Round($fullDel * $relFrac) }
+                    $estDelegateAdj = [long][Math]::Round([double]$firstRow['est_delegate'])
                 }
                 $basis = if ($hasEstDirect) { "measured" } else { "partial" }
                 $turnTs = [string]$firstRow['turn_ts']
@@ -1695,20 +1947,11 @@ function Get-ViewerQaRecordsJson([string]$DbPath, [string]$DataDir = "", [long]$
                     $estDirectShare = if ($savedList[$i] -ne $null) { [long]($usedList[$i] + $savedList[$i]) } elseif ($estDirectAdj -ne $null) { [long][Math]::Round($estDirectAdj * $weights[$i]) } else { $null }
                     $shareVal = [Math]::Round([double]$weights[$i], 4)
                     $estDelegateShare = if ($estDelegateAdj -ne $null) { [long][Math]::Round($estDelegateAdj * $weights[$i]) } else { $null }
-                    # 다른 작업에 쓴 Claude 시간 = 턴 시간 x (다른 작업 호출 / 전체 호출). 시간 예상에서도 이것을 뺀다.
-                    $otherSec = if ($durSecTurn -ne $null -and $calls -gt 0) { [double]$durSecTurn * ([double]$otherCalls / [double]$calls) } else { 0.0 }
+                    # 시간 예상도 질문을 받을 때 기록한 값 그대로(다른 작업 시간을 빼지 않는다. 위임 결정의 근거라 나중에 바뀌면 안 된다). 위임이 여럿이면 몫만큼 나눈다.
                     $estTimeDirShare = $null
-                    if ($estTimeDir -ne $null) {
-                        $jobT = [double]$estTimeDir - $otherSec
-                        if ($jobT -le 0) { $jobT = [double]$estTimeDir * $relFrac }
-                        $estTimeDirShare = [int][Math]::Round($jobT * [double]$weights[$i])
-                    }
+                    if ($estTimeDir -ne $null) { $estTimeDirShare = [int][Math]::Round([double]$estTimeDir * [double]$weights[$i]) }
                     $estTimeDelShare = $null
-                    if ($estTimeDel -ne $null) {
-                        $jobT = [double]$estTimeDel - $otherSec
-                        if ($jobT -le 0) { $jobT = [double]$estTimeDel * $relFrac }
-                        $estTimeDelShare = [int][Math]::Round($jobT * [double]$weights[$i])
-                    }
+                    if ($estTimeDel -ne $null) { $estTimeDelShare = [int][Math]::Round([double]$estTimeDel * [double]$weights[$i]) }
 
                     # 위임에 걸린 실제 시간 = agy 처리 시간 + Claude 쪽 시간(그 턴 시간 중 위임 관련 호출의 몫, 여러 건이면 몫으로 나눔).
                     # 참고: Claude 쪽 시간에 agy 를 기다린 시간이 일부 들어 있을 수 있어 그만큼 겹쳐 셀 수 있다(근사값).
@@ -1751,6 +1994,14 @@ function Get-ViewerQaRecordsJson([string]$DbPath, [string]$DataDir = "", [long]$
 
         $fields = if ($script:QaRecordFields) { $script:QaRecordFields } else { @('timestamp', 'computer_name', 'task_id', 'source', 'model', 'attempts', 'tried_models', 'input_tokens', 'output_tokens', 'thinking_tokens', 'total_tokens', 'elapsed_sec', 'status', 'session', 'session_id', 'question', 'answer', 'process', 'cum_input_tokens', 'cum_output_tokens', 'cum_thinking_tokens', 'cum_total_tokens', 'usage_basis') }
 
+        # 작업 → 연결된 턴(file, turn_ts). 수집기가 아직 안 돈 기록에 기록한 예상을 붙이는 데 쓴다.
+        $estLinkMap = @{}
+        try {
+            foreach ($lk in @($db.Query("SELECT task_id, file, turn_ts FROM token_task_links", $null))) {
+                $estLinkMap[[string]$lk['task_id']] = [pscustomobject]@{ file = [string]$lk['file']; turn_ts = [string]$lk['turn_ts'] }
+            }
+        } catch {}
+
         $seq = $Since
         $sb = New-Object System.Text.StringBuilder
         [void]$sb.Append('{"records":[')
@@ -1771,6 +2022,21 @@ function Get-ViewerQaRecordsJson([string]$DbPath, [string]$DataDir = "", [long]$
             }
 
             $tId = [string]$r['task_id']
+            if (-not $taskClaudeMap.ContainsKey($tId) -and $estLinkMap.ContainsKey($tId) -and (Get-Command Get-RecordedEstimate -ErrorAction SilentlyContinue)) {
+                # 아직 Claude 쪽 사용량이 연결되지 않은(수집기가 안 돈) 기록: 위임을 보내기 전에 record-estimate 로 남긴 예상이라도 카드에 보인다
+                try {
+                    $lnk = $estLinkMap[$tId]
+                    $estRec = Get-RecordedEstimate $DbPath (Split-Path (Split-Path ([string]$lnk.file) -Parent) -Leaf) ([string]$lnk.turn_ts)
+                    if ($estRec) {
+                        $estParts = @()
+                        foreach ($ek in $estRec.Keys) { $ev = $estRec.Item($ek); if ($null -ne $ev) { $estParts += ("`"{0}`":{1}" -f $ek, $ev) } }
+                        if ($estParts.Count -gt 0) {
+                            if (-not $firstField) { [void]$sb.Append(',') }
+                            [void]$sb.Append('"claude_est":{').Append(($estParts -join ',')).Append('}')
+                        }
+                    }
+                } catch {}
+            }
             if ($taskClaudeMap.ContainsKey($tId)) {
                 $c = $taskClaudeMap[$tId]
                 if (-not $firstField) { [void]$sb.Append(',') }
@@ -1841,176 +2107,204 @@ function Get-ViewerQaRecordsJson([string]$DbPath, [string]$DataDir = "", [long]$
 
 
 # HTTP 리스너 기동 (충돌 시 기존 뷰어 자동 정리 및 대체 포트 탐색)
-$listener = $null
-$prefix = $null
-$started = $false
-$maxAttempts = 10
+if (-not $WorkerMode) {
+    $ViewerShared = [hashtable]::Synchronized(@{})
+    $ViewerShared['QaRecordsCache'] = $null
+    $ViewerShared['TokenStatsCache'] = $null
+    $ViewerShared['lastClaudeScanLaunchAt'] = $null
+    $ViewerShared['lastClaudeScanProc'] = $null
+    $ViewerShared['lastTokenStatsProc'] = $null
+    $ViewerShared['lastAutoCollectCheckAt'] = [datetime]::MinValue
+    $ViewerShared['lastAutoCollectAt'] = [datetime]::MinValue
 
-# 호출자 프로세스 보호를 위해 PPID 조회
-$ppid = 0
-try {
-    $ppid = (Get-CimInstance Win32_Process -Filter "ProcessId = $PID" -ErrorAction SilentlyContinue).ParentProcessId
-} catch {}
+    $listener = $null
+    $prefix = $null
+    $started = $false
+    $maxAttempts = 10
 
-for ($attempt = 0; $attempt -lt $maxAttempts; $attempt++) {
-    $currentPort = $Port + $attempt
-    $currentPrefix = "http://127.0.0.1:$currentPort/"
-    $candidateListener = New-Object System.Net.HttpListener
-    $candidateListener.Prefixes.Add($currentPrefix)
-
+    # 호출자 프로세스 보호를 위해 PPID 조회
+    $ppid = 0
     try {
-        $candidateListener.Start()
-        $listener = $candidateListener
-        $prefix = $currentPrefix
-        $Port = $currentPort
-        $started = $true
-        break
-    } catch {
-        $candidateListener.Close()
+        $ppid = (Get-CimInstance Win32_Process -Filter "ProcessId = $PID" -ErrorAction SilentlyContinue).ParentProcessId
+    } catch {}
 
-        # 첫 번째 시도(기본 포트)에서 충돌 발생 시, 기존 좀비 뷰어 프로세스 정리 후 1회 재시도
-        if ($attempt -eq 0) {
-            try {
-                $oldViewers = @(Get-CimInstance Win32_Process -Filter "Name like '%powershell%'" -ErrorAction SilentlyContinue | Where-Object {
-                    $_.ProcessId -ne $PID -and $_.ProcessId -ne $ppid -and (
-                        $_.CommandLine -match "serve-viewer\.ps1" -or
-                        $_.CommandLine -match "serve-handoff\.ps1"
-                    )
-                })
-                if ($oldViewers.Count -gt 0) {
-                    Write-Host "[*] 기존에 실행 중이던 이전 뷰어 세션을 정리하고 포트를 재확보합니다..." -ForegroundColor Yellow
-                    foreach ($ov in $oldViewers) {
-                        Stop-Process -Id $ov.ProcessId -Force -ErrorAction SilentlyContinue
-                    }
-                    Start-Sleep -Milliseconds 600
-
-                    # 동일 포트로 재시도
-                    $retryListener = New-Object System.Net.HttpListener
-                    $retryListener.Prefixes.Add($currentPrefix)
-                    try {
-                        $retryListener.Start()
-                        $listener = $retryListener
-                        $prefix = $currentPrefix
-                        $started = $true
-                        break
-                    } catch {
-                        $retryListener.Close()
-                    }
-                }
-            } catch {}
-        }
-    }
-}
-
-if (-not $started) {
-    Write-Error "HTTP 리스너 시작 실패: 포트 $Port ~ $($Port + $maxAttempts - 1) 번이 모두 사용 중이거나 권한이 없습니다."
-    exit 1
-}
-
-
-
-Write-Host "==========================================================" -ForegroundColor Cyan
-Write-Host "  samjil 에이전트 통합 대시보드 (Unified Dashboard)" -ForegroundColor Cyan
-Write-Host "==========================================================" -ForegroundColor Cyan
-Write-Host "  웹 대시보드     : $prefix" -ForegroundColor Green
-Write-Host "  위임 기록(/data): $DataDir" -ForegroundColor White
-Write-Host "  대화 저장소     : $HandoffDir" -ForegroundColor White
-
-# --- agy agent (워처) 자동 연동 ---
-$watcherHealth = $null
-if (-not $NoAgent) {
-    # 하트비트만 보지 않고 PID 잠금 파일로 판단합니다(watcher-health.ps1). 명령줄에 watch-agy.ps1 이
-    # 남아 있는 빈 -NoExit 창을 "실행 중"으로 오판하지 않습니다.
-    $watcherRunning = [bool](Test-WatcherAlive -RuntimeDir $WatcherRuntimeDir).Alive
-
-    $startScript  = Find-DelegateScript "start-agy.ps1"
-    $ensureScript = Find-DelegateScript "sub\ensure-agy-running.ps1"
-
-    if ($watcherRunning) {
-        Write-Host "  agy agent (워처): 이미 실행 중 (정상)" -ForegroundColor Green
-    } elseif ($startScript) {
-        Write-Host "  agy agent (워처): 미실행 감지 -> 창 없이 자동 기동..." -ForegroundColor Yellow
-        try {
-            # -Hidden: 콘솔 창 없이 백그라운드로. (옵션 없이 부르면 -NoExit 콘솔 창이 뜬다. 숨김 뷰어가 이 창을 띄우면 닫을 수도 끌 수도 없다)
-            & $startScript -Hidden | Out-Null
-            Write-Host "  agy agent (워처): 기동 완료" -ForegroundColor Green
-        } catch {
-            Write-Host "  agy agent (워처): 자동 기동 실패 ($($_.Exception.Message))" -ForegroundColor Red
-        }
-    } else {
-        Write-Host "  agy agent (워처): start-agy.ps1 스크립트를 찾을 수 없음" -ForegroundColor Gray
-    }
-
-    if ($ensureScript) {
-        $watcherHealth = New-WatcherHealthState -RuntimeDir $WatcherRuntimeDir -EnsureScript $ensureScript -IntervalSeconds $WatcherCheckSeconds
-        if ($WatcherCheckSeconds -gt 0) {
-            Write-Host "  워처 자동 점검  : ${WatcherCheckSeconds}초마다 (꺼져 있으면 창 없이 다시 켬, stop-agy 로 끈 상태는 존중)" -ForegroundColor Green
-        } else {
-            Write-Host "  워처 자동 점검  : 끔 (화면의 켜기 버튼만 사용)" -ForegroundColor Gray
-        }
-    } else {
-        Write-Host "  워처 자동 점검  : ensure-agy-running.ps1 을 찾을 수 없어 끔 (켜기 버튼도 쓸 수 없음)" -ForegroundColor Gray
-    }
-}
-
-Write-Host "  종료 방법       : 이 창에서 Ctrl+C" -ForegroundColor Gray
-Write-Host "==========================================================" -ForegroundColor Cyan
-
-Write-Host ""
-
-
-
-if (-not $NoBrowser) {
-
-    try { Start-Process $prefix } catch {}
-
-}
-
-
-
-try {
-
-    $lastClaudeScanLaunchAt = $null
-    $lastClaudeScanProc = $null
-    $lastTokenStatsProc = $null
-    $pendingContext = $null
-
-    while ($listener.IsListening) {
-
-        # 워처 주기 점검. 점검 시각이 아니면 바로 돌아옵니다(점검 자체가 예외를 내도 서버는 계속 돕니다).
-        if ($watcherHealth) {
-            try {
-                $tickResult = Invoke-WatcherHealthTick $watcherHealth
-                if ($tickResult -eq 'restart') {
-                    Write-Host ("[{0}] agy 워처가 꺼져 있어 자동으로 다시 켭니다 (창 없이 실행, 20초 뒤 재확인)." -f (Get-Date -Format 'HH:mm:ss')) -ForegroundColor Yellow
-                } elseif ($tickResult -like 'launch-failed*') {
-                    Write-Host ("[{0}] agy 워처 자동 재시작 실패: {1}" -f (Get-Date -Format 'HH:mm:ss'), $tickResult) -ForegroundColor Red
-                }
-            } catch {}
-        }
-
-        $context = $null
+    $requestedPort = $Port
+    for ($attempt = 0; $attempt -lt $maxAttempts; $attempt++) {
+        $currentPort = $Port + $attempt
+        $currentPrefix = "http://127.0.0.1:$currentPort/"
+        $candidateListener = New-Object System.Net.HttpListener
+        $candidateListener.Prefixes.Add($currentPrefix)
 
         try {
-
-            # 요청이 없어도 1초마다 깨어나 위 점검을 챙깁니다(GetContext 는 요청이 올 때까지 막혀서 쓸 수 없음).
-            if ($null -eq $pendingContext) { $pendingContext = $listener.GetContextAsync() }
-
-            if (-not $pendingContext.Wait(1000)) { continue }
-
-            $context = $pendingContext.GetAwaiter().GetResult()
-
-            $pendingContext = $null
-
-        } catch {
-
+            $candidateListener.Start()
+            $listener = $candidateListener
+            $prefix = $currentPrefix
+            $Port = $currentPort
+            $started = $true
             break
+        } catch {
+            $candidateListener.Close()
 
+            # 첫 번째 시도(기본 포트)에서 충돌 발생 시, 기존 좀비 뷰어 프로세스 정리 후 1회 재시도
+            if ($attempt -eq 0) {
+                try {
+                    $oldViewers = @(Get-CimInstance Win32_Process -Filter "Name like '%powershell%'" -ErrorAction SilentlyContinue | Where-Object {
+                        $_.ProcessId -ne $PID -and $_.ProcessId -ne $ppid -and (
+                            $_.CommandLine -match "serve-viewer\.ps1" -or
+                            $_.CommandLine -match "serve-handoff\.ps1"
+                        )
+                    })
+                    if ($oldViewers.Count -gt 0) {
+                        Write-Host "[*] 기존에 실행 중이던 이전 뷰어 세션을 정리하고 포트를 재확보합니다..." -ForegroundColor Yellow
+                        foreach ($ov in $oldViewers) {
+                            Stop-Process -Id $ov.ProcessId -Force -ErrorAction SilentlyContinue
+                        }
+                        Start-Sleep -Milliseconds 600
+
+                        # 동일 포트로 재시도
+                        $retryListener = New-Object System.Net.HttpListener
+                        $retryListener.Prefixes.Add($currentPrefix)
+                        try {
+                            $retryListener.Start()
+                            $listener = $retryListener
+                            $prefix = $currentPrefix
+                            $started = $true
+                            break
+                        } catch {
+                            $retryListener.Close()
+                        }
+                    }
+                } catch {}
+            }
+        }
+    }
+
+    if (-not $started) {
+        Write-Error "HTTP 리스너 시작 실패: 포트 $Port ~ $($Port + $maxAttempts - 1) 번이 모두 사용 중이거나 권한이 없습니다."
+        exit 1
+    }
+
+    # Claude Code 훅 주소 맞춤 (PreToolUse HTTP 훅 포트 동기화)
+    try {
+        if (-not $env:SAMJIL_VIEWER_TEST -and -not $env:SAMJIL_NO_HOOK_SYNC -and ($requestedPort -ne $Port -or $Port -eq 8787)) {
+            $regHookScript = Find-DelegateScript "sub\register-estimate-guard.ps1"
+            if ($regHookScript -and (Test-Path -LiteralPath $regHookScript)) {
+                $psiSync = New-Object System.Diagnostics.ProcessStartInfo
+                $psiSync.FileName = "powershell.exe"
+                $psiSync.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$regHookScript`" -Port $Port -UpdateOnly"
+                $psiSync.UseShellExecute = $false
+                $psiSync.CreateNoWindow = $true
+                $psiSync.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+                $psiSync.RedirectStandardOutput = $true
+                $procSync = [System.Diagnostics.Process]::Start($psiSync)
+                $outSync = $procSync.StandardOutput.ReadToEnd()
+                [void]$procSync.WaitForExit(5000)
+                if ($outSync -and $outSync.Trim() -eq "UPDATED") {
+                    Write-Host "[*] Claude Code 훅 주소를 뷰어 포트($Port)에 맞추었습니다." -ForegroundColor Yellow
+                }
+            }
+        }
+    } catch {}
+
+    $workerCount = 3
+    if ($env:SAMJIL_VIEWER_WORKERS -match '^\d+$') {
+        $workerCount = [int]$env:SAMJIL_VIEWER_WORKERS
+        if ($workerCount -lt 0) { $workerCount = 0 }
+    }
+
+    Write-Host "==========================================================" -ForegroundColor Cyan
+    Write-Host "  samjil 에이전트 통합 대시보드 (Unified Dashboard)" -ForegroundColor Cyan
+    Write-Host "==========================================================" -ForegroundColor Cyan
+    Write-Host "  웹 대시보드     : $prefix" -ForegroundColor Green
+    Write-Host ("  동시 처리       : 일꾼 {0}개 (SAMJIL_VIEWER_WORKERS 로 바꿈)" -f $workerCount) -ForegroundColor Green
+    Write-Host "  위임 기록(/data): $DataDir" -ForegroundColor White
+    Write-Host "  대화 저장소     : $HandoffDir" -ForegroundColor White
+
+    # --- agy agent (워처) 자동 연동 ---
+    $watcherHealth = $null
+    if (-not $NoAgent) {
+        # 하트비트만 보지 않고 PID 잠금 파일로 판단합니다(watcher-health.ps1). 명령줄에 watch-agy.ps1 이
+        # 남아 있는 빈 -NoExit 창을 "실행 중"으로 오판하지 않습니다.
+        $watcherRunning = [bool](Test-WatcherAlive -RuntimeDir $WatcherRuntimeDir).Alive
+
+        $startScript  = Find-DelegateScript "start-agy.ps1"
+        $ensureScript = Find-DelegateScript "sub\ensure-agy-running.ps1"
+
+        if ($watcherRunning) {
+            Write-Host "  agy agent (워처): 이미 실행 중 (정상)" -ForegroundColor Green
+        } elseif ($startScript) {
+            Write-Host "  agy agent (워처): 미실행 감지 -> 창 없이 자동 기동..." -ForegroundColor Yellow
+            try {
+                # -Hidden: 콘솔 창 없이 백그라운드로. (옵션 없이 부르면 -NoExit 콘솔 창이 뜬다. 숨김 뷰어가 이 창을 띄우면 닫을 수도 끌 수도 없다)
+                & $startScript -Hidden | Out-Null
+                Write-Host "  agy agent (워처): 기동 완료" -ForegroundColor Green
+            } catch {
+                Write-Host "  agy agent (워처): 자동 기동 실패 ($($_.Exception.Message))" -ForegroundColor Red
+            }
+        } else {
+            Write-Host "  agy agent (워처): start-agy.ps1 스크립트를 찾을 수 없음" -ForegroundColor Gray
         }
 
+        if ($ensureScript) {
+            $watcherHealth = New-WatcherHealthState -RuntimeDir $WatcherRuntimeDir -EnsureScript $ensureScript -IntervalSeconds $WatcherCheckSeconds
+            if ($WatcherCheckSeconds -gt 0) {
+                Write-Host "  워처 자동 점검  : ${WatcherCheckSeconds}초마다 (꺼져 있으면 창 없이 다시 켬, stop-agy 로 끈 상태는 존중)" -ForegroundColor Green
+            } else {
+                Write-Host "  워처 자동 점검  : 끔 (화면의 켜기 버튼만 사용)" -ForegroundColor Gray
+            }
+        } else {
+            Write-Host "  워처 자동 점검  : ensure-agy-running.ps1 을 찾을 수 없어 끔 (켜기 버튼도 쓸 수 없음)" -ForegroundColor Gray
+        }
+    }
 
+    Write-Host "  종료 방법       : 이 창에서 Ctrl+C" -ForegroundColor Gray
+    Write-Host "==========================================================" -ForegroundColor Cyan
+    Write-Host ""
 
-        $request = $context.Request
+    if (-not $NoBrowser) {
+        try { Start-Process $prefix } catch {}
+    }
+
+    # 워처 상태(자동 점검 · 켜기 버튼)는 부모가 만든 것 하나를 일꾼도 같이 쓴다(/api/status · /api/watcher/start 가 어느 일꾼에 가도 같게)
+    $ViewerShared['WatcherHealth'] = $watcherHealth
+    $workers = @()
+    if ($workerCount -gt 0) {
+        $viewerScriptPath = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCommand.Path }
+        if (-not $viewerScriptPath) { $viewerScriptPath = Join-Path $PSScriptRoot "serve-viewer.ps1" }
+
+        for ($wIdx = 0; $wIdx -lt $workerCount; $wIdx++) {
+            $rs = [runspacefactory]::CreateRunspace()
+            $rs.Open()
+            $rs.SessionStateProxy.SetVariable('ViewerSharedListener', $listener)
+            $rs.SessionStateProxy.SetVariable('ViewerShared', $ViewerShared)
+
+            $ps = [powershell]::Create()
+            $ps.Runspace = $rs
+            [void]$ps.AddCommand($viewerScriptPath)
+            [void]$ps.AddParameter('WorkerMode')
+            [void]$ps.AddParameter('NoBrowser')
+            [void]$ps.AddParameter('NoAgent')
+            if ($HandoffDir) { [void]$ps.AddParameter('HandoffDir', $HandoffDir) }
+            if ($DataDir) { [void]$ps.AddParameter('DataDir', $DataDir) }
+            if ($RuntimeDir) { [void]$ps.AddParameter('RuntimeDir', $RuntimeDir) }
+            if ($WebDir) { [void]$ps.AddParameter('WebDir', $WebDir) }
+            if ($ClaudeProjectsDir) { [void]$ps.AddParameter('ClaudeProjectsDir', $ClaudeProjectsDir) }
+            if ($Port) { [void]$ps.AddParameter('Port', $Port) }
+
+            $asyncResult = $ps.BeginInvoke()
+            $workers += [pscustomobject]@{ Runspace = $rs; PowerShell = $ps; AsyncResult = $asyncResult }
+        }
+    }
+} else {
+    $listener = $ViewerSharedListener
+    $watcherHealth = $ViewerShared['WatcherHealth']
+    $prefix = "http://127.0.0.1:$Port/"
+    $workers = @()
+}
+
+$ViewerHandleRequest = {
+
+    $request = $context.Request
 
         $response = $context.Response
 
@@ -2408,7 +2702,15 @@ try {
                 $qaSince = [long]0
                 if ($params["since"]) { [void][long]::TryParse([string]$params["since"], [ref]$qaSince) }
                 $qaJson = $null
-                try { $qaJson = Get-ViewerQaRecordsJson $AgyDbPath $DataDir $qaSince } catch { try { $qaJson = Get-QaRecordsJson $AgyDbPath $qaSince } catch { $qaJson = $null } }
+                # 처음 전부 받는 요청(since=0)은 데이터가 그대로면 지난번에 만든 응답을 그대로 준다(만드는 데 수 초 걸린다)
+                $qaStamp = if ($qaSince -eq 0) { Get-ViewerDataStamp $AgyDbPath $DataDir } else { "" }
+                if ($qaStamp -and $ViewerShared['QaRecordsCache'] -and $ViewerShared['QaRecordsCache'].Stamp -eq $qaStamp) {
+                    $qaJson = [string]$ViewerShared['QaRecordsCache'].Json
+                    $response.Headers.Add("X-Samjil-Cache", "hit")
+                } else {
+                    try { $qaJson = Get-ViewerQaRecordsJson $AgyDbPath $DataDir $qaSince } catch { try { $qaJson = Get-QaRecordsJson $AgyDbPath $qaSince } catch { $qaJson = $null } }
+                    if ($qaStamp -and $null -ne $qaJson) { $ViewerShared['QaRecordsCache'] = @{ Stamp = $qaStamp; Json = $qaJson } }
+                }
                 if ($null -eq $qaJson) {
                     $response.StatusCode = 503
                     $bytes = [System.Text.Encoding]::UTF8.GetBytes("위임 기록 DB 를 읽지 못했습니다.")
@@ -2807,6 +3109,44 @@ try {
                 $response.ContentLength64 = $bytes.Length
                 $response.OutputStream.Write($bytes, 0, $bytes.Length)
 
+            } elseif ($urlPath -eq "/api/estimate-guard") {
+
+                # Claude Code 의 PreToolUse HTTP 훅: 질문의 예상(record-estimate)이 아직 없으면 일을 시작하는 도구를 막는다. 명령 훅보다 훨씬 빨라(수 ms) 도구 호출마다 건다.
+                # 본문은 훅 입력 JSON. 응답은 {} (통과) 또는 permissionDecision=deny. 뷰어가 꺼져 있으면 훅 요청이 실패해 막지 않고 지나가며, 끝낼 때(Stop 훅)에 다시 걸린다.
+                $egCode = 200
+                $egPayload = $null
+                if ($request.HttpMethod -ne "POST") {
+                    $egCode = 405; $response.Headers.Add("Allow", "POST")
+                } elseif ($request.Headers["X-Samjil-Viewer"] -ne "1") {
+                    $egCode = 403
+                } else {
+                    $egBody = ""
+                    try {
+                        $egReader = New-Object System.IO.StreamReader($request.InputStream, (New-Object System.Text.UTF8Encoding($false)))
+                        $egBody = $egReader.ReadToEnd()
+                    } catch { $egBody = "" }
+                    $egRes = @{ Action = 'allow'; Message = '' }
+                    if ($egBody.Length -le 1048576 -and (Get-Command Invoke-EstimateGuard -ErrorAction SilentlyContinue)) {
+                        $egRes = Invoke-EstimateGuard -EventJson $egBody -RuntimeDir $RuntimeDir
+                    }
+                    if ($egRes.Action -eq 'deny') {
+                        $egPayload = @{ hookSpecificOutput = @{ hookEventName = "PreToolUse"; permissionDecision = "deny"; permissionDecisionReason = [string]$egRes.Message } }
+                    } else {
+                        $egPayload = @{}
+                    }
+                }
+                $response.StatusCode = $egCode
+                if ($null -ne $egPayload) {
+                    $bytes = [System.Text.Encoding]::UTF8.GetBytes(($egPayload | ConvertTo-Json -Depth 5 -Compress))
+                    $response.ContentType = "application/json; charset=utf-8"
+                    $response.Headers.Add("Cache-Control", "no-store")
+                } else {
+                    $bytes = [System.Text.Encoding]::UTF8.GetBytes($(if ($egCode -eq 403) { "Forbidden" } else { "Method Not Allowed" }))
+                    $response.ContentType = "text/plain; charset=utf-8"
+                }
+                $response.ContentLength64 = $bytes.Length
+                $response.OutputStream.Write($bytes, 0, $bytes.Length)
+
             } elseif ($urlPath -eq "/api/qa/file-sizes") {
 
                 # 위임 기록의 과정에 나온 파일의 크기(바이트). "Claude 토큰 절약" 예상에서 읽은 파일·쓴 파일의 분량을 어림하는 데 쓴다.
@@ -3081,15 +3421,17 @@ try {
                         }
                     }
 
-                    if (-not $isScanning -and $lastClaudeScanProc) {
+                    $scanProc = $ViewerShared['lastClaudeScanProc']
+                    if (-not $isScanning -and $scanProc) {
                         try {
-                            if (-not $lastClaudeScanProc.HasExited) {
+                            if (-not $scanProc.HasExited) {
                                 $isScanning = $true
                             }
                         } catch {}
                     }
 
-                    $recentlyLaunched = ($lastClaudeScanLaunchAt -and (((Get-Date) - $lastClaudeScanLaunchAt).TotalSeconds -lt 5))
+                    $scanLaunchAt = $ViewerShared['lastClaudeScanLaunchAt']
+                    $recentlyLaunched = ($scanLaunchAt -and (((Get-Date) - $scanLaunchAt).TotalSeconds -lt 5))
 
                     $indexExists = Test-Path -LiteralPath $indexFile
                     $indexStale = $false
@@ -3105,18 +3447,27 @@ try {
                     if ($needScan -and (-not $isScanning) -and (-not $recentlyLaunched)) {
                         $scannerScript = Join-Path $PSScriptRoot "scan-claude-links.ps1"
                         if (Test-Path -LiteralPath $scannerScript) {
-                            $lastClaudeScanLaunchAt = Get-Date
                             $isScanning = $true
+                            [System.Threading.Monitor]::Enter($ViewerShared.SyncRoot)
                             try {
-                                $psi = New-Object System.Diagnostics.ProcessStartInfo
-                                $psi.FileName = "powershell.exe"
-                                $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$scannerScript`" -IndexFile `"$indexFile`""
-                                $psi.UseShellExecute = $false
-                                $psi.CreateNoWindow = $true
-                                $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
-                                $lastClaudeScanProc = [System.Diagnostics.Process]::Start($psi)
+                                $scanProcNow = $ViewerShared['lastClaudeScanProc']
+                                $scanLaunchAtNow = $ViewerShared['lastClaudeScanLaunchAt']
+                                $procBusy = ($scanProcNow -and -not $scanProcNow.HasExited)
+                                $recent = ($scanLaunchAtNow -and (((Get-Date) - $scanLaunchAtNow).TotalSeconds -lt 5))
+                                if (-not $procBusy -and -not $recent) {
+                                    $ViewerShared['lastClaudeScanLaunchAt'] = Get-Date
+                                    $psi = New-Object System.Diagnostics.ProcessStartInfo
+                                    $psi.FileName = "powershell.exe"
+                                    $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$scannerScript`" -IndexFile `"$indexFile`""
+                                    $psi.UseShellExecute = $false
+                                    $psi.CreateNoWindow = $true
+                                    $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+                                    $ViewerShared['lastClaudeScanProc'] = [System.Diagnostics.Process]::Start($psi)
+                                }
                             } catch {
                                 $isScanning = $false
+                            } finally {
+                                [System.Threading.Monitor]::Exit($ViewerShared.SyncRoot)
                             }
                         }
                     }
@@ -3215,8 +3566,60 @@ try {
                 $params = Get-Utf8QueryParams $request.Url
                 $qDays = 30
                 if ($params["days"]) { [void][int]::TryParse([string]$params["days"], [ref]$qDays) }
-                $statsData = Get-TokenStatsData -DbPath $AgyDbPath -DataDir $DataDir -Days $qDays
-                $json = ConvertTo-Json -InputObject $statsData -Depth 6
+                $qPage = 1
+                if ($params["page"]) { [void][int]::TryParse([string]$params["page"], [ref]$qPage) }
+                $qPageSize = 20
+                if ($params["page_size"]) { [void][int]::TryParse([string]$params["page_size"], [ref]$qPageSize) }
+                $qPath = if ($params["path"]) { [string]$params["path"] } else { "" }
+                # 통계가 오래됐으면(진행 중이던 턴이 끝났는데 수집이 그 전에 한 번 돈 경우 등) 백그라운드로 한 번 더 수집한다. 확인은 1분에 한 번, 수집은 3분에 한 번까지만.
+                # 페이지 이동 요청(page_move=1 또는 page > 1)에서는 자동 수집 검사를 건너뛰어 페이지 전환 속도를 높인다.
+                $autoStarted = $false
+                $isPageMove = ($params["page_move"] -eq "1" -or $qPage -gt 1)
+                try {
+                    $nowAuto = Get-Date
+                    if (-not $isPageMove -and -not $env:SAMJIL_NO_AUTO_COLLECT) {
+                        [System.Threading.Monitor]::Enter($ViewerShared.SyncRoot)
+                        try {
+                            $tsProcCur = $ViewerShared['lastTokenStatsProc']
+                            $procBusy = ($tsProcCur -and -not $tsProcCur.HasExited)
+                            $lastCheck = $ViewerShared['lastAutoCollectCheckAt']
+                            if (-not $procBusy -and ($nowAuto - $lastCheck).TotalSeconds -ge 60) {
+                                $ViewerShared['lastAutoCollectCheckAt'] = $nowAuto
+                                $lastCollect = $ViewerShared['lastAutoCollectAt']
+                                if (($nowAuto - $lastCollect).TotalSeconds -ge 180 -and -not (Test-Path -LiteralPath (Join-Path $RuntimeDir "token-stats.lock")) -and (Test-TokenStatsStale $DataDir $ClaudeProjectsDir)) {
+                                    $tsScriptAuto = Find-DelegateScript "sub\token-stats.ps1"
+                                    if ($tsScriptAuto -and (Test-Path -LiteralPath $tsScriptAuto)) {
+                                        $psiA = New-Object System.Diagnostics.ProcessStartInfo
+                                        $psiA.FileName = "powershell.exe"
+                                        $psiA.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$tsScriptAuto`" -Update -DbPath `"$AgyDbPath`" -RuntimeDir `"$RuntimeDir`""
+                                        $psiA.UseShellExecute = $false
+                                        $psiA.CreateNoWindow = $true
+                                        $psiA.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+                                        $ViewerShared['lastTokenStatsProc'] = [System.Diagnostics.Process]::Start($psiA)
+                                        $ViewerShared['lastAutoCollectAt'] = $nowAuto
+                                        $autoStarted = $true
+                                    }
+                                }
+                            }
+                        } finally {
+                            [System.Threading.Monitor]::Exit($ViewerShared.SyncRoot)
+                        }
+                    }
+                } catch {}
+                # 같은 조건(기간 · 쪽 · 처리 방식)이고 데이터 도장이 같으면(같은 시간대 안) 지난번 응답을 그대로 준다(만드는 데 수 초 걸린다)
+                $tsStamp = Get-ViewerDataStamp $AgyDbPath $DataDir
+                $tsKey = if ($tsStamp) { ("{0}|{1}|{2}|{3}|{4}|{5}" -f $qDays, $qPage, $qPageSize, $qPath, (Get-Date -Format "yyyyMMddHH"), $tsStamp) } else { "" }
+                $tsCache = $ViewerShared['TokenStatsCache']
+                if ($tsKey -and $tsCache -and $tsCache.Key -eq $tsKey) {
+                    $json = [string]$tsCache.Json
+                    $response.Headers.Add("X-Samjil-Cache", "hit")
+                } else {
+                    $statsData = Get-TokenStatsData -DbPath $AgyDbPath -DataDir $DataDir -Days $qDays -RecentPage $qPage -RecentPageSize $qPageSize -RecentPath $qPath
+                    $json = ConvertTo-Json -InputObject $statsData -Depth 6
+                    if ($tsKey) { $ViewerShared['TokenStatsCache'] = @{ Key = $tsKey; Json = $json } }
+                }
+                # 백그라운드 수집을 막 시작했으면 화면이 잠시 뒤 다시 불러오도록 표시를 붙인다(저장해 둔 응답에는 넣지 않는다)
+                if ($autoStarted) { $json = '{"auto_collect": true,' + $json.TrimStart().Substring(1) }
                 $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
                 $response.ContentType = "application/json; charset=utf-8"
                 $response.Headers.Add("Cache-Control", "no-store")
@@ -3233,7 +3636,8 @@ try {
                 } else {
                     $lockFile = Join-Path $RuntimeDir "token-stats.lock"
                     $isRunning = $false
-                    if ($lastTokenStatsProc -and -not $lastTokenStatsProc.HasExited) {
+                    $tsProcRefresh = $ViewerShared['lastTokenStatsProc']
+                    if ($tsProcRefresh -and -not $tsProcRefresh.HasExited) {
                         $isRunning = $true
                     } elseif (Test-Path -LiteralPath $lockFile) {
                         $lockPid = 0
@@ -3265,7 +3669,7 @@ try {
                                 $psi.UseShellExecute = $false
                                 $psi.CreateNoWindow = $true
                                 $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
-                                $lastTokenStatsProc = [System.Diagnostics.Process]::Start($psi)
+                                $ViewerShared['lastTokenStatsProc'] = [System.Diagnostics.Process]::Start($psi)
                                 $outObj = [ordered]@{ started = $true }
                             } catch {
                                 $outObj = [ordered]@{ started = $false; reason = [string]$_.Exception.Message }
@@ -3279,6 +3683,23 @@ try {
                     $response.ContentType = "application/json; charset=utf-8"
                     $response.Headers.Add("Cache-Control", "no-store")
                 }
+                $response.ContentLength64 = $bytes.Length
+                $response.OutputStream.Write($bytes, 0, $bytes.Length)
+
+            } elseif ($env:SAMJIL_VIEWER_TEST -eq "1" -and $urlPath -eq "/api/_test/sleep") {
+
+                # 시험용 느린 요청 (동시성 시험 전용)
+                $params = Get-Utf8QueryParams $request.Url
+                $sleepMs = 0
+                if ($params["ms"]) { [void][int]::TryParse([string]$params["ms"], [ref]$sleepMs) }
+                if ($sleepMs -lt 0) { $sleepMs = 0 }
+                if ($sleepMs -gt 5000) { $sleepMs = 5000 }
+                if ($sleepMs -gt 0) { Start-Sleep -Milliseconds $sleepMs }
+
+                $json = "{`"slept`":$sleepMs}"
+                $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
+                $response.ContentType = "application/json; charset=utf-8"
+                $response.Headers.Add("Cache-Control", "no-store")
                 $response.ContentLength64 = $bytes.Length
                 $response.OutputStream.Write($bytes, 0, $bytes.Length)
 
@@ -3354,13 +3775,86 @@ try {
 
     }
 
+try {
+
+    if ($WorkerMode) {
+
+        while ($listener.IsListening) {
+            $context = $null
+            try {
+                $context = $listener.GetContext()
+            } catch {
+                break
+            }
+            if ($context) {
+                . $ViewerHandleRequest
+            }
+        }
+
+    } else {
+
+        $pendingContext = $null
+
+        while ($listener.IsListening) {
+
+            # 워처 주기 점검. 점검 시각이 아니면 바로 돌아옵니다(점검 자체가 예외를 내도 서버는 계속 돕니다).
+            if ($watcherHealth) {
+                try {
+                    $tickResult = Invoke-WatcherHealthTick $watcherHealth
+                    if ($tickResult -eq 'restart') {
+                        Write-Host ("[{0}] agy 워처가 꺼져 있어 자동으로 다시 켭니다 (창 없이 실행, 20초 뒤 재확인)." -f (Get-Date -Format 'HH:mm:ss')) -ForegroundColor Yellow
+                    } elseif ($tickResult -like 'launch-failed*') {
+                        Write-Host ("[{0}] agy 워처 자동 재시작 실패: {1}" -f (Get-Date -Format 'HH:mm:ss'), $tickResult) -ForegroundColor Red
+                    }
+                } catch {}
+            }
+
+            $context = $null
+
+            try {
+
+                # 요청이 없어도 1초마다 깨어나 위 점검을 챙깁니다(GetContext 는 요청이 올 때까지 막혀서 쓸 수 없음).
+                if ($null -eq $pendingContext) { $pendingContext = $listener.GetContextAsync() }
+
+                if (-not $pendingContext.Wait(1000)) { continue }
+
+                $context = $pendingContext.GetAwaiter().GetResult()
+
+                $pendingContext = $null
+
+            } catch {
+
+                break
+
+            }
+
+            if ($context) {
+                . $ViewerHandleRequest
+            }
+
+        }
+
+    }
+
 } finally {
 
-    try { $listener.Stop() } catch {}
+    if (-not $WorkerMode) {
 
-    try { $listener.Close() } catch {}
+        if ($listener) {
+            try { $listener.Stop() } catch {}
+            try { $listener.Close() } catch {}
+        }
 
-    Write-Host "`n웹 뷰어 서버를 종료했습니다."
+        foreach ($w in $workers) {
+            try { $w.PowerShell.Stop() } catch {}
+            try { $w.PowerShell.Dispose() } catch {}
+            try { $w.Runspace.Close() } catch {}
+            try { $w.Runspace.Dispose() } catch {}
+        }
+
+        Write-Host "`n웹 뷰어 서버를 종료했습니다."
+
+    }
 
 }
 

@@ -2649,9 +2649,109 @@ code.inline-image-ref { cursor: zoom-in; text-decoration: underline dotted var(-
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
+.stats-recent-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.stats-recent-controls select {
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--ink-2);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+  outline: none;
+}
+.stats-recent-controls select:focus {
+  border-color: var(--line-strong);
+}
+.stats-recent-controls button {
+  height: 28px;
+  min-width: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--ink);
+  font-size: var(--fs-sm);
+  line-height: 1;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  user-select: none;
+  transition: all 0.15s ease;
+}
+.stats-recent-controls button:hover:not(:disabled) {
+  background: var(--raised);
+  border-color: var(--line-strong);
+  color: var(--ink-strong);
+}
+.stats-recent-controls button:disabled {
+  color: var(--ink-3);
+  border-color: var(--line);
+  background: transparent;
+  cursor: default;
+  opacity: 0.5;
+}
+#stats-recent-pageinfo {
+  font-size: var(--fs-xs);
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
 .stats-recent-table-wrap {
+  position: relative;
   width: 100%;
   overflow-x: auto;
+}
+.stats-recent-table-wrap.is-loading .stats-recent-table {
+  opacity: 0.38;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+}
+.stats-recent-loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: var(--backdrop);
+  color: var(--ink);
+  font-size: var(--fs-sm);
+  z-index: 10;
+  pointer-events: all;
+  border-radius: var(--r-md);
+}
+.stats-recent-spinner {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid var(--agy-soft);
+  border-top-color: var(--agy);
+  border-radius: 50%;
+  animation: stats-spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+.stats-recent-loading-text {
+  font-size: var(--fs-sm);
+  color: var(--ink-2);
+  font-weight: 500;
+}
+@keyframes stats-spin {
+  to { transform: rotate(360deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .stats-recent-spinner {
+    animation: none;
+  }
+  .stats-recent-table-wrap.is-loading .stats-recent-table {
+    transition: none;
+  }
 }
 .stats-recent-table {
   width: 100%;
@@ -2686,9 +2786,13 @@ code.inline-image-ref { cursor: zoom-in; text-decoration: underline dotted var(-
 }
 .stats-recent-table td {
   font-size: var(--fs-xs);
+  vertical-align: middle;   /* 값이 한 줄뿐인 칸(처리 · 호출의 배지와 호출 수)도 두 줄 칸과 가운데 높이로 맞춘다 */
 }
 .stats-recent-table th {
   white-space: normal;      /* 머리글은 길게 풀어 쓰고 두 줄로 접는다(값 칸은 한 줄 유지) */
+  word-break: keep-all;     /* 한글은 띄어쓰기에서만 접는다. 기본값이면 폭이 좁을 때 '도구 호/출'처럼 한 글자씩 끊긴다 */
+  word-break: auto-phrase;  /* 지원하는 브라우저(Chromium 계열)는 구절 단위로 접는다. 지원하지 않으면 위 keep-all 이 그대로 적용된다 */
+  overflow-wrap: normal;
   line-height: 1.3;
   vertical-align: bottom;
 }
@@ -2698,7 +2802,62 @@ code.inline-image-ref { cursor: zoom-in; text-decoration: underline dotted var(-
   text-overflow: ellipsis;
 }
 .stats-recent-table td[title] { cursor: help; }
-.path-badge.chat { background: var(--soft-surface); color: var(--ink-3); }
+/* 최근 20턴 표의 칸: 이름(왼쪽)과 값(오른쪽)을 두 줄로 쌓고, 칸마다 폭을 정해 행이 달라도 이름 · 숫자 · 단위(분/초)가 같은 세로선에 서게 한다 */
+.est-pair {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: stretch;
+  text-align: left;
+  line-height: 1.3;
+  font-variant-numeric: tabular-nums;
+  vertical-align: middle;
+}
+.est-line {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.45em;
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+.est-line.solo { justify-content: flex-end; }
+.est-pair.left .est-line { justify-content: flex-start; }
+.est-line.chosen {
+  font-weight: 600;
+  color: var(--ink);
+}
+.est-line.muted { color: var(--ink-3); }
+.est-line[title] { cursor: help; }
+.est-lbl {
+  font-size: 11px;
+  color: var(--ink-3);
+  font-weight: 400;
+}
+.est-lbl.raw { font-size: inherit; color: inherit; font-weight: inherit; }
+.est-val { text-align: right; }
+.tm { display: inline-flex; justify-content: flex-end; align-items: baseline; }
+.tsign { display: inline-block; }   /* 부호는 값이 처음 나오는 칸의 숫자 바로 앞. 칸이 넓어지면 왼쪽으로 자라서 단위(분/초)의 자리는 그대로다 */
+.tslot { display: inline-flex; justify-content: flex-end; align-items: baseline; }
+.tslot.h { min-width: 3.1em; }
+.tslot.m, .tslot.s { min-width: 2.4em; }
+.tn { display: inline-block; min-width: 1.2em; text-align: right; }
+.est-pair.w-proc { min-width: 7.4em; }
+.est-pair.w-tok { min-width: 5.4em; }   /* 이름(직접/위임)과 값 사이가 너무 벌어지지 않게 값이 들어갈 만큼만 */
+.est-pair.w-act { min-width: 5.4em; }
+.est-pair.w-tokdelta { min-width: 5.8em; }
+/* 증감(토큰) 값: 처리 · 호출 칸의 배지와 같은 바탕색으로 위임 / 직접 기준을 구분한다(값의 글자색은 부호 색) */
+.delta-chip { display: inline-block; padding: 0 6px; border-radius: var(--r-sm); }
+.delta-chip.direct { background: var(--claude-soft); }
+.delta-chip.delegate { background: var(--agy-soft); }
+.est-pair.w-acc { min-width: 3em; }
+.est-pair.w-time { min-width: 7.2em; }
+.est-pair.w-time.hh { min-width: 10.2em; }
+.est-pair.w-work { min-width: 7.2em; }
+.est-pair.w-work.hh { min-width: 10.2em; }
+.est-pair.w-tdelta { min-width: 7.6em; }
+.est-pair.w-tdelta.hh { min-width: 10.6em; }
+.stats-recent-table td.left { text-align: left; }
+.stats-recent-table .est-line .path-badge { margin-right: 0; }.path-badge.chat { background: var(--soft-surface); color: var(--ink-3); }
 .stats-recent-table .path-badge {
   white-space: nowrap;
 }
@@ -2880,21 +3039,21 @@ code.inline-image-ref { cursor: zoom-in; text-decoration: underline dotted var(-
 .token-claude-line .tok-item .tok-val { font-family: var(--font-mono); font-size: var(--fs-xs); font-weight: 500; font-variant-numeric: tabular-nums; color: var(--ink); }
 /* 줄 이름: 토큰 / 시간 (두 줄의 첫 글자가 같은 자리에서 시작하도록 폭을 맞춘다) */
 .token-claude-line .tok-claude-head { min-width: 3em; }
-.token-claude-line .tok-item.tok-col { min-width: 88px; }
+.token-claude-line .tok-item.tok-col { min-width: 108px; }   /* 가장 긴 "실제 19분 53초" 도 넘치지 않는 폭: 넘치면 뒤의 식이 밀려 두 줄의 = 가 어긋난다 */
 .token-claude-line .tok-col + .tok-col { margin-left: -8px; }   /* 직접·위임·실제 사이 간격을 좁힌다(열 폭은 그대로라 두 줄이 정렬된다) */
 /* 계산식: 숫자 둘(a - b)을 왼쪽 맞춤의 고정 폭 열로 두어, 토큰 줄과 시간 줄의 숫자·- = 기호·결과값이 같은 세로선에서 시작하게 한다 */
 .token-claude-line .tok-formula { display: inline-flex; flex-wrap: nowrap; align-items: baseline; column-gap: 3px; white-space: nowrap; }
 .token-claude-line .tok-col + .tok-formula { margin-left: -4px; }
 .token-claude-line .tok-formula + .tok-item { margin-left: -4px; }
 .token-claude-line .tok-formula .tok-item.tok-arrow { margin: 0; min-width: 20px; }
-.token-claude-line .tok-formula .tok-item.tok-op { margin: 0; min-width: 12px; justify-content: center; }
-.token-claude-line .tok-formula .tok-item.tok-f-a { min-width: 62px; justify-content: flex-start; }
-.token-claude-line .tok-formula .tok-item.tok-f-b { min-width: 44px; justify-content: flex-start; }
-/* 결과 칸도 고정 폭(가장 긴 "+33분 46초" 알약 기준): 뒤따르는 "호출 31회 · 실측" 이 항상 그 뒤의 같은 자리에서 시작한다 */
-.token-claude-line .tok-formula .tok-item.tok-f-r { min-width: 92px; }
+.token-claude-line .tok-formula .tok-item.tok-op { margin: 0 3px; min-width: 0; justify-content: center; }   /* 기호는 앞뒤 값과 같은 간격(3px + 열 간격 3px)으로 붙인다 */
+.token-claude-line .tok-formula .tok-item.tok-f-a { min-width: 64px; justify-content: flex-end; }   /* 숫자는 오른쪽 맞춤, 폭은 "19분 53초" 가 들어가는 크기: 두 줄의 - 와 = 가 같은 세로선에 선다 */
+/* 둘째 값은 첫째 값과 같은 고정 폭 · 왼쪽 맞춤. 결과는 고정 폭을 두지 않는다 */
+.token-claude-line .tok-formula .tok-item.tok-f-b { min-width: 64px; justify-content: flex-start; }   /* 첫째 값과 같은 폭(가장 긴 "xx분 xx초" 가 약 60px)이고 왼쪽 맞춤: "-" 양옆 여백이 같고 "=" 는 모든 줄에서 같은 세로선에 선다 */
+.token-claude-line .tok-formula .tok-item.tok-f-r { min-width: 0; }
 .token-claude-line .tok-claude-head .tok-label { font-weight: 600; color: var(--ink-2); }
 /* 식의 연산자(- =): 숫자에 바짝 붙인다 */
-.token-claude-line .tok-item.tok-op { margin: 0 -3px; }
+.token-claude-line .tok-item.tok-op { margin: 0 3px; }
 .token-claude-line .tok-item.tok-op .tok-val { font-weight: 400; color: var(--ink-3); }
 .token-claude-line .tok-item.tok-arrow { margin: 0 2px; }
 /* 결과: 이름 없이 숫자만 알약(절약 초록 / 더 소모 주황) */
@@ -3031,3 +3190,99 @@ code.inline-image-ref { cursor: zoom-in; text-decoration: underline dotted var(-
   word-break: keep-all;
 }
 
+/* 위임 탭 카드의 두 버튼(계산 정보 보기 / agy 토큰 보기): 식이 길어져도 줄바꿈으로 밀려 내려가지 않게 오른쪽에 세로로 고정한다.
+   식 줄은 버튼 폭만큼 오른쪽을 비워 두고, 버튼은 카드 오른쪽 끝에 위아래로 쌓는다(계산 정보 버튼이 없으면 agy 토큰 버튼이 맨 위). */
+.meta.token-meta { position: relative; padding-right: 9.4em; min-height: 4.4em; }
+.meta.token-meta .btn-toggle-agy-tok { position: absolute; right: 0; margin: 0; width: 8.6em; justify-content: center; text-align: center; }
+.meta.token-meta .btn-toggle-agy-tok.btn-toggle-calc { top: 0; }
+.meta.token-meta .btn-toggle-agy-tok:not(.btn-toggle-calc) { top: 2.2em; }
+.meta.token-meta:not(:has(.btn-toggle-calc)) .btn-toggle-agy-tok { top: 0; }
+/* 질문을 받을 때가 아니라 나중에 질문 원문만 보고 채운 예상(est_kind=backfill): 흐리게 · 기울여 구분한다(칸 폭은 그대로) */
+.stats-recent-table td.est-bf .est-val { font-style: italic; opacity: 0.72; }
+
+.stats-reason-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  font-size: var(--fs-xs);
+  color: var(--ink-2);
+  margin-right: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+.stats-reason-toggle input[type="checkbox"] {
+  margin: 0;
+  cursor: pointer;
+}
+.stats-recent-table tr.reason-row td {
+  font-size: 12px;
+  color: var(--ink-2);
+  text-align: left;
+  padding-top: 8px;
+  padding-bottom: 8px;
+  border-top: none;
+  /* 사유 줄 아래 선은 다른 행과 같은 1줄 실선(사유 보기 끄기 전과 동일) */
+  white-space: normal;
+  word-break: break-all;
+}
+/* 본 행과 사유 줄 사이는 선 없이 여백만 좁게 둔다(한 덩어리로 보이게) */
+.stats-recent-table tr:has(+ tr.reason-row) td {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+.reason-label {
+  display: inline-block;
+  font-size: 10px;
+  padding: 1px 4px;
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  color: var(--ink-3);
+  margin-right: 4px;
+  vertical-align: middle;
+}
+.reason-none {
+  color: var(--ink-3);
+}
+
+/* 통계 [질문 기록] 위임 행 -> 에이전트 위임 카드 링크 및 카드 강조 */
+.path-badge-link {
+  text-decoration: none;
+  cursor: pointer;
+}
+.path-badge-link:hover .path-badge {
+  outline: 1px solid var(--agy);
+}
+.task-more {
+  font-size: 11px;
+  color: var(--agy);
+  margin-left: 3px;
+  text-decoration: none;
+  cursor: pointer;
+}
+a.task-more:hover {
+  text-decoration: underline;
+}
+span.task-more {
+  cursor: default;
+}
+.card.card-focus {
+  box-shadow: 0 0 0 2px var(--agy);
+  transition: box-shadow 0.3s;
+}
+.top-toast {
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 99999;
+  background: var(--card-bg, #222);
+  color: var(--ink, #fff);
+  border: 1px solid var(--line, #444);
+  border-radius: var(--r-md, 6px);
+  padding: 10px 18px;
+  font-size: var(--fs-sm, 13px);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  pointer-events: none;
+  transition: opacity 0.3s;
+}

@@ -207,7 +207,19 @@ try {
     }
     $recScript = Join-Path (Split-Path $PSScriptRoot -Parent) "record-estimate.ps1"
     if (Test-Path -LiteralPath $recScript) {
-        Write-Output ("[예상 기록] 직접/위임을 정한 즉시(턴마다 한 번, 다른 도구 호출보다 먼저) 아래 명령으로 예상을 남긴다. 그 턴의 답변 끝에는 예상 줄을 쓰지 않는다. 기록 호출은 호출 수에 세지 않는다. 토큰은 1.3k 형식, 시간은 14s 1m30s 형식: powershell.exe -NoProfile -ExecutionPolicy Bypass -File ""{0}"" -Direct <토큰> -Delegate <토큰> -TimeDirect <시간> -TimeDelegate <시간> -Choice direct|delegate -Level low|medium|high" -f $recScript)
+        $corrLine = $null
+        if ($null -ne $cal -and $null -ne $cal.correction) {
+            try {
+                $corrText = {
+                    param($name, $c)
+                    if ($null -ne $c -and $null -ne $c.ratio) { "{0} ×{1:0.00}(실제÷예상 중앙값 {2:0.00}, 최근 표본 {3}개)" -f $name, [double]$c.factor, [double]$c.ratio, [int]$c.n }
+                    else { "{0} ×1.00(최근 표본 {1}개로 5개 미만이라 보정 안 함)" -f $name, $(if ($null -ne $c -and $null -ne $c.n) { [int]$c.n } else { 0 }) }
+                }
+                $corrLine = "[예상 보정] 최근 실측에서 예상이 실제와 어긋난 만큼 다음 예상을 보정한다: " + (& $corrText "직접" $cal.correction.direct) + ", " + (& $corrText "위임" $cal.correction.delegate) + ". 토큰 예상은 식으로 구한 값에 이 계수를 곱한 뒤 직접·위임을 비교하고, 기록(record-estimate)에도 곱한 값을 적고, 곱한 계수를 -FactorDirect · -FactorDelegate 로 함께 적는다(통계가 보정 전 값으로 다음 계수를 계산하려고). 계수는 표본이 적을수록 1 쪽으로 당겨져 있고 통계를 갱신할 때마다 바뀐다."
+            } catch {}
+        }
+        if ($corrLine) { Write-Output $corrLine }
+        Write-Output ("[예상 기록] 직접/위임을 정한 즉시(질문마다 한 번, 다른 도구 호출보다 먼저) 아래 명령으로 예상을 남긴다. 통계는 질문 한 건이 한 행이다. 일하는 중에 사용자가 새 질문을 보내면(도착 순서로 질문 2, 3번) 그 질문도 같은 명령으로 따로 기록하고, 앞 질문 일로 돌아오면 record-estimate.ps1 -Switch <질문 번호> 를 한 번 부른다(다른 질문 때문에 생긴 지연이 앞 질문 시간에 더해지지 않게 하는 표시). 첫 작업이 Bash 명령이면 기록을 그 명령 앞에 붙여 한 번에 실행한다(예: record-estimate … ; git status. 따로 부르면 모델이 한 번 더 돌며 대화 전체를 다시 읽는다). 그 턴의 답변 끝에는 예상 줄을 쓰지 않는다. 기록 호출은 호출 수에 세지 않는다. 토큰은 1.3k 형식, 시간은 14s 1m30s 형식: powershell.exe -NoProfile -ExecutionPolicy Bypass -File ""{0}"" -Direct <토큰> -Delegate <토큰> -TimeDirect <시간> -TimeDelegate <시간> -Choice direct|delegate -Level low|medium|high -FactorDirect <직접 계수> -FactorDelegate <위임 계수> -Reason ""<직접/위임을 고른 이유 한 줄>"". 기록 뒤 [경고] 가 나오면 직접 처리 사유 4가지에 해당하는지 다시 따져 아니면 위임으로 바꿔 다시 기록한다" -f $recScript)
     }
 } catch {
     # 훅 오류가 세션 시작을 막으면 안 된다.

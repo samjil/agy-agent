@@ -300,16 +300,15 @@
               <!-- 2) 헤드라인 -->
               <section class="stats-headline-card">
                 <div class="stats-headline-hero">
-                  <span class="stats-hero-label">토큰 증감 (직접 대비, 추정)</span>
+                  <span class="stats-hero-label" title="위임한 질문마다 (위임으로만 쓴 Claude 토큰 - 직접 했을 때의 예상)을 더한 값. + 는 위임해서 더 쓴 것, - 는 아낀 것. 직접 처리한 질문과 agy 토큰은 넣지 않는다">위임 손익 토큰 (직접 대비)</span>
                   <div class="stats-hero-number stats-loading" id="stats-hero-saved">불러오는 중…</div>
                   <p class="stats-hero-sub" id="stats-hero-desc">최근 30일 · 불러오는 중…</p>
                 </div>
                 <div class="stats-headline-divider" aria-hidden="true"></div>
                 <div class="stats-headline-summary">
                   <div class="stats-summary-line" id="stats-sum-success">위임 성공률 -</div>
-                  <div class="stats-summary-line" id="stats-sum-accuracy">예상 정확도 -</div>
-                  <div class="stats-summary-line" id="stats-sum-formula">표본 0턴 · 보정식 -</div>
-                  <div class="stats-summary-line" id="stats-sum-cache" style="display: none;"></div>
+                  <div class="stats-summary-line" id="stats-sum-accuracy">비율 -</div>
+                  <div class="stats-summary-line" id="stats-sum-formula">표본 0건 · 보정식 -</div>
                   <div class="stats-summary-line" id="stats-sum-time">처리 시간 -</div>
                 </div>
               </section>
@@ -348,7 +347,7 @@
                   <div class="stats-legend">
                     <span class="legend-item"><span class="legend-line claude"></span>직접</span>
                     <span class="legend-item"><span class="legend-line agy"></span>위임</span>
-                    <span class="legend-item"><span class="legend-line dashed"></span>정확(1.0)</span>
+                    <span class="legend-item"><span class="legend-line dashed"></span>정확(1.00)</span>
                   </div>
                 </div>
                 <div class="stats-chart-viewport" id="chart-accuracy-view"></div>
@@ -376,42 +375,54 @@
                   <div class="stats-legend">
                     <span class="legend-item"><span class="legend-line claude"></span>직접</span>
                     <span class="legend-item"><span class="legend-line agy"></span>위임</span>
-                    <span class="legend-item"><span class="legend-line dashed"></span>정확(1.0)</span>
+                    <span class="legend-item"><span class="legend-line dashed"></span>정확(1.00)</span>
                   </div>
                 </div>
                 <div class="stats-chart-viewport" id="chart-time-accuracy-view"></div>
                 <div class="stats-table-viewport" id="table-time-accuracy-view" style="display: none;"></div>
               </section>
 
-              <!-- 8) 표: 최근 20턴 -->
+              <!-- 8) 표: 질문 기록 -->
               <section class="stats-card" id="card-table-recent">
                 <div class="stats-card-head">
-                  <h3 class="stats-card-title">최근 20턴</h3>
+                  <h3 class="stats-card-title" title="최근순 정렬">질문 기록</h3>
+                  <div class="stats-recent-controls">
+                    <label class="stats-reason-toggle" title="각 행 아래에 직접/위임을 고른 사유를 보입니다"><input type="checkbox" id="stats-recent-reason"> 사유 보기</label>
+                    <select id="stats-recent-path" aria-label="처리 방식 필터" title="처리 방식 필터">
+                      <option value="">전체</option>
+                      <option value="delegate">위임</option>
+                      <option value="direct">직접</option>
+                      <option value="chat">대화</option>
+                    </select>
+                    <button type="button" id="stats-recent-prev" aria-label="이전 쪽" title="이전 쪽">‹</button>
+                    <span id="stats-recent-pageinfo"></span>
+                    <button type="button" id="stats-recent-next" aria-label="다음 쪽" title="다음 쪽">›</button>
+                  </div>
                 </div>
                 <div class="stats-recent-table-wrap">
+                  <div class="stats-recent-loading" id="stats-recent-loading" style="display: none;" role="status" aria-live="polite">
+                    <span class="stats-recent-spinner" aria-hidden="true"></span>
+                    <span class="stats-recent-loading-text">불러오는 중…</span>
+                  </div>
                   <table class="stats-recent-table" id="stats-recent-table">
                     <thead>
                       <tr>
-                        <th title="턴이 시작된 시각(마우스를 올리면 연·초까지 보입니다)">시각</th>
-                        <th title="Claude Code 프로젝트 폴더 이름(마우스를 올리면 전체 이름이 보입니다)">프로젝트</th>
-                        <th title="누가 처리했는지: 직접(Claude가 직접) · 위임(agy에 맡김) · 대화(도구를 부르지 않은 답)">처리 방식</th>
-                        <th class="num" title="그 턴에서 Claude가 부른 도구(파일 읽기·명령 실행 등) 횟수">도구 호출</th>
-                        <th class="num" title="도구를 부를 때마다 대화 전체를 다시 읽은 양(캐시 읽기)의 합. 참고용이고 절약 계산에는 넣지 않습니다">컨텍스트 재읽기</th>
-                        <th class="num" title="답변 끝에 적은, 선택한 처리 방식의 Claude 토큰 예상">예상 토큰</th>
-                        <th class="num" title="그 턴에서 실제로 늘어난 컨텍스트(새로 읽은 것과 쓴 것)">실제 토큰</th>
-                        <th class="num" title="예상 ÷ 실제. 1.0배에 가까울수록 정확하고, 1보다 작으면 예상이 낮았습니다">예상 정확도</th>
-                        <th class="num" title="다른 쪽으로 처리했을 때(예상)와 비교한 토큰 증감(추정). + 는 늘어난 것(더 소모), - 는 줄어든 것(절약)">증감</th>
-                        <th class="num" title="답변 끝에 적은 처리 시간 예상">예상 시간</th>
-                        <th class="num" title="직접: Claude가 일한 시간 · 위임: agy가 처리한 시간">실제 시간</th>
-                        <th class="num" title="그 턴에서 Claude가 일한 시간(사용자 응답을 기다린 긴 빈 구간은 뺌)">Claude 작업 시간</th>
+                        <th title="사용자가 질문(프롬프트)을 입력한 시각(위)과 Claude Code 프로젝트 폴더 이름(아래). 마우스를 올리면 연·초, 작업이 끝난 시각, 전체 이름이 보입니다">시각 · 프로젝트</th>
+                        <th title="누가 처리했는지(직접 · 위임 · 대화)와 그 질문의 도구 호출 횟수(위임한 질문은 위임과 관련된 호출)">처리 · 호출</th>
+                        <th class="num" title="결정 시점에 기록한 두 처리 방식의 Claude 토큰 예상입니다. 굵은 쪽이 실제로 한 방식입니다. 위임한 질문은 직접 처리했어도 생겼을 공통분을 뺀 값이라 같은 범위끼리 비교됩니다">예상 토큰</th>
+                        <th class="num" title="그 질문에 Claude가 실제로 쓴 토큰입니다. 직접 처리한 질문은 직접 줄에, 위임한 질문은 위임 줄(위임과 관련된 부분만)에 보입니다.">실제 토큰</th>
+                        <th class="num" title="위임 줄: 위임 손익 = 위임으로 쓴 실제 - 직접 했을 때의 예상(- 는 아낀 토큰, + 는 더 쓴 토큰). 직접 줄: 실제 - 예상 직접(예상 오차, 손익에는 넣지 않음).">증감</th>
+                        <th class="num" title="비율 = 실제 ÷ 예상(굵게 표시된 쪽의 예상). 1.00 에 가까울수록 정확하고, 1 보다 크면 실제가 예상보다 컸고 작으면 예상이 더 컸습니다. 이 값의 최근 중앙값이 다음 예상을 구할 때 보정 계수로 쓰입니다">비율</th>
+                        <th class="num" title="결정 시점에 기록한 두 처리 방식의 처리 시간 예상입니다. 굵은 쪽이 실제로 한 방식입니다. 위임한 질문은 위임과 무관한 Claude 시간을 뺀 값입니다">예상 시간</th>
+                        <th class="num" title="직접 시간: 그 질문에서 Claude가 일한 시간(사용자 응답을 기다린 긴 빈 구간은 뺌). 위임 시간: agy가 처리한 시간 + 위임과 관련된 Claude 시간(위임한 질문만, 직접 처리한 질문은 -)">실제 시간</th>
+                        <th class="num" title="직접 = 직접 시간 - 예상 직접 시간, 위임 = 위임 시간 - 예상 위임 시간. + 는 예상보다 더 걸린 것(주황), - 는 덜 걸린 것(초록)">시간 증감</th>
                       </tr>
-                    </thead>
-                    <tbody id="stats-recent-tbody"></tbody>
+                    </thead>                   <tbody id="stats-recent-tbody"></tbody>
                   </table>
                 </div>
               </section>
 
-              <p class="stats-footnote">증감은 실제 사용량에서 위임한 일을 직접 했다면(또는 직접 한 일을 위임했다면)의 예상을 뺀 추정값입니다. + 는 늘어난 것(더 소모), - 는 줄어든 것(절약)입니다. 한 턴에 설계·검토가 섞이면 위임 비용이 부풀고, 위임하는 일은 원래 큰 일이라 선택 편향이 있어 실제와 다를 수 있습니다.</p>
+              <p class="stats-footnote">예상은 질문을 받을 때 기록한 값 그대로이며 나중에 바뀌지 않습니다. 토큰 증감은 실제 토큰에서 직접 처리 예상을 뺀 값입니다: 위임한 질문은 위임으로만 쓴 실제 토큰 기준(- 이면 위임으로 아낀 것), 직접 처리한 질문은 예상 오차입니다. 손익 합계는 위임한 질문만 세고, 직접 처리한 질문의 토큰과 agy 토큰은 넣지 않습니다. 시간 증감은 실제 시간에서 처리한 쪽의 예상 시간을 뺀 값입니다. + 는 늘어난 것(더 소모·더 걸림), - 는 줄어든 것(절약)입니다.</p>
             </div>
 
             <!-- Hover Tooltip -->

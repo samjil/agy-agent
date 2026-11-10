@@ -21,7 +21,27 @@ if (Test-Path -LiteralPath (Join-Path $PSScriptRoot "agy-layout.ps1")) {
 
 # 예상 기록 호출(record-estimate.ps1 ... -Choice ...)은 도구 호출 수와 경로(직접/위임/대화) 판정에서 뺀다.
 # 기록은 통계를 위한 부가 호출이라 센 호출 수에 들어가면 예상 식과 순수 대화 턴이 오염된다.
-$script:RecordEstimateCallPattern = 'record-estimate\.ps1.*-Choice'
+$script:RecordEstimateCallPattern = 'record-estimate\.ps1.*(?:-Choice|-Switch)'
+
+# 도구 결과에서 위임 작업 번호를 읽는 무늬: submit-task.ps1 이 줄 맨 앞에 찍는 표시(submitted: · ===RESULT=== 등) 뒤의 번호만 읽는다.
+# 대화 기록 한 줄(JSON) 안에서 줄 맨 앞은 글자열이 시작하는 따옴표 바로 뒤이거나 \n 뒤다. 파일을 읽거나 검색한 출력 속에 인용된 것(\" 뒤)은 읽지 않는다
+# (시험 파일을 grep 한 출력의 가짜 번호가 그 질문의 위임으로 잡히던 문제).
+$script:TaskMarkPattern = '(?:(?<!\\)"|(?<!\\)\\n)(?:submitted|===RESULT===|===PENDING===|===ERROR===)[: ]+\s*(claude_\d+_\d+)'
+$script:TaskSubmittedPattern = '(?:(?<!\\)"|(?<!\\)\\n)submitted[: ]+\s*(claude_\d+_\d+)'
+
+# 이 도구 호출이 예상 기록(record-estimate)만 하는가. 기록을 첫 작업 명령 앞에 붙여 한 번에 실행하면(record-estimate … ; git status)
+# 그 호출은 실제 작업이라 호출 수에 센다. 기록만 하는 호출만 뺀다. 명령을 읽지 못하면 예전처럼 기록 호출로 본다.
+function Test-RecordEstimateOnlyLine([string]$Line) {
+    if ($Line -notmatch $script:RecordEstimateCallPattern) { return $false }
+    $m = [regex]::Match($Line, '"command"\s*:\s*"((?:[^"\\]|\\.)*)"')
+    if (-not $m.Success) { return $true }
+    $cmd = $m.Groups[1].Value -replace '\\n', "`n" -replace '\\"', '"'
+    foreach ($seg in ($cmd -split ';|&&|\|\||\r?\n')) {
+        $s = $seg.Trim()
+        if ($s -and $s -notmatch 'record-estimate\.ps1') { return $false }
+    }
+    return $true
+}
 
 function Test-IsDelegationToolCall([string]$ToolName, $InputObj) {
     if ($ToolName -and $ToolName -notmatch '(?i)^(bash|powershell|cmd|terminal)$') {
@@ -197,6 +217,43 @@ function Get-TokenTurnChoice([string]$Text) {
     if ($Text -match '\*\*\[Agy 위임 · 직접 처리( · 수준 (낮음|보통|높음))?\]\*\*') { return 'direct' }
     if ($Text -match '\*\*\[Agy 위임( · 수준 (낮음|보통|높음))?\]\*\*') { return 'delegate' }
     return $null
+}
+
+# assistant 대화 기록 한 줄에서 text 블록의 글만 이어 붙여 돌려준다(도구 입력 · 생각 블록은 뺀다).
+function Get-AssistantTextBlocks([string]$Line) {
+    try {
+        Add-Type -AssemblyName System.Web.Extensions
+        if (-not $script:TokenStatsJsonReader) { $script:TokenStatsJsonReader = New-Object System.Web.Script.Serialization.JavaScriptSerializer; $script:TokenStatsJsonReader.MaxJsonLength = [int]::MaxValue }
+        $o = $script:TokenStatsJsonReader.DeserializeObject($Line)
+        if (-not ($o -is [System.Collections.IDictionary]) -or -not $o.ContainsKey('message')) { return "" }
+        $m = $o['message']
+        if (-not ($m -is [System.Collections.IDictionary]) -or -not $m.ContainsKey('content')) { return "" }
+        $sb = New-Object System.Text.StringBuilder
+        foreach ($b in @($m['content'])) {
+            if ($b -is [System.Collections.IDictionary] -and [string]$b['type'] -eq 'text' -and $b.ContainsKey('text')) { [void]$sb.Append([string]$b['text']).Append("`n") }
+        }
+        return $sb.ToString()
+    } catch {
+        # JSON 으로 읽지 못하는 줄(잘린 줄 등)은 예전처럼 줄 전체를 글로 본다
+        return ($Line -replace '\\n', "`n" -replace '\\"', '"')
+    }
+}
+
+function Get-TokenTurnReason([string]$Text) {
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
+    $rx = [regex]'(?m)\*\*\[Agy (?:위임|delegation)[^\]]*\]\*\*[ \t]*(.*?)(?=[ \t]{2,}|\r?$)'
+    $found = @($rx.Matches($Text))
+    if ($found.Count -eq 0) { return $null }
+    $lastMatch = $found[$found.Count - 1]
+    $val = $lastMatch.Groups[1].Value
+    # 꼬리 줄이 메시지의 마지막 줄이면 대화 기록 JSON 의 나머지("}],...)가 같은 줄에 붙어 온다: 글이 끝나는 따옴표에서 자른다
+    $val = ($val -split '"\s*[,}\]]')[0]
+    if ([string]::IsNullOrWhiteSpace($val)) { return $null }
+    $val = [regex]::Replace($val, '^(?i:\s*(?:이유|why)\s*:\s*)', '')
+    $val = $val.Replace('**', '').Trim()
+    if (-not $val) { return $null }
+    if ($val.Length -gt 200) { $val = $val.Substring(0, 200) }
+    return $val
 }
 
 function Get-TokenTurnLevel([string]$Text) {
@@ -458,6 +515,251 @@ function Test-TokenStatsRealUser($Obj) {
     return $false
 }
 
+# 컨텍스트가 가득 차 압축된 뒤 Claude Code 가 자동으로 붙이는 "이어서 진행" 메시지인가. 새 질문이 아니라 하던 질문의 이어짐이다.
+function Test-TokenStatsContinuation($Obj) {
+    if ($null -eq $Obj) { return $false }
+    $msg = if ($Obj.ContainsKey('message')) { $Obj['message'] } else { $null }
+    $c = if ($msg -is [System.Collections.IDictionary] -and $msg.ContainsKey('content')) { $msg['content'] } elseif ($Obj.ContainsKey('content')) { $Obj['content'] } else { $null }
+    $t = ''
+    if ($c -is [string]) {
+        $t = $c
+    } elseif ($c -is [System.Collections.IEnumerable]) {
+        foreach ($b in $c) {
+            if ($b -is [System.Collections.IDictionary] -and [string]$b['type'] -eq 'text' -and $b.ContainsKey('text')) { $t += ([string]$b['text'] + ' ') }
+        }
+    }
+    return $t.TrimStart().StartsWith('This session is being continued')
+}
+
+# 사용자 프롬프트 하나 뒤에 이어진 작업(span) 도중 새 질문(queued_command)이 도착했으면, 질문마다 따로 행을 만든다.
+#  - 질문의 몫 나누기: 질문마다 Claude 가 "이 질문 작업을 시작했다"고 남긴 표식(record-estimate 호출, 그 시각까지 도착한 가장 최근 질문의 것)이 있으면 그 시각부터 다음 표식 전까지가 그 질문 몫이다
+#    (-Switch N 표식은 N 번째 질문 일로 돌아왔다는 뜻). 표식이 없는 질문은 도착한 시각부터가 몫이다(도착 순서). 질문 번호는 도착 순서(첫 프롬프트가 1번).
+#  - 시간: 이벤트 사이 간격(300초 상한)을 간격 끝 이벤트의 주인에게 준다. 단 새 질문 도착 · 표식 직전의 간격은 그 전 주인에게 준다
+#    (다른 질문 때문에 생긴 지연은 그 질문 몫으로 가지, 이 질문 시간에 더해지지 않는다). 질문별 시간을 모두 더하면 전체 시간과 같다.
+#  - 토큰: 메시지마다 늘어난 컨텍스트(입력 증가분은 직전 메시지 주인, 출력은 그 메시지 주인)를 주인에게 더한다. 위임 관련 · 공통 나누기는 예전 턴과 같은 방식이다.
+function Split-TurnQuestions {
+    param($Turn, $FinalUsage, $BaselineCtx, [string]$FilePath, [string]$ProjectName)
+
+    $evs = @($Turn.events)
+    $qs = New-Object System.Collections.ArrayList
+    $firstTs = $null
+    foreach ($e0 in $evs) { if ($e0.k -eq 'start') { $firstTs = $e0.ts; break } }
+    if ($null -eq $firstTs -and $evs.Count -gt 0) { $firstTs = $evs[0].ts }
+    [void]$qs.Add(@{ ts = $firstTs; text = [string]$Turn.turn_ts; marked = $false })
+    foreach ($e1 in $evs) {
+        if ($e1.k -eq 'arrival') {
+            # 행의 시각(turn_ts)은 사용자가 질문을 입력한 시각이다(Claude 에게 전달된 시각이 아니라). 몫을 나누는 기준(ts)은 전달된 시각이다.
+            $inText = [string]$e1.text
+            if ($e1.input) { $inText = [string]$e1.input }
+            [void]$qs.Add(@{ ts = $e1.ts; text = $inText; marked = $false })
+            $e1.qidx = $qs.Count - 1
+        }
+    }
+    $nq = $qs.Count
+
+    # 표식 -> 질문 묶기
+    $entries = New-Object System.Collections.ArrayList
+    foreach ($m in $evs) {
+        if ($m.k -ne 'marker') { continue }
+        $j = -1
+        if ([int]$m.sw -ge 1 -and [int]$m.sw -le $nq) {
+            $j = [int]$m.sw - 1
+        } else {
+            # 표식은 그 시각까지 도착한 가장 최근 질문의 작업 시작이다. 그 질문이 이미 표식을 받았으면(예상을 다시 기록한 경우) 새 표식으로 세지 않는다.
+            # (질문마다 표식을 남기지 못하는 일이 많아, 가장 오래된 질문부터 짝짓지 않는다: 그러면 나중 표식이 앞선 질문에 붙는다)
+            $latest = -1
+            for ($qi = 0; $qi -lt $nq; $qi++) {
+                $qq = $qs.Item($qi)
+                if ($qq.ts -le $m.ts) { $latest = $qi }
+            }
+            if ($latest -ge 0) {
+                $ql = $qs.Item($latest)
+                if (-not $ql.marked) { $j = $latest; $ql.marked = $true }
+            }
+        }
+        if ($j -ge 0) { [void]$entries.Add(@{ ts = $m.ts; q = $j }) }
+    }
+    for ($qi = 0; $qi -lt $nq; $qi++) {
+        $qq = $qs.Item($qi)
+        if (-not $qq.marked) { [void]$entries.Add(@{ ts = $qq.ts; q = $qi }) }
+    }
+    $sorted = @($entries | Sort-Object { $_.ts }, { $_.q })
+    $ownerAt = {
+        param($t)
+        $o = 0
+        foreach ($en in $sorted) { if ($en.ts -le $t) { $o = [int]$en.q } else { break } }
+        return $o
+    }
+
+    # 이벤트마다 주인과 시간
+    $dur = @{}; $qEnd = @{}; $cmdSub = @{}; $polls = @{}; $toolSub = @{}; $subIds = @{}; $taskIds = @{}
+    for ($qi = 0; $qi -lt $nq; $qi++) { $dur[$qi] = 0.0; $cmdSub[$qi] = 0; $polls[$qi] = 0; $toolSub[$qi] = 0; $subIds[$qi] = @{}; $taskIds[$qi] = @{} }
+    $msgOwner = @{}
+    $prevTs = $null
+    $prevOwner = 0
+    foreach ($ev in $evs) {
+        $own = 0
+        if ($ev.k -eq 'arrival') { $own = [int]$ev.qidx } else { $own = [int](& $ownerAt $ev.ts) }
+        $ev.owner = $own
+        if ($null -ne $prevTs) {
+            $g = ($ev.ts - $prevTs).TotalSeconds
+            if ($g -gt 0) {
+                if ($g -gt 300.0) { $g = 300.0 }
+                $gOwn = $own
+                if ($ev.k -eq 'arrival' -or $ev.k -eq 'marker') { $gOwn = $prevOwner }
+                $dur[$gOwn] = [double]$dur[$gOwn] + $g
+            }
+        }
+        $prevTs = $ev.ts
+        $prevOwner = $own
+        if (-not $qEnd.ContainsKey($own) -or $ev.ts -gt $qEnd[$own]) { $qEnd[$own] = $ev.ts }
+        if ($ev.k -eq 'asst') {
+            if ($ev.mid -and -not $msgOwner.ContainsKey([string]$ev.mid)) { $msgOwner[[string]$ev.mid] = $own }
+            $cmdSub[$own] = [int]$cmdSub[$own] + [int]$ev.sub
+            $polls[$own] = [int]$polls[$own] + [int]$ev.poll
+        } elseif ($ev.k -eq 'result') {
+            $toolSub[$own] = [int]$toolSub[$own] + [int]$ev.tsub
+            foreach ($sid in @($ev.subIds)) { $subIds[$own][[string]$sid] = $true }
+            foreach ($tid in @($ev.tasks)) { $taskIds[$own][[string]$tid] = $true }
+        }
+    }
+
+    # 토큰: 메시지 순서대로 늘어난 컨텍스트를 주인에게
+    $tot = @{}; $attrDel = @{}; $attrTot = @{}; $common = @{}; $outSum = @{}; $crSum = @{}; $calls = @{}; $callsRel = @{}; $msgCount = @{}
+    for ($qi = 0; $qi -lt $nq; $qi++) { $tot[$qi] = 0.0; $attrDel[$qi] = 0.0; $attrTot[$qi] = 0.0; $common[$qi] = 0.0; $outSum[$qi] = 0; $crSum[$qi] = 0; $calls[$qi] = 0; $callsRel[$qi] = 0; $msgCount[$qi] = 0 }
+    $msgIds = @($Turn.msg_ids)
+    $prevTotal = $BaselineCtx
+    for ($i = 0; $i -lt $msgIds.Count; $i++) {
+        $mid = [string]$msgIds[$i]
+        if (-not $FinalUsage.ContainsKey($mid)) { continue }
+        $u = $FinalUsage[$mid]
+        $own = 0
+        if ($msgOwner.ContainsKey($mid)) { $own = [int]$msgOwner[$mid] }
+        $inpTotal = [double]($u.inp + $u.cc + $u.cr)
+        $outI = [double]$u.out
+        $gIn = 0.0
+        if ($null -ne $prevTotal) {
+            $gIn = $inpTotal - [double]$prevTotal
+            if ($gIn -lt 0) { $gIn = 0.0 }
+        }
+        $prevTotal = $inpTotal + $outI
+
+        if ($i -eq 0) {
+            $common[$own] = [double]$common[$own] + $gIn
+            $tot[$own] = [double]$tot[$own] + $gIn
+        } else {
+            $prevMid = [string]$msgIds[$i - 1]
+            $prevOwn = 0
+            if ($msgOwner.ContainsKey($prevMid)) { $prevOwn = [int]$msgOwner[$prevMid] }
+            $prevTools = $null
+            if ($Turn.msg_tools.ContainsKey($prevMid)) { $prevTools = $Turn.msg_tools[$prevMid] }
+            $nPrev = 0; $rPrev = 0
+            if ($prevTools) { $nPrev = $prevTools.Count; foreach ($pk in $prevTools.Keys) { if ($prevTools[$pk]) { $rPrev++ } } }
+            if ($nPrev -eq 0) {
+                $common[$prevOwn] = [double]$common[$prevOwn] + $gIn
+            } else {
+                $attrDel[$prevOwn] = [double]$attrDel[$prevOwn] + ($gIn * ([double]$rPrev / [double]$nPrev))
+                $attrTot[$prevOwn] = [double]$attrTot[$prevOwn] + $gIn
+            }
+            $tot[$prevOwn] = [double]$tot[$prevOwn] + $gIn
+        }
+
+        $curTools = $null
+        if ($Turn.msg_tools.ContainsKey($mid)) { $curTools = $Turn.msg_tools[$mid] }
+        $nCur = 0; $rCur = 0
+        if ($curTools) { $nCur = $curTools.Count; foreach ($ck in $curTools.Keys) { if ($curTools[$ck]) { $rCur++ } } }
+        if ($nCur -eq 0) {
+            $common[$own] = [double]$common[$own] + $outI
+        } else {
+            $attrDel[$own] = [double]$attrDel[$own] + ($outI * ([double]$rCur / [double]$nCur))
+            $attrTot[$own] = [double]$attrTot[$own] + $outI
+        }
+        $tot[$own] = [double]$tot[$own] + $outI
+        $outSum[$own] = [int]$outSum[$own] + [int]$u.out
+        $crSum[$own] = [int]$crSum[$own] + [int]$u.cr
+        $calls[$own] = [int]$calls[$own] + $nCur
+        $callsRel[$own] = [int]$callsRel[$own] + $rCur
+        $msgCount[$own] = [int]$msgCount[$own] + 1
+    }
+
+    # 예전 방식(답변 끝 예상 줄)은 마지막 질문 몫으로 붙인다
+    $lastQ = -1
+    for ($qi = 0; $qi -lt $nq; $qi++) { if ([int]$msgCount[$qi] -gt 0) { $lastQ = $qi } }
+    $joinedText = ((@($Turn.text_parts) -join "`n"))
+
+    $rows = New-Object System.Collections.ArrayList
+    for ($qi = 0; $qi -lt $nq; $qi++) {
+        if ([int]$msgCount[$qi] -le 0) { continue }
+        $qCalls = [int]$calls[$qi]
+        $submits = [Math]::Max([int]$cmdSub[$qi], [Math]::Max([int]$toolSub[$qi], [int]$subIds[$qi].Count))
+        # 위임은 도구 결과에 작업 번호(submitted · ===RESULT=== 등 뒤의 claude_...)가 찍힌 질문만이다. 명령이나 글에 submit-task 같은 말이 들어 있었을 뿐이면 직접 처리다
+        $taskEvidence = [int]$subIds[$qi].Count + [int]$taskIds[$qi].Count
+        $path = if ($submits -gt 0 -and $taskEvidence -gt 0) { 'delegate' } elseif ($qCalls -gt 0) { 'direct' } else { 'chat' }
+        # 위임으로 보였는데 위임 도구 호출이 하나도 없으면(명령 글자에 submit-task 같은 말이 들어 있었을 뿐) 위임이 아니다
+        if ($path -eq 'delegate' -and [int]$callsRel[$qi] -le 0 -and $qCalls -gt 0) { $path = 'direct' }
+
+        $dTok = $null
+        if ([double]$tot[$qi] -gt 0) { $dTok = [int][Math]::Round([double]$tot[$qi]) }
+        $qRel = $qCalls
+        $dRel = $dTok
+        if ($path -eq 'delegate') {
+            $qRel = [int]$callsRel[$qi]
+            if ($null -eq $dTok -or $dTok -le 0) {
+                $dRel = $null
+            } elseif ($qRel -le 0) {
+                $dRel = 0
+            } elseif ($qRel -ge $qCalls) {
+                $dRel = $dTok
+            } else {
+                $commonShare = 0.0
+                if ([double]$attrTot[$qi] -gt 0) { $commonShare = [double]$common[$qi] * ([double]$attrDel[$qi] / [double]$attrTot[$qi]) }
+                else { $commonShare = [double]$common[$qi] * ([double]$qRel / [double]$qCalls) }
+                $dRel = [int][Math]::Round([double]$attrDel[$qi] + $commonShare)
+                if ($dRel -lt 0) { $dRel = 0 }
+                if ($dRel -gt $dTok) { $dRel = $dTok }
+            }
+        }
+
+        $est = $null; $choice = $null; $level = $null; $reason = $null
+        if ($qi -eq $lastQ) {
+            $est = Get-TokenEstimate $joinedText
+            $choice = Get-TokenTurnChoice $joinedText
+            $level = Get-TokenTurnLevel $joinedText
+            $reason = Get-TokenTurnReason $joinedText
+        }
+        $endIso = $null
+        if ($qEnd.ContainsKey($qi)) { $endIso = ([DateTime]$qEnd[$qi]).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ss.fffZ') }
+        $durSec = [int][Math]::Round([double]$dur[$qi])
+
+        [void]$rows.Add(@{
+            file              = $FilePath
+            turn_ts           = [string]($qs.Item($qi)).text
+            project           = $ProjectName
+            path              = $path
+            calls             = [int]$qCalls
+            calls_related     = [int]$qRel
+            submits           = [int]$submits
+            polls             = [int]$polls[$qi]
+            out_tokens        = [int]$outSum[$qi]
+            cr_tokens         = [int]$crSum[$qi]
+            d_tokens          = $dTok
+            d_related         = $(if ($null -eq $dRel) { $null } else { [int]$dRel })
+            est_direct        = $(if ($est) { $est.Direct } else { $null })
+            est_delegate      = $(if ($est) { $est.Delegate } else { $null })
+            est_ver           = $(if ($est) { $est.Version } else { $null })
+            est_time_direct   = $(if ($est) { $est.TimeDirect } else { $null })
+            est_time_delegate = $(if ($est) { $est.TimeDelegate } else { $null })
+            dur_sec           = $durSec
+            choice            = $choice
+            choice_reason     = $reason
+            level             = $level
+            end_ts            = $endIso
+            task_ids          = @($taskIds[$qi].Keys)
+        })
+    }
+    return @($rows)
+}
+
 function Measure-ClaudeTurnTokens {
     param(
         $TurnObj,
@@ -487,6 +789,23 @@ function Measure-ClaudeTurnTokens {
         $diff = $lastCtxVal - $BaselineCtx
         if ($diff -gt 0) {
             $dTokens = [int]$diff
+        } else {
+            # 턴 도중(메시지 사이)에 컨텍스트가 압축돼 끝 값이 시작보다 작아진 턴: 끝 - 시작은 쓸 수 없으므로 메시지마다 늘어난 만큼(줄어든 구간은 0)을 더해 어림한다.
+            # 이 값이 없으면 압축을 낀 턴이 통계에서 통째로 빈 값이 된다. 첫 메시지에서 이미 시작 값보다 줄어든 경우(턴이 시작될 때 압축됨)는 그 첫 메시지의 입력을 새 시작 값으로 보고
+            # 그 뒤 늘어난 만큼을 더한다(메시지가 둘 이상일 때만. 메시지 하나뿐이면 어림할 근거가 없어 예전처럼 빈 값).
+            $growSum = 0.0
+            $growPrev = [double]$BaselineCtx
+            $midDrop = $false
+            $rebased = $false
+            for ($gi = 0; $gi -lt $TurnObj.msg_ids.Count; $gi++) {
+                $gu = $FinalUsage[$TurnObj.msg_ids[$gi]]
+                $gInTotal = [double]($gu.inp + $gu.cc + $gu.cr)
+                $gStep = $gInTotal - $growPrev
+                if ($gStep -lt 0) { if ($gi -gt 0) { $midDrop = $true } else { $rebased = $true }; $gStep = 0 }
+                $growSum += $gStep + [double]$gu.out
+                $growPrev = $gInTotal + [double]$gu.out
+            }
+            if (($midDrop -or ($rebased -and $TurnObj.msg_ids.Count -ge 2)) -and $growSum -gt 0) { $dTokens = [int][Math]::Round($growSum) }
         }
     }
 
@@ -511,29 +830,45 @@ function Measure-ClaudeTurnTokens {
             for ($i = 0; $i -lt $TurnObj.msg_ids.Count; $i++) {
                 $mid = $TurnObj.msg_ids[$i]
                 $u = $FinalUsage[$mid]
-                $curTotal = [double]($u.inp + $u.cc + $u.cr + $u.out)
-                $g = $curTotal - $prevTotal
-                $prevTotal = $curTotal
+                $inpTotal = [double]($u.inp + $u.cc + $u.cr)
+                $outI = [double]$u.out
+                $gIn = $inpTotal - $prevTotal
+                $prevTotal = $inpTotal + $outI
                 # 컨텍스트가 압축되어 줄어든 구간(음수)은 위임 몫을 깎지 않게 0 으로 본다
-                if ($g -lt 0) { $g = 0 }
+                if ($gIn -lt 0) { $gIn = 0 }
 
+                # (1) 입력 증가분: 첫 메시지는 공통(사용자 메시지·훅 안내 등), 그 뒤는 직전 메시지가 부른 도구의 몫(도구가 없었으면 공통)
                 if ($i -eq 0) {
-                    $commonTokens += $g
+                    $commonTokens += $gIn
                 } else {
                     $prevMid = $TurnObj.msg_ids[$i - 1]
                     $prevTools = if ($TurnObj.msg_tools.ContainsKey($prevMid)) { $TurnObj.msg_tools[$prevMid] } else { $null }
                     $nPrev = if ($prevTools) { $prevTools.Count } else { 0 }
                     if ($nPrev -eq 0) {
-                        $commonTokens += $g
+                        $commonTokens += $gIn
                     } else {
                         $rPrev = 0
                         foreach ($tId in $prevTools.Keys) {
                             if ($prevTools[$tId]) { $rPrev++ }
                         }
                         $ratio = [double]$rPrev / [double]$nPrev
-                        $attrDelTokens += ($g * $ratio)
-                        $attrTotalTokens += $g
+                        $attrDelTokens += ($gIn * $ratio)
+                        $attrTotalTokens += $gIn
                     }
+                }
+
+                # (2) 출력: 이 메시지가 부른 도구의 몫(위임 제출을 쓴 브리프는 위임 비용). 도구가 없는 메시지(최종 답변 등)는 공통
+                $curTools = if ($TurnObj.msg_tools.ContainsKey($mid)) { $TurnObj.msg_tools[$mid] } else { $null }
+                $nCur = if ($curTools) { $curTools.Count } else { 0 }
+                if ($nCur -eq 0) {
+                    $commonTokens += $outI
+                } else {
+                    $rCur = 0
+                    foreach ($tId in $curTools.Keys) {
+                        if ($curTools[$tId]) { $rCur++ }
+                    }
+                    $attrDelTokens += ($outI * ([double]$rCur / [double]$nCur))
+                    $attrTotalTokens += $outI
                 }
             }
 
@@ -619,6 +954,7 @@ function Get-TokenTurnsFromSessionFile([string]$FilePath, [string]$ProjectName, 
     $js.MaxJsonLength = [int]::MaxValue
 
     $finalUsage = @{}
+    $enqueues = New-Object System.Collections.ArrayList
     $currentTurn = $null
     $script:tokenScanPrevCtx = $StartLastCtx
     $script:tokenScanLastCtx = $StartLastCtx
@@ -631,13 +967,28 @@ function Get-TokenTurnsFromSessionFile([string]$FilePath, [string]$ProjectName, 
     $completeTurn = {
         param($tObj)
         if ($null -eq $tObj -or $tObj.msg_ids.Count -eq 0) { return }
+        $arrivalCount = 0
+        foreach ($evx in $tObj.events) { if ($evx.k -eq 'arrival') { $arrivalCount++ } }
+        if ($arrivalCount -gt 0) {
+            # 작업 도중 새 질문이 도착했다: 질문마다 한 행(몫 나누기는 Split-TurnQuestions)
+            $qRows = @(Split-TurnQuestions -Turn $tObj -FinalUsage $finalUsage -BaselineCtx $script:tokenScanPrevCtx -FilePath $FilePath -ProjectName $ProjectName)
+            $lastIdQ = $tObj.msg_ids[$tObj.msg_ids.Count - 1]
+            $fLastQ = $finalUsage[$lastIdQ]
+            $lastCtxQ = [int64]([int64]$fLastQ.inp + [int64]$fLastQ.cc + [int64]$fLastQ.cr + [int64]$fLastQ.out)
+            $script:tokenScanPrevCtx = $lastCtxQ
+            $script:tokenScanLastCtx = $lastCtxQ
+            foreach ($qr in $qRows) { [void]$turns.Add($qr) }
+            return
+        }
         $lastId = $tObj.msg_ids[$tObj.msg_ids.Count - 1]
         $calls = $tObj.tool_ids.Count
         $toolResultSubmits = [Math]::Max([int]$tObj.tool_submits, [int]$tObj.submitted_task_ids.Count)
         $submits = [Math]::Max([int]$tObj.cmd_submits, [int]$toolResultSubmits)
         $polls = [int]$tObj.cmd_polls
 
-        $path = if ($submits -gt 0) { 'delegate' } elseif ($calls -gt 0) { 'direct' } else { 'chat' }
+        # 위임은 도구 결과에 작업 번호가 찍힌 질문만이다(명령이나 글에 submit-task 같은 말이 들어 있었을 뿐이면 직접 처리)
+        $taskEvidence = [int]$tObj.submitted_task_ids.Count + [int]$tObj.task_ids.Count
+        $path = if ($submits -gt 0 -and $taskEvidence -gt 0) { 'delegate' } elseif ($calls -gt 0) { 'direct' } else { 'chat' }
 
         $measured = Measure-ClaudeTurnTokens -TurnObj $tObj -FinalUsage $finalUsage -BaselineCtx $script:tokenScanPrevCtx -Path $path
         $lastCtxVal = $measured.last_ctx_val
@@ -700,6 +1051,7 @@ function Get-TokenTurnsFromSessionFile([string]$FilePath, [string]$ProjectName, 
             est_time_delegate = $estTimeDelegate
             dur_sec           = $durSec
             choice            = $choice
+            choice_reason     = (Get-TokenTurnReason $joinedText)
             level             = $level
             end_ts            = $(if ($tObj.event_times.Count -gt 0) { (@($tObj.event_times | ForEach-Object { $_.ToUniversalTime() }) | Sort-Object | Select-Object -Last 1).ToString('yyyy-MM-ddTHH:mm:ss.fffZ') } else { $null })
             task_ids          = if ($tObj.ContainsKey('task_ids') -and $null -ne $tObj.task_ids) { @($tObj.task_ids.Keys) } else { @() }
@@ -718,8 +1070,45 @@ function Get-TokenTurnsFromSessionFile([string]$FilePath, [string]$ProjectName, 
             if ([string]::IsNullOrWhiteSpace($line)) { continue }
             if ($line -match '"isSidechain"\s*:\s*true|"isMeta"\s*:\s*true') { continue }
 
+            # 사용자가 메시지를 입력해 대기열에 넣은 시각(enqueue). 작업 도중 보낸 질문은 Claude 에게 전달되기(attachment) 전에 먼저 여기에 남는다.
+            if ($line.Contains('"queue-operation"') -and $line -match '"operation"\s*:\s*"enqueue"') {
+                if ($line -match '"timestamp"\s*:\s*"([^"]+)"') {
+                    $enqTs = $Matches[1]
+                    $enqContent = ""
+                    if ($line -match '"content"\s*:\s*"((?:[^"\\]|\\.)*)"') { $enqContent = $Matches[1] }
+                    [void]$enqueues.Add(@{ ts = $enqTs; content = $enqContent })
+                }
+                continue
+            }
+
+            # 작업 도중 사용자가 보낸 새 질문(대기열에서 Claude 에게 전달된 메시지): 이 시각부터 새 질문이 시작한다
+            if ($null -ne $currentTurn -and $line.Contains('"queued_command"') -and $line -match '"type"\s*:\s*"attachment"' -and $line -match '"origin"\s*:\s*\{\s*"kind"\s*:\s*"human"') {
+                $aTsText = ""
+                if ($line -match '"timestamp"\s*:\s*"([^"]+)"') { $aTsText = $Matches[1] }
+                # 질문을 입력한 시각: 같은 내용의 enqueue 기록이 있으면 그 시각(없으면 전달된 시각)
+                $aPrompt = ""
+                if ($line -match '"prompt"\s*:\s*"((?:[^"\\]|\\.)*)"') { $aPrompt = $Matches[1] }
+                $aInput = $aTsText
+                if ($aPrompt) {
+                    for ($ei = 0; $ei -lt $enqueues.Count; $ei++) {
+                        $enq = $enqueues.Item($ei)
+                        if ([string]$enq.content -eq $aPrompt -and [string]$enq.ts -le $aTsText) { $aInput = [string]$enq.ts; $enqueues.RemoveAt($ei); break }
+                    }
+                }
+                if ($aTsText) {
+                    try {
+                        $aTs = [DateTime]::Parse($aTsText, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AdjustToUniversal)
+                        [void]$currentTurn.event_times.Add($aTs)
+                        [void]$currentTurn.events.Add(@{ k = 'arrival'; ts = $aTs; text = $aTsText; input = $aInput; qidx = 0 })
+                    } catch {}
+                }
+                continue
+            }
+
             if ($line -match '"type"\s*:\s*"user"') {
                 if ($line.Contains('"tool_result"')) {
+                    $tsObj = $null
+                    $evTasksR = @(); $evSubR = @(); $evTsubR = 0
                     if ($null -ne $currentTurn -and $line -match '"timestamp"\s*:\s*"([^"]+)"') {
                         try {
                             $tsObj = [DateTime]::Parse($Matches[1], [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AdjustToUniversal)
@@ -729,24 +1118,30 @@ function Get-TokenTurnsFromSessionFile([string]$FilePath, [string]$ProjectName, 
                     if ($null -ne $currentTurn -and $line -match '(?:===RESULT===|===PENDING===|===ERROR===)') {
                         $currentTurn.review_allowance = 3
                     }
-                    if ($null -ne $currentTurn -and $line -match '(?:submitted|===RESULT===|===PENDING===|===ERROR===)[: ]+\s*(claude_\d+_\d+)') {
-                        $taskMatches = [regex]::Matches($line, '(?:submitted|===RESULT===|===PENDING===|===ERROR===)[: ]+\s*(claude_\d+_\d+)')
+                    if ($null -ne $currentTurn -and $line -match $script:TaskMarkPattern) {
+                        $taskMatches = [regex]::Matches($line, $script:TaskMarkPattern)
                         foreach ($tm in $taskMatches) {
                             $tid = $tm.Groups[1].Value
                             if ($tid) {
                                 $currentTurn.task_ids[$tid] = $true
+                                $evTasksR += $tid
                             }
                         }
                     }
                     if ($null -ne $currentTurn -and $line -match '(?i)\bsubmitted[: ]') {
-                        $subMatches = [regex]::Matches($line, 'claude_\d+_\d+')
+                        $subMatches = [regex]::Matches($line, $script:TaskSubmittedPattern)
                         if ($subMatches.Count -gt 0) {
                             foreach ($sm in $subMatches) {
-                                $currentTurn.submitted_task_ids[$sm.Value] = $true
+                                $currentTurn.submitted_task_ids[$sm.Groups[1].Value] = $true
+                                $evSubR += $sm.Groups[1].Value
                             }
                         } else {
                             $currentTurn.tool_submits++
+                            $evTsubR++
                         }
+                    }
+                    if ($null -ne $currentTurn -and $null -ne $tsObj) {
+                        [void]$currentTurn.events.Add(@{ k = 'result'; ts = $tsObj; tasks = $evTasksR; subIds = $evSubR; tsub = $evTsubR })
                     }
                     continue
                 }
@@ -756,6 +1151,13 @@ function Get-TokenTurnsFromSessionFile([string]$FilePath, [string]$ProjectName, 
                     continue
                 }
                 if (Test-TokenStatsRealUser $uObj) {
+                    if ($null -ne $currentTurn -and (Test-TokenStatsContinuation $uObj)) {
+                        # 컨텍스트 압축 뒤 자동으로 붙는 "이어서 진행" 메시지: 새 질문이 아니라 하던 질문의 이어짐이라 같은 작업으로 본다
+                        if ($uObj.ContainsKey('timestamp')) {
+                            try { [void]$currentTurn.event_times.Add([DateTime]::Parse([string]$uObj['timestamp'], [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AdjustToUniversal)) } catch {}
+                        }
+                        continue
+                    }
                     if ($null -ne $currentTurn) {
                         & $completeTurn $currentTurn
                     }
@@ -777,24 +1179,37 @@ function Get-TokenTurnsFromSessionFile([string]$FilePath, [string]$ProjectName, 
                         text_parts         = New-Object System.Collections.ArrayList
                         task_ids           = @{}
                         event_times        = New-Object System.Collections.ArrayList
+                        events             = New-Object System.Collections.ArrayList
                     }
                     if ($uTs) {
                         try {
                             $parsedUTs = [DateTime]::Parse($uTs, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AdjustToUniversal)
                             [void]$currentTurn.event_times.Add($parsedUTs)
+                            [void]$currentTurn.events.Add(@{ k = 'start'; ts = $parsedUTs })
                         } catch {}
                     }
                 }
             } elseif ($line -match '"type"\s*:\s*"assistant"') {
                 if ($null -eq $currentTurn) { continue }
+                $tsObj = $null
+                $lineMid = ""
+                $subBefore = [int]$currentTurn.cmd_submits
+                $pollBefore = [int]$currentTurn.cmd_polls
                 if ($line -match '"timestamp"\s*:\s*"([^"]+)"') {
                     try {
                         $tsObj = [DateTime]::Parse($Matches[1], [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AdjustToUniversal)
                         [void]$currentTurn.event_times.Add($tsObj)
                     } catch {}
                 }
+                # 질문 작업 표식: record-estimate 호출(-Switch N 은 N 번째 질문 일로 돌아왔다는 표시)
+                if ($null -ne $tsObj -and $line -match '"id"\s*:\s*"toolu_' -and $line -match $script:RecordEstimateCallPattern) {
+                    $mkSwitch = 0
+                    if ($line -match '-Switch\s+(\d+)') { $mkSwitch = [int]$Matches[1] }
+                    [void]$currentTurn.events.Add(@{ k = 'marker'; ts = $tsObj; sw = $mkSwitch })
+                }
                 if ($line -match '"id"\s*:\s*"(msg_[A-Za-z0-9_-]+)"') {
                     $mid = $Matches[1]
+                    $lineMid = $mid
                     if (-not $finalUsage.ContainsKey($mid)) {
                         $finalUsage[$mid] = @{ inp = 0; cc = 0; cr = 0; out = 0 }
                     }
@@ -816,7 +1231,7 @@ function Get-TokenTurnsFromSessionFile([string]$FilePath, [string]$ProjectName, 
                     }
                 }
 
-                if ($line -match '"id"\s*:\s*"(toolu_[A-Za-z0-9_-]+)"' -and $line -notmatch $script:RecordEstimateCallPattern) {
+                if ($line -match '"id"\s*:\s*"(toolu_[A-Za-z0-9_-]+)"' -and -not (Test-RecordEstimateOnlyLine $line)) {
                     $toolMatches = [regex]::Matches($line, '"id"\s*:\s*"(toolu_[A-Za-z0-9_-]+)"')
                     foreach ($tm in $toolMatches) {
                         $tid = $tm.Groups[1].Value
@@ -911,9 +1326,14 @@ function Get-TokenTurnsFromSessionFile([string]$FilePath, [string]$ProjectName, 
                     }
                 }
 
+                if ($null -ne $tsObj) {
+                    [void]$currentTurn.events.Add(@{ k = 'asst'; ts = $tsObj; mid = $lineMid; sub = ([int]$currentTurn.cmd_submits - $subBefore); poll = ([int]$currentTurn.cmd_polls - $pollBefore) })
+                }
+
                 if ($line -match '예상\s*(?:토큰|시간)|토큰\s*직접|직접\s*\*\*|\[Agy 위임') {
-                    $cleanLine = $line -replace '\\n', "`n" -replace '\\"', '"'
-                    [void]$currentTurn.text_parts.Add($cleanLine)
+                    # 답변 글(text 블록)만 모은다: 같은 줄의 도구 입력(tool_use)에 든 예시 꼬리 줄 · 예상 줄은 사유 · 예상으로 읽지 않는다
+                    $textOnly = Get-AssistantTextBlocks $line
+                    if ($textOnly) { [void]$currentTurn.text_parts.Add($textOnly) }
                 }
             }
         }
@@ -985,8 +1405,8 @@ function Get-ClaudeLiveTurnMetrics {
                 if ($line -match '(?:===RESULT===|===PENDING===|===ERROR===)') {
                     $currentTurn.review_allowance = 3
                 }
-                if ($line -match '(?:submitted|===RESULT===|===PENDING===|===ERROR===)[: ]+\s*(claude_\d+_\d+)') {
-                    $taskMatches = [regex]::Matches($line, '(?:submitted|===RESULT===|===PENDING===|===ERROR===)[: ]+\s*(claude_\d+_\d+)')
+                if ($line -match $script:TaskMarkPattern) {
+                    $taskMatches = [regex]::Matches($line, $script:TaskMarkPattern)
                     foreach ($tm in $taskMatches) {
                         $tid = $tm.Groups[1].Value
                         if ($tid) {
@@ -995,10 +1415,10 @@ function Get-ClaudeLiveTurnMetrics {
                     }
                 }
                 if ($line -match '(?i)\bsubmitted[: ]') {
-                    $subMatches = [regex]::Matches($line, 'claude_\d+_\d+')
+                    $subMatches = [regex]::Matches($line, $script:TaskSubmittedPattern)
                     if ($subMatches.Count -gt 0) {
                         foreach ($sm in $subMatches) {
-                            $currentTurn.submitted_task_ids[$sm.Value] = $true
+                            $currentTurn.submitted_task_ids[$sm.Groups[1].Value] = $true
                         }
                     } else {
                         $currentTurn.tool_submits++
@@ -1055,7 +1475,7 @@ function Get-ClaudeLiveTurnMetrics {
                 }
             }
 
-            if ($line -match '"id"\s*:\s*"(toolu_[A-Za-z0-9_-]+)"' -and $line -notmatch $script:RecordEstimateCallPattern) {
+            if ($line -match '"id"\s*:\s*"(toolu_[A-Za-z0-9_-]+)"' -and -not (Test-RecordEstimateOnlyLine $line)) {
                 $toolMatches = [regex]::Matches($line, '"id"\s*:\s*"(toolu_[A-Za-z0-9_-]+)"')
                 foreach ($tm in $toolMatches) {
                     $tid = $tm.Groups[1].Value
@@ -1128,8 +1548,9 @@ function Get-ClaudeLiveTurnMetrics {
             }
 
             if ($line -match '예상\s*(?:토큰|시간)|토큰\s*직접|직접\s*\*\*|\[Agy 위임') {
-                $cleanLine = $line -replace '\\n', "`n" -replace '\\"', '"'
-                [void]$currentTurn.text_parts.Add($cleanLine)
+                # 답변 글(text 블록)만 모은다(도구 입력에 든 예시 글은 뺀다)
+                $textOnly = Get-AssistantTextBlocks $line
+                if ($textOnly) { [void]$currentTurn.text_parts.Add($textOnly) }
             }
         }
     }
@@ -1159,22 +1580,12 @@ function Get-ClaudeLiveTurnMetrics {
 # 둘째 기준은 예상들이 모두 크게 틀려 흩어짐이 넓을 때(기준선도 함께 넓어져 아무것도 안 잡힘)를 위한 안전장치다.
 # 위임 턴의 예상은 턴 전체를 잰 값이라, 뷰어 카드와 같은 방식으로 다른 작업 실측(d_tokens - d_related)을 빼서 위임한 일만의 예상과 비교한다
 # (빼고 나서 0 이하이면 위임 관련 호출 비율을 곱한다).
-# 위임한 턴의 예상(est_delegate)을 "위임한 일만의 예상"으로 맞춘다. 턴 예상에는 위임과 무관한 작업도 들어 있으므로
-# 그 턴의 다른 작업 실측(d_tokens - d_related)을 뺀다(0 이하이면 위임 관련 호출 ÷ 전체 호출 비율로 줄인다).
-# 위임 정확도의 분모(d_related)와 짝을 맞추는 값이다. 이상치 판정 · 예상 정확도 · 보정 비율이 모두 이 함수를 쓴다.
+# 위임한 질문의 예상(est_delegate)은 질문을 받을 때 기록한 값 그대로 쓴다(화면 · 통계 API 와 같은 기준). 예전에는 그 질문의 위임 무관 작업 실측을 빼
+# "위임한 일만의 예상"으로 줄였는데, 그러면 화면에 보이는 값과 보정 계수의 기준이 달라져 계수가 부풀었다. 이상치 판정 · 예상 정확도 · 보정 비율이 모두 이 함수를 쓴다.
 # serve-viewer.ps1 의 Get-ViewerDelegateJobEstimate 가 같은 식이다(뷰어는 이 파일을 불러오지 않아 따로 둔다). 고치면 함께 고친다.
 function Get-TokenDelegateJobEstimate([double]$Est, $DTokens, $DRelated, $Calls, $CallsRelated) {
-    $dT = if ($null -ne $DTokens -and [string]$DTokens -ne '') { [double]$DTokens } else { $null }
-    $dR = if ($null -ne $DRelated -and [string]$DRelated -ne '') { [double]$DRelated } else { $dT }
-    $other = if ($null -ne $dT -and $null -ne $dR) { [Math]::Max(0.0, $dT - $dR) } else { 0.0 }
-    $job = $Est - $other
-    if ($job -gt 0.0) { return $job }
-    $cAll = if ($null -ne $Calls -and [string]$Calls -ne '') { [double]$Calls } else { 0.0 }
-    $cRel = if ($null -ne $CallsRelated -and [string]$CallsRelated -ne '') { [double]$CallsRelated } else { $cAll }
-    if ($cAll -gt 0.0) { return $Est * [Math]::Min(1.0, $cRel / $cAll) }
     return $Est
 }
-
 function Get-TokenAnomalyFlags($Rows, [hashtable]$AgyMedians = @{}, [hashtable]$TaskInfo = @{}, [double]$AbsFactor = 5.0) {
     $result = @{}
     $allRows = @($Rows)
@@ -1321,6 +1732,18 @@ function Get-TokenAnomalyFlags($Rows, [hashtable]$AgyMedians = @{}, [hashtable]$
     return $result
 }
 
+# 예상 보정 계수: 최근 턴의 실제 ÷ 예상 중앙값(ratio)을 다음 예상에 곱할 계수로 쓴다. 입력은 예상 ÷ 실제 목록(표의 비율의 역수).
+# 표본이 5개 미만이면 보정하지 않고(factor 1.0), 그 이상에서는 표본이 적을수록 1 쪽으로 당긴다: factor = 1 + (ratio - 1) x n / (n + 10).
+# 고정 상수가 아니라 통계를 갱신할 때마다(Get-TokenCalibration 이 돌 때마다) 최근 표본으로 다시 계산한다.
+function Get-TokenCorrection($EstOverActual) {
+    $inv = New-Object System.Collections.ArrayList
+    foreach ($x in @($EstOverActual)) { if ([double]$x -gt 0) { [void]$inv.Add(1.0 / [double]$x) } }
+    if ($inv.Count -lt 5) { return [ordered]@{ ratio = $null; n = [int]$inv.Count; factor = 1.0 } }
+    $ratio = [Math]::Max(0.2, [Math]::Min(5.0, [double](Get-TokenMedian $inv)))
+    $w = [double]$inv.Count / ([double]$inv.Count + 10.0)
+    return [ordered]@{ ratio = [Math]::Round($ratio, 2); n = [int]$inv.Count; factor = [Math]::Round(1.0 + ($ratio - 1.0) * $w, 2) }
+}
+
 function Get-TokenCalibration {
     param(
         [string]$DbPath = "",
@@ -1379,6 +1802,7 @@ function Get-TokenCalibration {
             delegate                = [ordered]@{ a = 2500; b = 1000; n = 0; source = "default"; window_days = 60 }
             levels                  = $defaultLevels
             estimate_accuracy       = [ordered]@{ n = 0; direct_ratio_median = $null; delegate_ratio_median = $null; v1_excluded_n = 0 }
+            correction              = [ordered]@{ direct = [ordered]@{ ratio = $null; n = 0; factor = 1.0 }; delegate = [ordered]@{ ratio = $null; n = 0; factor = 1.0 } }
             anomalies               = [ordered]@{
                 recent_days = 7
                 n           = 0
@@ -1455,11 +1879,13 @@ function Get-TokenCalibration {
         $delResult = Get-TheilSenEstimator -Points $delPoints -DefaultA 2500 -DefaultB 1000
 
         $accRows = @($db.Query(
-            "SELECT path, est_direct, est_delegate, d_tokens, d_related, calls, calls_related, est_ver FROM token_turns WHERE calls >= 1 AND COALESCE(d_related, d_tokens) IS NOT NULL AND COALESCE(d_related, d_tokens) > 0 AND path IN ('direct', 'delegate') AND (CASE WHEN turn_ts LIKE '%T%' THEN turn_ts >= ? ELSE turn_ts >= ? END)",
+            "SELECT path, est_direct, est_delegate, est_factor_direct, est_factor_delegate, d_tokens, d_related, calls, calls_related, est_ver FROM token_turns WHERE calls >= 1 AND COALESCE(d_related, d_tokens) IS NOT NULL AND COALESCE(d_related, d_tokens) > 0 AND path IN ('direct', 'delegate') AND (CASE WHEN turn_ts LIKE '%T%' THEN turn_ts >= ? ELSE turn_ts >= ? END) ORDER BY turn_ts DESC",
             [object[]]@($cutIso60, $cutSpace60)
         ))
         $dirRatios = New-Object System.Collections.ArrayList
         $delRatios = New-Object System.Collections.ArrayList
+        $dirRecent = New-Object System.Collections.ArrayList   # 보정 계수용: 가장 최근 30턴(행이 최신순으로 온다)
+        $delRecent = New-Object System.Collections.ArrayList
         $v1Count = 0
         foreach ($r in $accRows) {
             $ver = [string]$r['est_ver']
@@ -1476,14 +1902,24 @@ function Get-TokenCalibration {
             $dDel = if ($r['d_related'] -ne $null -and $r['d_related'] -ne [DBNull]::Value) { [double]$r['d_related'] } else { $d }
             if ($pth -eq 'direct' -and $null -ne $r['est_direct'] -and $r['est_direct'] -ne [DBNull]::Value -and $d -gt 0) {
                 [void]$dirRatios.Add([double]$r['est_direct'] / $d)
+                # 보정 계수용: 기록할 때 곱했던 계수로 나눠 보정 전 예상으로 비율을 낸다(계수가 되먹임으로 흔들리지 않게)
+                $fd = if ($r['est_factor_direct'] -ne $null -and $r['est_factor_direct'] -ne [DBNull]::Value -and [double]$r['est_factor_direct'] -gt 0) { [double]$r['est_factor_direct'] } else { 1.0 }
+                if ($dirRecent.Count -lt 30) { [void]$dirRecent.Add(([double]$r['est_direct'] / $fd) / $d) }
             } elseif ($pth -eq 'delegate' -and $null -ne $r['est_delegate'] -and $r['est_delegate'] -ne [DBNull]::Value -and $dDel -gt 0) {
                 $jobEstCal = Get-TokenDelegateJobEstimate ([double]$r['est_delegate']) $r['d_tokens'] $r['d_related'] $r['calls'] $r['calls_related']
                 [void]$delRatios.Add($jobEstCal / $dDel)
+                $fl = if ($r['est_factor_delegate'] -ne $null -and $r['est_factor_delegate'] -ne [DBNull]::Value -and [double]$r['est_factor_delegate'] -gt 0) { [double]$r['est_factor_delegate'] } else { 1.0 }
+                if ($delRecent.Count -lt 30) {
+                    $jobEstRaw = Get-TokenDelegateJobEstimate (([double]$r['est_delegate']) / $fl) $r['d_tokens'] $r['d_related'] $r['calls'] $r['calls_related']
+                    [void]$delRecent.Add($jobEstRaw / $dDel)
+                }
             }
         }
         $totalAccN = $dirRatios.Count + $delRatios.Count
         $dirRatioMed = if ($dirRatios.Count -gt 0) { [Math]::Round([double](Get-TokenMedian $dirRatios), 1) } else { $null }
         $delRatioMed = if ($delRatios.Count -gt 0) { [Math]::Round([double](Get-TokenMedian $delRatios), 1) } else { $null }
+        $corrDirect = Get-TokenCorrection $dirRecent
+        $corrDelegate = Get-TokenCorrection $delRecent
 
         # 캐시 재읽기 중앙값 (호출당 cr_tokens / calls)
         $crList = New-Object System.Collections.ArrayList
@@ -1729,6 +2165,7 @@ function Get-TokenCalibration {
                 delegate_ratio_median = $delRatioMed
                 v1_excluded_n         = [int]$v1Count
             }
+            correction        = [ordered]@{ direct = $corrDirect; delegate = $corrDelegate }
             anomalies         = $anomaliesObj
             collect           = [ordered]@{
                 active     = [bool]$active
@@ -1758,28 +2195,189 @@ function Get-TokenCalibration {
     }
 }
 
-# record-estimate.ps1 이 token_estimates 에 남긴 예상을 턴에 붙인다: 같은 프로젝트에서 턴이 시작한 뒤(turn_ts) 끝나기 전(end_ts)에 기록된 것.
-# 한 턴에 여러 번 기록했으면 마지막 것이 이긴다. 답변 끝 예상 줄(옛 방식)보다 기록이 우선한다. 몇 번을 돌려도 같은 결과(멱등)다.
-# 같은 프로젝트에서 세션 둘이 동시에 돌면 시각이 겹쳐 엉킬 수 있다(드물다). 붙인 턴 수를 돌려준다.
-function Merge-RecordedEstimates($Db, [int]$Days = 30) {
+# 진행 중인 턴(turn_ts 이후)에서 가장 최근에 기록한 예상을 돌려준다(위임 탭의 진행 중 카드용). 위임을 보내기 전에 이미 정해진 값이다. 없으면 $null.
+# ToTs 를 주면(위임을 보낸 시각) 그 시각까지의 기록만 보고, 그 사이 질문 전환 표시(kind=switch, switch_to=N)를 따라 그 시각에 일하던 질문의 기록을 고른다.
+# 질문 번호는 그 기간 안 예상 기록의 순서다(질문마다 한 번 기록하므로). 나중 질문이 기록해도 앞 위임의 값은 바뀌지 않는다.
+function Get-RecordedEstimate([string]$DbPath, [string]$Project, [string]$FromTs, [string]$ToTs = "", [string]$Session = "") {
+    if (-not $DbPath -or -not (Test-Path -LiteralPath $DbPath) -or -not $Project -or -not $FromTs) { return $null }
+    $db = $null
+    try {
+        $db = Open-AgyDb $DbPath
+        $hasSession = $false
+        if ($Session) {
+            try {
+                foreach ($ci in @($db.Query("PRAGMA table_info(token_estimates)", $null))) {
+                    if ([string]$ci['name'] -eq 'session') { $hasSession = $true; break }
+                }
+            } catch {}
+        }
+        $sql = "SELECT est_direct, est_delegate, est_time_direct, est_time_delegate, kind, switch_to FROM token_estimates WHERE project = ? AND recorded_at >= ?"
+        $args2 = @($Project, $FromTs)
+        if ($ToTs) { $sql += " AND recorded_at <= ?"; $args2 += $ToTs }
+        if ($Session -and $hasSession) {
+            $sql += " AND (session IS NULL OR session = ?)"
+            $args2 += $Session
+        }
+        $rows = @($db.Query($sql + " ORDER BY recorded_at ASC", [object[]]$args2))
+        $qrecs = New-Object System.Collections.ArrayList
+        $active = $null
+        foreach ($row in $rows) {
+            $kd = if ($null -eq $row['kind'] -or $row['kind'] -eq [DBNull]::Value) { "" } else { [string]$row['kind'] }
+            if ($kd -eq 'switch') {
+                $n = if ($null -eq $row['switch_to'] -or $row['switch_to'] -eq [DBNull]::Value) { 0 } else { [int]$row['switch_to'] }
+                if ($n -ge 1 -and $n -le $qrecs.Count) { $active = $qrecs.Item($n - 1) }
+                continue
+            }
+            if ($kd -eq 'backfill') { continue }
+            [void]$qrecs.Add($row)
+            $active = $row
+        }
+        if ($null -eq $active) { return $null }
+        $o = [ordered]@{}
+        foreach ($k in @('est_direct', 'est_delegate', 'est_time_direct', 'est_time_delegate')) {
+            $v = $active[$k]
+            $o[$k] = if ($null -eq $v -or $v -eq [DBNull]::Value) { $null } else { [int][Math]::Round([double]$v) }
+        }
+        return $o
+    } catch { return $null } finally { if ($db) { $db.Dispose() } }
+}
+
+# 이어서 시작한 세션(resume · 압축 뒤 새 세션)의 대화 기록 파일은 앞 세션의 턴을 그대로 복사해 담는다. 그러면 같은 턴이 파일마다 한 줄씩 겹쳐 쌓여
+# 통계가 두 번 세어지고, 기록한 예상은 그중 한 줄에만 붙어 나머지는 빈 값이 된다. 같은 (프로젝트, 턴 시작 시각)은 한 줄만 남긴다.
+# 남기는 줄: 기록한 예상이 붙은 것 > 작업 연결이 있는 것 > 파일 경로 순. 지우는 줄의 작업 연결은 남기는 줄로 옮긴다. 몇 번을 돌려도 같은 결과(멱등)다. 지운 줄 수를 돌려준다.
+function Remove-DuplicateTurns($Db) {
+    $groups = @($Db.Query("SELECT project, turn_ts FROM token_turns WHERE turn_ts LIKE '%T%' GROUP BY project, turn_ts HAVING COUNT(*) > 1", $null))
+    $removed = 0
+    foreach ($g in $groups) {
+        $rows = @($Db.Query("SELECT t.file AS file, (CASE WHEN t.est_direct IS NOT NULL OR t.est_delegate IS NOT NULL THEN 1 ELSE 0 END) AS has_est, (SELECT COUNT(*) FROM token_task_links l WHERE l.file = t.file AND l.turn_ts = t.turn_ts) AS nlink FROM token_turns t WHERE t.project = ? AND t.turn_ts = ? ORDER BY has_est DESC, nlink DESC, t.file ASC", [object[]]@([string]$g['project'], [string]$g['turn_ts'])))
+        if ($rows.Count -lt 2) { continue }
+        $keep = [string]$rows[0]['file']
+        for ($i = 1; $i -lt $rows.Count; $i++) {
+            $drop = [string]$rows[$i]['file']
+            [void]$Db.Execute("UPDATE token_task_links SET file = ? WHERE file = ? AND turn_ts = ?", [object[]]@($keep, $drop, [string]$g['turn_ts']))
+            [void]$Db.Execute("DELETE FROM token_turns WHERE file = ? AND turn_ts = ?", [object[]]@($drop, [string]$g['turn_ts']))
+            $removed++
+        }
+    }
+    return $removed
+}
+
+# Claude Code 프로젝트 폴더 이름 규칙: 작업 폴더 경로의 영문 · 숫자가 아닌 글자를 모두 - 로 바꾼다(D:\Repos\a.b -> D--Repos-a-b).
+function ConvertTo-ClaudeProjectName([string]$Cwd) {
+    if (-not $Cwd) { return "" }
+    return ($Cwd.Trim().TrimEnd('\', '/') -replace '[^A-Za-z0-9]', '-')
+}
+
+# 대화 기록에 작업 번호가 남지 않은 위임(스크립트가 대신 제출해 결과가 화면에만 찍힌 경우 등)을, 제출 시각에 진행 중이던 질문에 잇는다.
+# 제출 시각은 작업 번호(claude_<epoch>_N)에서 구한다. 위임 지시문에 @cwd 가 있으면 그 폴더의 프로젝트 질문만 보고,
+# 없으면 그 시각에 진행 중이던 질문이 한 프로젝트에만 있을 때만 잇는다(여러 세션이 겹치면 어느 질문 몫인지 알 수 없어 건너뛴다). 이은 작업 수를 돌려준다.
+function Add-OrphanTaskLinks($Db) {
+    $linked = 0
+    $orphans = @($Db.Query("SELECT t.task_id AS task_id, t.question AS question FROM tasks t WHERE t.task_id LIKE 'claude_%' AND NOT EXISTS (SELECT 1 FROM token_task_links l WHERE l.task_id = t.task_id)", $null))
+    foreach ($o in $orphans) {
+        $tid = [string]$o['task_id']
+        if ($tid -notmatch '^claude_(\d{9,11})_\d+') { continue }
+        $subIso = [DateTimeOffset]::FromUnixTimeSeconds([long]$Matches[1]).UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
+        $subPlus = [DateTimeOffset]::FromUnixTimeSeconds([long]$Matches[1] - 5).UtcDateTime.ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
+        $q = [string]$o['question']
+        $proj = ""
+        if ($q -match '(?m)^\s*@cwd:\s*(.+?)\s*$') { $proj = ConvertTo-ClaudeProjectName $Matches[1] }
+        $cands = @($Db.Query("SELECT file, turn_ts, project FROM token_turns WHERE turn_ts LIKE '%T%' AND turn_ts <= ? AND end_ts IS NOT NULL AND end_ts >= ? ORDER BY turn_ts DESC", [object[]]@($subIso, $subPlus)))
+        if ($proj) { $cands = @($cands | Where-Object { [string]$_['project'] -eq $proj }) }
+        if ($cands.Count -eq 0) { continue }
+        $projs = @($cands | ForEach-Object { [string]$_['project'] } | Select-Object -Unique)
+        if ($projs.Count -ne 1) { continue }
+        $pick = $cands[0]
+        [void]$Db.Execute("INSERT INTO token_task_links (task_id, file, turn_ts) VALUES (?, ?, ?) ON CONFLICT(task_id) DO NOTHING", [object[]]@($tid, [string]$pick['file'], [string]$pick['turn_ts']))
+        $linked++
+    }
+    return $linked
+}
+
+# record-estimate.ps1 이 token_estimates 에 남긴 예상을 질문 행에 붙인다: 같은 프로젝트에서 질문이 시작한 뒤(turn_ts) 끝나기 전(end_ts)에 기록된 것.
+# 질문 시작 시각과 똑같은 시각의 기록(나중에 질문 원문만 보고 채운 예상)은 끝 시각이 없는 옛 행에도 붙는다.
+# - 예상 값은 최초 기록으로 고정한다: 한 질문에 다시 기록해도(경고를 보고 선택을 바꾼 경우 등) 토큰 · 시간 예상은 처음 값 그대로이고 선택 · 사유 · 수준만 바뀐다.
+#   (나중에 원문만 보고 채운 예상(backfill)이 붙어 있던 행은 그 질문 때 실제로 기록한 값이 이긴다)
+# - 붙인 기록은 merged = 1 로 표시해 다음 수집에서는 다시 보지 않는다(매번 전체를 다시 붙이면 수집이 수 초씩 느려진다). 아직 행이 없는 기록(진행 중인 질문)은 남겨 두었다 다음에 붙인다.
+#   -All 이면 표시와 상관없이 전부 다시 본다(행을 처음부터 다시 만든 뒤).
+# - 기록할 때의 작업 폴더가 프로젝트의 하위 폴더였으면(cd 로 옮긴 뒤 기록) 프로젝트 이름이 길어져 맞는 행이 없다. 그때는 그 이름의 앞부분인 프로젝트 중 가장 긴 것에서 찾는다.
+# 기록에 세션 번호가 있으면 그 세션 파일의 질문에만 붙인다(같은 프로젝트에서 세션 여러 개를 동시에 써도 섞이지 않는다). 세션 번호가 없는 옛 기록만 프로젝트와 시각으로 찾는다. 붙인 기록 수를 돌려준다. 몇 번을 돌려도 같은 결과(멱등)다.
+function Merge-RecordedEstimates($Db, [int]$Days = 3650, [switch]$All) {
     $cut = (Get-Date).ToUniversalTime().AddDays(-$Days).ToString("yyyy-MM-ddTHH:mm:ss")
-    $ests = @($Db.Query("SELECT recorded_at, project, est_direct, est_delegate, est_time_direct, est_time_delegate, choice, level FROM token_estimates WHERE recorded_at >= ? ORDER BY recorded_at ASC", [object[]]@($cut)))
+    $hasMerged = $false
+    $hasSession = $false
+    try {
+        foreach ($ci in @($Db.Query("PRAGMA table_info(token_estimates)", $null))) {
+            if ([string]$ci['name'] -eq 'merged') { $hasMerged = $true }
+            if ([string]$ci['name'] -eq 'session') { $hasSession = $true }
+        }
+    } catch {}
+    $where = "recorded_at >= ?"
+    if ($hasMerged -and -not $All) {
+        $where += " AND COALESCE(merged, 0) = 0"
+    }
+    $sessionCol = if ($hasSession) { ", session" } else { "" }
+    $ests = @($Db.Query("SELECT id, recorded_at, project, est_direct, est_delegate, est_time_direct, est_time_delegate, choice, level, factor_direct, factor_delegate, kind, reason$sessionCol FROM token_estimates WHERE $where ORDER BY recorded_at ASC, id ASC", [object[]]@($cut)))
+    if ($ests.Count -eq 0) { return 0 }
+    $projNames = $null
     $merged = 0
     foreach ($e in $ests) {
+        if ([string]$e['kind'] -eq 'switch') { continue }
         $rec = [string]$e['recorded_at']
         $lowIso = ([datetime]::Parse($rec, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AdjustToUniversal)).AddSeconds(-3).ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
-        $rows = @($Db.Query("SELECT file, turn_ts FROM token_turns WHERE project = ? AND turn_ts LIKE '%T%' AND turn_ts <= ? AND end_ts IS NOT NULL AND end_ts >= ? ORDER BY turn_ts DESC LIMIT 1", [object[]]@([string]$e['project'], $rec, $lowIso)))
+        $findSql = "SELECT file, turn_ts, est_ver, est_kind, est_direct, est_delegate FROM token_turns WHERE project = ? AND turn_ts LIKE '%T%' AND turn_ts <= ? AND ((end_ts IS NOT NULL AND end_ts >= ?) OR turn_ts = ?) ORDER BY turn_ts DESC LIMIT 1"
+        $estProj = [string]$e['project']
+        $sessionVal = if ($hasSession -and $e.ContainsKey('session') -and $null -ne $e['session'] -and $e['session'] -ne [DBNull]::Value) { [string]$e['session'] } else { "" }
+        $rows = @()
+        if ($sessionVal) {
+            $findSessionSql = "SELECT file, turn_ts, est_ver, est_kind, est_direct, est_delegate FROM token_turns WHERE file LIKE ? AND turn_ts LIKE '%T%' AND turn_ts <= ? AND ((end_ts IS NOT NULL AND end_ts >= ?) OR turn_ts = ?) ORDER BY turn_ts DESC LIMIT 1"
+            $rows = @($Db.Query($findSessionSql, [object[]]@(('%' + $sessionVal + '.jsonl'), $rec, $lowIso, $rec)))
+        }
+        # 세션 번호가 있는데 그 세션 파일에 아직 행이 없으면 10분은 기다린다(그 세션의 질문 행이 곧 수집될 수 있다. 바로 프로젝트 기준으로 찾으면 같은 프로젝트의 다른 세션 질문에 붙는다).
+        # 10분이 지나도 없으면 이어 시작한 세션이 앞 세션 질문을 복사해 다른 파일 쪽 행만 남은 경우로 보고 프로젝트 기준으로 찾는다
+        if ($rows.Count -eq 0 -and $sessionVal -and -not $All) {
+            $recAt = [datetime]::Parse($rec, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AdjustToUniversal)
+            if (((Get-Date).ToUniversalTime() - $recAt).TotalMinutes -lt 10) { continue }
+        }
+        if ($rows.Count -eq 0) {
+            $rows = @($Db.Query($findSql, [object[]]@($estProj, $rec, $lowIso, $rec)))
+            if ($rows.Count -eq 0 -and $estProj) {
+                if ($null -eq $projNames) { $projNames = @($Db.Query("SELECT DISTINCT project FROM token_turns WHERE project IS NOT NULL", $null) | ForEach-Object { [string]$_['project'] } | Sort-Object { $_.Length } -Descending) }
+                foreach ($pn in $projNames) {
+                    if ($pn -and $estProj.Length -gt $pn.Length -and $estProj.StartsWith($pn + "-", [System.StringComparison]::OrdinalIgnoreCase)) {
+                        $rows = @($Db.Query($findSql, [object[]]@($pn, $rec, $lowIso, $rec)))
+                        if ($rows.Count -gt 0) { break }
+                    }
+                }
+            }
+        }
         if ($rows.Count -eq 0) { continue }
+        $row0 = $rows[0]
         $val = { param($k) if ($e[$k] -eq $null -or $e[$k] -eq [DBNull]::Value) { $null } else { $e[$k] } }
-        [void]$Db.Execute(
-            "UPDATE token_turns SET est_direct = ?, est_delegate = ?, est_time_direct = ?, est_time_delegate = ?, est_ver = 'v2', choice = COALESCE(?, choice), level = COALESCE(?, level) WHERE file = ? AND turn_ts = ?",
-            [object[]]@((& $val 'est_direct'), (& $val 'est_delegate'), (& $val 'est_time_direct'), (& $val 'est_time_delegate'), (& $val 'choice'), (& $val 'level'), [string]$rows[0]['file'], [string]$rows[0]['turn_ts'])
-        )
+        $rowKind = if ($null -eq $row0['est_kind'] -or $row0['est_kind'] -eq [DBNull]::Value) { "" } else { [string]$row0['est_kind'] }
+        $rowHasEst = (($null -ne $row0['est_direct'] -and $row0['est_direct'] -ne [DBNull]::Value) -or ($null -ne $row0['est_delegate'] -and $row0['est_delegate'] -ne [DBNull]::Value))
+        # est_kind: record = 그 질문 때 기록한 값(고정), backfill = 나중에 원문만 보고 채운 값, 빈 값 = 답변 끝 예상 줄(옛 방식)에서 읽은 값
+        $rowHasLive = ($rowKind -eq 'record' -and $rowHasEst)
+        $estIsBackfill = ([string]$e['kind'] -eq 'backfill')
+        if ($rowHasLive -and $estIsBackfill) {
+            # 그 질문 때 실제로 기록한 값이 있으면 나중에 채운 예상은 붙이지 않는다
+        } elseif ($rowHasLive) {
+            # 예상 값은 처음 기록 그대로 두고, 선택 · 사유 · 수준만 새 기록을 따른다
+            [void]$Db.Execute(
+                "UPDATE token_turns SET choice = COALESCE(?, choice), choice_reason = COALESCE(?, choice_reason), level = COALESCE(?, level) WHERE file = ? AND turn_ts = ?",
+                [object[]]@((& $val 'choice'), (& $val 'reason'), (& $val 'level'), [string]$row0['file'], [string]$row0['turn_ts'])
+            )
+        } else {
+            [void]$Db.Execute(
+                "UPDATE token_turns SET est_direct = ?, est_delegate = ?, est_time_direct = ?, est_time_delegate = ?, est_ver = 'v2', choice = COALESCE(?, choice), choice_reason = COALESCE(?, choice_reason), level = COALESCE(?, level), est_factor_direct = ?, est_factor_delegate = ?, est_kind = ? WHERE file = ? AND turn_ts = ?",
+                [object[]]@((& $val 'est_direct'), (& $val 'est_delegate'), (& $val 'est_time_direct'), (& $val 'est_time_delegate'), (& $val 'choice'), (& $val 'reason'), (& $val 'level'), (& $val 'factor_direct'), (& $val 'factor_delegate'), $(if ($estIsBackfill) { 'backfill' } else { 'record' }), [string]$row0['file'], [string]$row0['turn_ts'])
+            )
+        }
+        if ($hasMerged) { [void]$Db.Execute("UPDATE token_estimates SET merged = 1 WHERE id = ?", [object[]]@([long]$e['id'])) }
         $merged++
     }
     return $merged
 }
-
 function Update-TokenStats {
     param(
         [string]$DbPath = "",
@@ -1819,8 +2417,10 @@ function Update-TokenStats {
         }
     }
     New-Item -ItemType Directory -Force -Path $RuntimeDir | Out-Null
+    # 없을 때만 만든다(확인과 만들기를 한 번에 해서 수집기 둘이 동시에 시작해도 하나만 돈다)
     try {
-        Set-Content -LiteralPath $lockPath -Value $PID -Encoding ASCII -ErrorAction Stop
+        $lockFs = [System.IO.File]::Open($lockPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        try { $lockBytes = [System.Text.Encoding]::ASCII.GetBytes([string]$PID); $lockFs.Write($lockBytes, 0, $lockBytes.Length) } finally { $lockFs.Dispose() }
     } catch {
         return
     }
@@ -1828,9 +2428,16 @@ function Update-TokenStats {
     try {
         $db = Open-AgyDb $DbPath
         try {
-            $targetRuleVer = "3"
+            # 5: 컨텍스트가 압축된 턴(턴 도중 · 시작할 때)도 늘어난 만큼으로 토큰을 어림하도록 바뀌어(빈 값이던 턴), 최근 7일 파일을 한 번 다시 읽는다(3 -> 4 와 같은 방식)
+            # 6: 한 번의 작업 도중 새 질문이 오면 질문마다 한 행으로 센다(턴이 아니라 질문이 통계 단위). 컨텍스트 압축 뒤 "이어서 진행" 메시지는 새 턴이 아니다. 최근 7일 파일을 한 번 다시 읽는다
+            # 7: 답변 끝 꼬리 줄의 사유(choice_reason)를 모은다. 최근 7일 파일을 한 번 다시 읽는다
+            # 8: 위임은 도구 결과에 작업 번호가 찍힌 질문만(명령 글자만으로는 위임이 아니다). 최근 7일 파일을 한 번 다시 읽고, 그보다 옛 행은 작업 연결이 없으면 직접으로 고친다
+            # 9: 작업 번호는 제출 스크립트가 줄 맨 앞에 찍은 것만 읽는다(인용된 출력 속 번호 제외). 최근 7일 파일을 한 번 다시 읽는다
+            $targetRuleVer = "9"
             $savedRuleVer = Get-AgyMeta $db "token_rule_ver"
             $recentResetOnly = $false
+            $fixOldDelegatePath = ($null -ne $savedRuleVer -and [int]$savedRuleVer -ge 2 -and [int]$savedRuleVer -lt 8)
+            $mergeAll = [bool]$Backfill
             if ($Backfill -or $null -eq $savedRuleVer -or [int]$savedRuleVer -lt 2) {
                 [void]$db.Execute("UPDATE token_files SET offset = 0, last_ctx = NULL", $null)
                 Set-AgyMeta $db "token_rule_ver" $targetRuleVer
@@ -1883,11 +2490,23 @@ function Update-TokenStats {
                 $scanTurns = @($scanResult.Turns)
                 if ($scanResult.NewOffset -ne $offset -or $scanTurns.Count -gt 0) {
                     $filesProcessed++
+                    if ($offset -eq 0) { $mergeAll = $true }
                     Invoke-AgyDbTransaction $db {
+                        if ($offset -eq 0) {
+                            # 파일을 처음부터 다시 읽었으면 이번에 나오지 않은 옛 행(예: 이어서 진행 메시지가 따로 세던 턴)과 그 작업 연결을 지우고 새로 채운다
+                            $keepTs = @{}
+                            foreach ($kt in $scanTurns) { $keepTs[[string]$kt.turn_ts] = $true }
+                            foreach ($oldRow in @($db.Query("SELECT turn_ts FROM token_turns WHERE file = ?", [object[]]@($fPath)))) {
+                                if (-not $keepTs.ContainsKey([string]$oldRow['turn_ts'])) {
+                                    [void]$db.Execute("DELETE FROM token_turns WHERE file = ? AND turn_ts = ?", [object[]]@($fPath, [string]$oldRow['turn_ts']))
+                                }
+                            }
+                            [void]$db.Execute("DELETE FROM token_task_links WHERE file = ?", [object[]]@($fPath))
+                        }
                         foreach ($t in $scanTurns) {
                             [void]$db.Execute(
-                                "INSERT INTO token_turns (file, turn_ts, project, path, calls, submits, polls, out_tokens, d_tokens, est_direct, est_delegate, choice, est_ver, cr_tokens, dur_sec, est_time_direct, est_time_delegate, calls_related, d_related, level, end_ts) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(file, turn_ts) DO UPDATE SET project=excluded.project, path=excluded.path, calls=excluded.calls, submits=excluded.submits, polls=excluded.polls, out_tokens=excluded.out_tokens, d_tokens=COALESCE(excluded.d_tokens, token_turns.d_tokens), est_direct=excluded.est_direct, est_delegate=excluded.est_delegate, choice=excluded.choice, est_ver=excluded.est_ver, cr_tokens=excluded.cr_tokens, dur_sec=excluded.dur_sec, est_time_direct=excluded.est_time_direct, est_time_delegate=excluded.est_time_delegate, calls_related=excluded.calls_related, d_related=COALESCE(excluded.d_related, token_turns.d_related), level=COALESCE(excluded.level, token_turns.level), end_ts=COALESCE(excluded.end_ts, token_turns.end_ts)",
-                                [object[]]@($t.file, $t.turn_ts, $t.project, $t.path, [long]$t.calls, [long]$t.submits, [long]$t.polls, [long]$t.out_tokens, $(if ($null -eq $t.d_tokens) { $null } else { [long]$t.d_tokens }), $(if ($null -eq $t.est_direct) { $null } else { [double]$t.est_direct }), $(if ($null -eq $t.est_delegate) { $null } else { [double]$t.est_delegate }), $t.choice, $t.est_ver, $(if ($null -eq $t.cr_tokens) { $null } else { [long]$t.cr_tokens }), $(if ($null -eq $t.dur_sec) { $null } else { [long]$t.dur_sec }), $(if ($null -eq $t.est_time_direct) { $null } else { [long]$t.est_time_direct }), $(if ($null -eq $t.est_time_delegate) { $null } else { [long]$t.est_time_delegate }), $(if ($null -eq $t.calls_related) { $null } else { [long]$t.calls_related }), $(if ($null -eq $t.d_related) { $null } else { [long]$t.d_related }), $t.level, $t.end_ts)
+                                "INSERT INTO token_turns (file, turn_ts, project, path, calls, submits, polls, out_tokens, d_tokens, est_direct, est_delegate, choice, choice_reason, est_ver, cr_tokens, dur_sec, est_time_direct, est_time_delegate, calls_related, d_related, level, end_ts) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(file, turn_ts) DO UPDATE SET project=excluded.project, path=excluded.path, calls=excluded.calls, submits=excluded.submits, polls=excluded.polls, out_tokens=excluded.out_tokens, d_tokens=COALESCE(excluded.d_tokens, token_turns.d_tokens), est_direct=CASE WHEN token_turns.est_kind IS NOT NULL THEN token_turns.est_direct ELSE excluded.est_direct END, est_delegate=CASE WHEN token_turns.est_kind IS NOT NULL THEN token_turns.est_delegate ELSE excluded.est_delegate END, choice=CASE WHEN token_turns.est_kind IS NOT NULL THEN COALESCE(token_turns.choice, excluded.choice) ELSE excluded.choice END, choice_reason=COALESCE(excluded.choice_reason, token_turns.choice_reason), est_ver=CASE WHEN token_turns.est_kind IS NOT NULL THEN 'v2' ELSE excluded.est_ver END, cr_tokens=excluded.cr_tokens, dur_sec=excluded.dur_sec, est_time_direct=CASE WHEN token_turns.est_kind IS NOT NULL THEN token_turns.est_time_direct ELSE excluded.est_time_direct END, est_time_delegate=CASE WHEN token_turns.est_kind IS NOT NULL THEN token_turns.est_time_delegate ELSE excluded.est_time_delegate END, calls_related=excluded.calls_related, d_related=COALESCE(excluded.d_related, token_turns.d_related), level=COALESCE(excluded.level, token_turns.level), end_ts=COALESCE(excluded.end_ts, token_turns.end_ts)",
+                                [object[]]@($t.file, $t.turn_ts, $t.project, $t.path, [long]$t.calls, [long]$t.submits, [long]$t.polls, [long]$t.out_tokens, $(if ($null -eq $t.d_tokens) { $null } else { [long]$t.d_tokens }), $(if ($null -eq $t.est_direct) { $null } else { [double]$t.est_direct }), $(if ($null -eq $t.est_delegate) { $null } else { [double]$t.est_delegate }), $t.choice, $t.choice_reason, $t.est_ver, $(if ($null -eq $t.cr_tokens) { $null } else { [long]$t.cr_tokens }), $(if ($null -eq $t.dur_sec) { $null } else { [long]$t.dur_sec }), $(if ($null -eq $t.est_time_direct) { $null } else { [long]$t.est_time_direct }), $(if ($null -eq $t.est_time_delegate) { $null } else { [long]$t.est_time_delegate }), $(if ($null -eq $t.calls_related) { $null } else { [long]$t.calls_related }), $(if ($null -eq $t.d_related) { $null } else { [long]$t.d_related }), $t.level, $t.end_ts)
                             )
                             if ($t.task_ids) {
                                 foreach ($tid in $t.task_ids) {
@@ -1909,8 +2528,20 @@ function Update-TokenStats {
                 }
             }
 
+            # 이어서 시작한 세션이 앞 세션의 턴을 복사해 담아 겹친 줄을 정리한다(예상을 붙이기 전에 해서 한 줄에만 붙게 한다)
+            try { Invoke-AgyDbTransaction $db { [void](Remove-DuplicateTurns $db) } } catch {}
+
+            # 대화 기록에 작업 번호가 남지 않은 위임을 제출 시각에 진행 중이던 질문에 잇는다(그래야 위임 카드와 통계에 잡힌다)
+            try { Invoke-AgyDbTransaction $db { [void](Add-OrphanTaskLinks $db) } } catch {}
+
             # 결정 시점에 기록한 예상(record-estimate.ps1)을 그 시각에 진행 중이던 턴에 붙인다
-            try { [void](Merge-RecordedEstimates $db) } catch {}
+            # 새 기록만 붙인다. 파일을 처음부터 다시 읽어 행을 새로 만든 수집에서는 전부 다시 붙인다(예상 값은 최초 기록으로 고정이라 결과는 같다)
+            try { Invoke-AgyDbTransaction $db { [void](Merge-RecordedEstimates $db -All:$mergeAll) } } catch {}
+
+            # 규칙 8 로 올라올 때 한 번: 다시 읽지 않은 옛 행 중 위임 작업 연결이 하나도 없는 "위임" 행은 명령 글자만 보고 잘못 분류된 것이라 직접으로 고친다
+            if ($fixOldDelegatePath) {
+                try { [void]$db.Execute("UPDATE token_turns SET path = 'direct' WHERE path = 'delegate' AND calls > 0 AND NOT EXISTS (SELECT 1 FROM token_task_links l WHERE l.file = token_turns.file AND l.turn_ts = token_turns.turn_ts)", $null) } catch {}
+            }
 
             # 기존 행 est_ver 채우기 (est 값은 있고 est_ver 가 NULL 인 행은 v1)
             [void]$db.Execute("UPDATE token_turns SET est_ver = 'v1' WHERE (est_ver IS NULL OR est_ver = '') AND (est_direct IS NOT NULL OR est_delegate IS NOT NULL)", $null)

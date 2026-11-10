@@ -210,8 +210,8 @@ function Initialize-AgySqlite {
 # ============================================================================
 
 # 표나 열을 더하면 이 숫자를 올린다. 이미 있는 DB 는 user_version 이 이 값보다 낮을 때만 스키마를 다시 확인하므로, 안 올리면 새 표가 만들어지지 않는다.
-#   1: tasks · agy_sessions · meta   2: + token_files · token_turns · token_task_links(토큰 통계)   3: + cum_* · usage_basis(이어 보낸 세션 토큰 분리)   4: + calls_related · d_related(위임 관련 호출 및 증가량 분리)   6: + anomaly(이상치)
-$script:AgyDbSchemaVersion = 7
+#   1: tasks · agy_sessions · meta   2: + token_files · token_turns · token_task_links(토큰 통계)   3: + cum_* · usage_basis(이어 보낸 세션 토큰 분리)   4: + calls_related · d_related(위임 관련 호출 및 증가량 분리)   6: + anomaly(이상치)   12: + token_estimates.session(기록한 Claude 세션 번호)
+$script:AgyDbSchemaVersion = 12
 $script:AgyDbSchemaSql = @(
     "CREATE TABLE IF NOT EXISTS tasks (
         task_id TEXT PRIMARY KEY NOT NULL,
@@ -267,7 +267,15 @@ $script:AgyDbSchemaSql = @(
         est_time_direct INTEGER,
         est_time_delegate INTEGER,
         choice TEXT,
-        level TEXT)"
+        level TEXT,
+        factor_direct REAL,
+        factor_delegate REAL,
+        kind TEXT,
+        reason TEXT,
+        switch_to INTEGER,
+        merged INTEGER DEFAULT 0,
+        session TEXT)",
+    "CREATE INDEX IF NOT EXISTS idx_token_turns_project_ts ON token_turns(project, turn_ts)"
 )
 
 # 기록 한 건의 칸과 순서. New-QaRecord(common.ps1)와 뷰어 API 가 같은 목록을 쓴다.
@@ -298,12 +306,43 @@ function Initialize-AgyDbSchema($Db, [string]$Path = "") {
         @{ Name = "d_related"; Type = "INTEGER" },
         @{ Name = "level"; Type = "TEXT" },
         @{ Name = "anomaly"; Type = "TEXT" },
-        @{ Name = "end_ts"; Type = "TEXT" }
+        @{ Name = "end_ts"; Type = "TEXT" },
+        @{ Name = "est_factor_direct"; Type = "REAL" },
+        @{ Name = "est_factor_delegate"; Type = "REAL" },
+        @{ Name = "est_kind"; Type = "TEXT" },      # 스키마 9: NULL = 질문을 받을 때 낸 예상, backfill = 나중에 질문 원문만 보고 채운 예상
+        @{ Name = "choice_reason"; Type = "TEXT" }  # 직접/위임을 고른 사유
     )
     foreach ($col in $neededCols) {
         if ($cols.Count -gt 0 -and -not $cols.ContainsKey($col.Name)) {
             try { [void]$Db.Execute(("ALTER TABLE token_turns ADD COLUMN {0} {1}" -f $col.Name, $col.Type), $null) } catch {}
         }
+    }
+    # token_estimates 에 보정 계수 열(스키마 8)
+    $estCols = @{}
+    try {
+        $einfo = $Db.Query("PRAGMA table_info(token_estimates)", $null)
+        if ($einfo) { foreach ($erow in $einfo) { if ($erow["name"]) { $estCols[[string]$erow["name"]] = $true } } }
+    } catch {}
+    foreach ($ec in @("factor_direct", "factor_delegate")) {
+        if ($estCols.Count -gt 0 -and -not $estCols.ContainsKey($ec)) {
+            try { [void]$Db.Execute(("ALTER TABLE token_estimates ADD COLUMN {0} REAL" -f $ec), $null) } catch {}
+        }
+    }
+    if ($estCols.Count -gt 0 -and -not $estCols.ContainsKey("kind")) {
+        try { [void]$Db.Execute("ALTER TABLE token_estimates ADD COLUMN kind TEXT", $null) } catch {}
+    }
+    if ($estCols.Count -gt 0 -and -not $estCols.ContainsKey("switch_to")) {
+        try { [void]$Db.Execute("ALTER TABLE token_estimates ADD COLUMN switch_to INTEGER", $null) } catch {}
+    }
+    # 스키마 11: 질문 행에 붙인 기록 표시(merged). 수집기가 새 기록만 붙이게 한다. 이미 있던 기록은 0 이라 다음 수집에서 한 번 전부 다시 붙는다
+    if ($estCols.Count -gt 0 -and -not $estCols.ContainsKey("merged")) {
+        try { [void]$Db.Execute("ALTER TABLE token_estimates ADD COLUMN merged INTEGER DEFAULT 0", $null) } catch {}
+    }
+    if ($estCols.Count -gt 0 -and -not $estCols.ContainsKey("session")) {
+        try { [void]$Db.Execute("ALTER TABLE token_estimates ADD COLUMN session TEXT", $null) } catch {}
+    }
+    if ($estCols.Count -gt 0 -and -not $estCols.ContainsKey("reason")) {
+        try { [void]$Db.Execute("ALTER TABLE token_estimates ADD COLUMN reason TEXT", $null) } catch {}
     }
     try {
         [void]$Db.Execute("UPDATE token_turns SET est_ver = 'v1' WHERE (est_ver IS NULL OR est_ver = '') AND (est_direct IS NOT NULL OR est_delegate IS NOT NULL)", $null)

@@ -48,7 +48,7 @@ Split big jobs: you design and take the hardest piece, agy gets the rest with th
 
 agy has no web search. Never trust factual claims from agy without checking.
 
-## 3. Delegate in four steps
+## 3. Delegate in four steps (plus retry on failure)
 
 1. **Watcher.** Check it is running; start it if not (hidden, no window):
    ```bash
@@ -71,6 +71,7 @@ agy has no web search. Never trust factual claims from agy without checking.
    ```
    Leave out the `@cwd` line for tasks that need no files (translation, writing).
 4. **Wait.** The script waits about 170 s. If it prints `===PENDING=== <ID>`, the task is still running: do not resubmit, call `submit-task.ps1 -Poll <ID>` (a `high` model takes about 10 minutes). Output `===RESULT===` means an answer exists (read it, failures can arrive as the answer text); `===ERROR===` means no answer.
+5. **If agy fails** (`===ERROR===`, or the answer reports an agy run failure such as an interrupted stream): check `git diff --stat` for half-done edits, then resend the same brief with "continue from the current files" **1-2 more times when delegating still clearly pays**: the delegate estimate is more than 20% below direct and the run is short (low/medium, or a high run not already past ~10 minutes). If the saving is small or the run takes too long, finish that piece directly. Do not re-record the estimate (it is fixed at decision time); add `(agy failed, retried N times)` or `(agy failed, finished directly)` to the closing line.
 
 More: several tasks at once (`-NoWait`, then `-Poll <ID1>,<ID2>`, at most 5 at a time), `@session`, `@model`, `@upgrade`: `references/brief-and-commands.md` and `references/models.md`.
 
