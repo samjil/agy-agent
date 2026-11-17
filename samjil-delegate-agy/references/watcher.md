@@ -33,6 +33,7 @@ Do not start it with `start-agy.ps1` (opens a console window) unless the user wa
 ## Limits and failure handling
 
 - At most 5 tasks run at the same time (`AGY_MAX_PARALLEL`).
+- A task you cancel with `submit-task.ps1 -Cancel <ID>` (or `-CancelOnTimeout`) has its worker process tree ended; the watcher closes it as `CANCELLED`, not as a failure.
 - One agy call is cut off after 30 minutes, or after 5 minutes with no new step. If the final answer was already written the watcher recovers it automatically.
 - If agy fails or hits its quota, do the work directly. If a model you chose with `@model` is out of quota the watcher fails instead of switching models: ask the user whether to retry with the default models or to do it yourself.
 - Results and usage are stored in `runtime\logs\agy.db` (SQLite). Logs: `runtime\logs\watcher.log`.

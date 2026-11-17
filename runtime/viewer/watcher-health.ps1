@@ -18,10 +18,24 @@ function Get-WatcherRuntimeDir([string]$DataDir) {
     return (Join-Path (Split-Path $DataDir -Parent) "runtime")
 }
 
-# 기본 프로세스 조회: 명령줄에 watch-agy.ps1 이 들어간 powershell.exe 목록.
-function Get-WatcherProcessList {
+if (-not (Get-Command "Test-WatcherCommandLineForRuntime" -ErrorAction SilentlyContinue)) {
+    $parentDir = Split-Path $PSScriptRoot -Parent
+    $layoutCandidates = @(
+        (Join-Path $PSScriptRoot "..\delegate-agy\scripts\sub\agy-layout.ps1"),
+        $(if ($parentDir) { Join-Path $parentDir "delegate-agy\scripts\sub\agy-layout.ps1" }),
+        (Join-Path $env:USERPROFILE ".samjil\delegate-agy\scripts\sub\agy-layout.ps1")
+    )
+    $layoutFile = $layoutCandidates | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
+    if ($layoutFile) { . $layoutFile }
+}
+
+# 기본 프로세스 조회: 명령줄에 watch-agy.ps1 이 들어간 powershell.exe 목록(지정한 런타임 폴더의 워처만).
+function Get-WatcherProcessList([string]$RuntimeDir = "") {
     return @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -like "*watch-agy.ps1*" })
+        Where-Object {
+            $_.CommandLine -like "*watch-agy.ps1*" -and
+            (-not $RuntimeDir -or -not (Get-Command "Test-WatcherCommandLineForRuntime" -ErrorAction SilentlyContinue) -or (Test-WatcherCommandLineForRuntime $_.CommandLine $RuntimeDir))
+        })
 }
 
 # 워처가 돌고 있다고 볼 수 있는가. 반환: @{ Alive = bool; Source = 'lock'|'process+heartbeat'|'none'; Pid = int }
@@ -57,7 +71,14 @@ function Test-WatcherAlive {
     $hb = Get-Item -LiteralPath $hbFile -ErrorAction SilentlyContinue
     if ($hb -and (((Get-Date) - $hb.LastWriteTime).TotalSeconds -le $StaleSeconds)) {
         # @(if ...) 로 감쌉니다: if 식은 원소 하나짜리 배열을 풀어 버려서 .Count 가 비게 됩니다.
-        $procs = @(if ($GetWatcherProcesses) { & $GetWatcherProcesses } else { Get-WatcherProcessList })
+        $rawProcs = @(if ($GetWatcherProcesses) { & $GetWatcherProcesses } else { Get-WatcherProcessList $RuntimeDir })
+        $procs = @($rawProcs | Where-Object {
+            if ($_.PSObject.Properties['CommandLine'] -and (Get-Command "Test-WatcherCommandLineForRuntime" -ErrorAction SilentlyContinue)) {
+                $_.CommandLine -like "*watch-agy.ps1*" -and (Test-WatcherCommandLineForRuntime $_.CommandLine $RuntimeDir)
+            } else {
+                $true
+            }
+        })
         if ($procs.Count -gt 0) { return @{ Alive = $true; Source = "process+heartbeat"; Pid = 0 } }
     }
     return @{ Alive = $false; Source = "none"; Pid = 0 }

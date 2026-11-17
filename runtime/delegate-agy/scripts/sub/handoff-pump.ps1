@@ -25,31 +25,42 @@ function ConvertTo-HandoffSafeName([string]$Name) {
     return $s
 }
 
-# 메시지 머리말의 `위임모델:` 값을 모델 단계로 해석한다. low|medium|high 또는 gemini-3.8-flash-low|medium|high 만 받는다.
-# 자동 단계 선택(agy-autotier.ps1)은 코드 블록·번호 단계·검증 명령이 든 잘 쓴 명세를 "복잡한 일"로 보고 high 로 보내는데,
-# 명세가 이미 정해진 구현이면 보내는 쪽(Claude)이 단계를 직접 정할 수 있게 한다. 값이 없거나 모르는 값이면 $null(자동 선택으로 넘어간다).
-# 반환: @{ Tier; Model; Reason } ($Auto 와 같은 모양)
-function Get-HandoffModelOverride([string]$Value) {
-    $v = ([string]$Value).Trim().ToLowerInvariant()
-    if (-not $v) { return $null }
-    $tier = ""
-    $model = ""
-    if ($v -match '^(low|medium|high)$') { $tier = $v; $model = "gemini-3.8-flash-$v" }
-    elseif ($v -match '^gemini-3\.8-flash-(low|medium|high)$') { $tier = $Matches[1]; $model = $v }
-    else { return $null }
-    return @{ Tier = $tier; Model = $model; Reason = "메시지 머리말 위임모델: $($Value.Trim())" }
+# 모델 단계 설정(config\models.json)을 읽는 헬퍼. 워처 안에서는 이미 불러와 있다(시험 등에서 이 파일만 불렀을 때를 위해).
+if (-not (Get-Command Get-AgyModelConfig -ErrorAction SilentlyContinue)) {
+    $hpModelsLib = Join-Path $PSScriptRoot "agy-models.ps1"
+    if (Test-Path -LiteralPath $hpModelsLib) { . $hpModelsLib }
 }
 
-# 협의(핸드오프)의 기본 모델 단계. 협의는 정확도와 성능이 목적이라 자동 선택(짧은 확인은 low)을 쓰지 않고 기본을 high 로 둔다.
-# 환경변수 AGY_HANDOFF_MODEL: low|medium|high|gemini-3.8-flash-* 이면 그 값, `auto` 면 $null(자동 선택으로 넘어간다), 없으면 high.
-# 메시지 머리말의 `위임모델:` 은 이 기본값보다 우선한다. 알 수 없는 값은 high 로 본다.
-# 반환: @{ Tier; Model; Reason } 또는 $null (자동 선택)
+# 메시지 머리말의 `위임모델:` 값을 해석한다. 단계 이름(quick · build · build-hard · feature · think · deep, 옛 별칭 low · medium · high)
+# 또는 모델 이름(config\models.json 의 allowed)을 받는다. 값이 없거나 모르는 값이면 $null(협의 기본 단계로 넘어간다).
+# 반환: @{ Tier; Model; Spec; Reason } ($Auto 와 같은 모양). Spec 은 지시파일의 @model 에 그대로 쓸 값(단계 이름 또는 모델 이름).
+function Get-HandoffModelOverride([string]$Value) {
+    $v = ([string]$Value).Trim()
+    if (-not $v) { return $null }
+    $spec = Resolve-AgyModelSpec $v (Get-AgyModelConfig)
+    if (-not $spec -or $spec.Kind -eq "unknown") { return $null }
+    if ($spec.Kind -eq "tier") { return @{ Tier = [string]$spec.Tier; Model = [string]$spec.Model; Spec = [string]$spec.Tier; Reason = "메시지 머리말 위임모델: $v" } }
+    $tierName = if ($spec.Tier) { [string]$spec.Tier } else { [string]$spec.Model }
+    return @{ Tier = $tierName; Model = [string]$spec.Model; Spec = [string]$spec.Model; Reason = "메시지 머리말 위임모델: $v" }
+}
+
+# 협의(핸드오프)의 기본 단계. 협의는 정확도가 목적이라 자동 선택을 쓰지 않고 설정의 handoff_default(기본 think = gemini-4-argon-high)로 둔다.
+# 환경변수 AGY_HANDOFF_MODEL: 단계 이름 · 모델 이름이면 그 값, `auto` 면 $null(자동 선택으로 넘어간다), 없으면 handoff_default.
+# 메시지 머리말의 `위임모델:` 은 이 기본값보다 우선한다. 알 수 없는 값은 handoff_default 로 본다.
+# 반환: @{ Tier; Model; Spec; Reason } 또는 $null (자동 선택)
+function Get-HandoffDefaultTier {
+    $cfg = Get-AgyModelConfig
+    $t = [string]$cfg.HandoffDefault
+    if (-not $t -or -not $cfg.Tiers.Contains($t)) { $t = "think" }
+    return $t
+}
 function Get-HandoffDefaultModel {
     $v = ([string]$env:AGY_HANDOFF_MODEL).Trim()
     if ($v.ToLowerInvariant() -eq "auto") { return $null }
-    if (-not $v) { $v = "high" }
+    $def = Get-HandoffDefaultTier
+    if (-not $v) { $v = $def }
     $m = Get-HandoffModelOverride $v
-    if (-not $m) { $m = Get-HandoffModelOverride "high" }
+    if (-not $m) { $m = Get-HandoffModelOverride $def }
     $m.Reason = "협의 기본 단계 $($m.Tier) (AGY_HANDOFF_MODEL 로 바꿈, auto 면 자동 선택)"
     return $m
 }
@@ -59,13 +70,14 @@ function Get-HandoffMaxAgeHours {
     return 2.0
 }
 
-# 채널의 agy 대화(@session) 이름. agy 대화는 시작할 때의 모델을 유지하므로, 낮은 단계(low/medium)는 단계별로 대화를 따로 둔다.
-# high 는 예전과 같은 이름(handoff-<채널>)이라 이미 있는 대화를 그대로 이어 쓴다. 단계가 다르면 대화가 이어지지 않지만,
-# 이전 메시지는 채널 폴더(INDEX.md, msg\)에 있어 agy 가 읽을 수 있다.
+# 채널의 agy 대화(@session) 이름. agy 대화는 시작할 때의 모델을 유지하므로, 협의 기본 단계(think)가 아닌 단계는 단계별로 대화를 따로 둔다.
+# 기본 단계는 예전과 같은 이름(handoff-<채널>)이라 이미 있는 대화를 이어 쓴다(시작 모델이 다르면 워처가 @upgrade 로 새 대화로 옮긴다).
+# 단계가 다르면 대화가 이어지지 않지만, 이전 메시지는 채널 폴더(INDEX.md, msg\)에 있어 agy 가 읽을 수 있다.
 function Get-HandoffSessionName([string]$SafeChannel, $Auto = $null, [string]$Tier = "") {
     if (-not $Tier -and $Auto) { $Tier = [string]$Auto.Tier }
-    if ($Tier -eq "low" -or $Tier -eq "medium") { return "handoff-$SafeChannel-$Tier" }
-    return "handoff-$SafeChannel"
+    $safeTier = [regex]::Replace(([string]$Tier).ToLowerInvariant(), '[^a-z0-9._-]+', '-').Trim('-')
+    if (-not $safeTier -or $safeTier -eq (Get-HandoffDefaultTier) -or $safeTier -eq "high") { return "handoff-$SafeChannel" }
+    return "handoff-$SafeChannel-$safeTier"
 }
 
 # 지시파일 맨 위 @session/@cwd 지시어 + 본문. 본문에는 이번 메시지 전문을 담아 agy 가 파일을 못 읽어도 처리할 수 있게 한다.
@@ -73,8 +85,12 @@ function New-HandoffDispatchText([string]$ChannelName, [string]$ChannelDir, [str
     $safe = ConvertTo-HandoffSafeName $ChannelName
     $lines = New-Object System.Collections.ArrayList
     [void]$lines.Add("@session: $(Get-HandoffSessionName $safe $Auto)")
-    # 낮은 단계(low/medium)로 자동 선택했으면 그 모델을 지정한다. high 는 지정하지 않아 기본 우선순위(쿼터 초과 때 폴백)를 그대로 쓴다.
-    if ($Auto -and [string]$Auto.Tier -ne "high" -and [string]$Auto.Model) { [void]$lines.Add("@model: $($Auto.Model)") }
+    # 단계(또는 모델)를 지정한다. 단계면 워처가 그 단계의 폴백 순서를 쓴다. @upgrade: 이어가던 채널 대화의 시작 모델이 다른 단계면
+    # 오류 대신 새 대화로 옮긴다(이전 질문 · 답을 붙인다). 같은 단계면 아무 일도 하지 않는다.
+    if ($Auto) {
+        $spec = if ($Auto.Spec) { [string]$Auto.Spec } elseif ($Auto.Tier) { [string]$Auto.Tier } else { [string]$Auto.Model }
+        if ($spec) { [void]$lines.Add("@model: $spec"); [void]$lines.Add("@upgrade: true") }
+    }
     # @raw 를 쓰지 않는다: 워처가 표준 규칙(DO NOT COMMIT · 포그라운드 실행 · 필요한 파일만 수정 · 한글 답변, agy-rules.ps1)을 이 지시문 끝에 붙인다.
     # 핸드오프 agy 는 저장소 폴더를 열고 소스를 고치므로 위임 때와 같은 안전 규칙이 필요하다. 이 지시문이 이미 같은 뜻의 문장을 담고 있으면 그 규칙만 건너뛴다.
     [void]$lines.Add("@cwd: $ChannelDir")
@@ -296,17 +312,16 @@ function Invoke-HandoffPumpChannel([string]$ChannelDir, $Ctx) {
         $msgText = if ($msgFile) { try { [System.IO.File]::ReadAllText($msgFile.FullName, [System.Text.Encoding]::UTF8) } catch { "" } } else { "" }
         if (-not $msgText) { $msgText = "(메시지 파일 msg\$($row.Num)-*.md 를 읽지 못했습니다. 제목만 보고 판단하지 말고 파일을 직접 읽으세요.)" }
         $repo = Get-HandoffRepoPath $ChannelDir
-        # 메시지 내용(제목 + 본문)으로 노력 단계를 자동 선택한다. 채널은 늘 폴더를 열므로 폴더 있음으로 본다(파일을 바꾸는 일이면 high).
-        # 메시지 머리말에 `위임모델:` 이 있으면 자동 선택보다 그것을 따른다(자동 선택을 꺼 둔 때도 명시한 값은 따른다).
+        # 메시지 머리말에 `위임모델:` 이 있으면 그것을, 없으면 협의 기본 단계(think)를 쓴다. AGY_HANDOFF_MODEL=auto 면 메시지 내용으로 자동 선택(quick/build).
         $auto = $null
         if ($msgFile) {
             try {
                 $overrideRaw = [string](Read-HandoffFrontMatter $msgFile.FullName)["위임모델"]
                 $auto = Get-HandoffModelOverride $overrideRaw
-                if (-not $auto -and $overrideRaw.Trim()) { Write-HandoffLog "핸드오프 [$name] #$($row.Num) 머리말의 위임모델 '$overrideRaw' 은(는) low|medium|high 또는 gemini-3.8-flash-<단계> 가 아니라서 무시하고 자동 선택합니다" }
+                if (-not $auto -and $overrideRaw.Trim()) { Write-HandoffLog "핸드오프 [$name] #$($row.Num) 머리말의 위임모델 '$overrideRaw' 은(는) 단계 이름(quick · build · build-hard · feature · think · deep)이나 허용된 모델 이름이 아니라서 무시하고 협의 기본 단계를 씁니다" }
             } catch { $auto = $null }
         }
-        if (-not $auto) { $auto = Get-HandoffDefaultModel }   # 머리말이 없으면 협의 기본 단계(high). auto 로 두면 아래 자동 선택
+        if (-not $auto) { $auto = Get-HandoffDefaultModel }   # 머리말이 없으면 협의 기본 단계(think). auto 로 두면 아래 자동 선택
         if (-not $auto -and (Get-Command Test-AgyAutoTierEnabled -ErrorAction SilentlyContinue) -and (Test-AgyAutoTierEnabled)) {
             try { $auto = Get-AgyAutoTier ("$($row.Title)`n$msgText") $true } catch { $auto = $null }
         }

@@ -86,52 +86,53 @@ if ($MaxParallel -le 0) {
     if ($env:AGY_MAX_PARALLEL -match '^\d+$' -and [int]$env:AGY_MAX_PARALLEL -gt 0) { $MaxParallel = [int]$env:AGY_MAX_PARALLEL }
 }
 
-# --- 모델 우선순위 ---
+# --- 모델 단계 (config\models.json) ---
 
-# agy 응답 JSON에는 모델명이 담겨오지 않습니다 (CLI 자체 한계). 그래서 "어떤 모델을 썼는지
+# agy 응답 JSON에는 모델명이 담겨오지 않습니다 (CLI 자체 한계). 그래서 "어떤 모델을 쓸지 우리가 --model로 직접 지정"하고,
+# 성공한 모델을 기록합니다(그래서 model 컬럼은 정확합니다).
+# 모델은 단계(quick · build · build-hard · feature · think · deep)로 고르고, 단계마다 주 모델과 폴백 순서가 설정 파일에 있습니다:
+#   <delegate-agy>\config\models.json (기본, 동기화 · 설치가 덮어씀) + models.local.json (사용자 덮어쓰기). 읽기는 agy-models.ps1.
+# 설정은 작업마다 다시 읽습니다(바꿔도 워처를 다시 켤 필요가 없습니다).
+# 워처가 켜질 때 `agy models` 로 실제로 쓸 수 있는 모델 목록을 받아 $AvailableModelsFile 에 적고, 작업자는 그 목록에 없는 모델을 건너뜁니다.
+$modelsLibFile = Join-Path $PSScriptRoot "agy-models.ps1"
+if (-not (Test-Path $modelsLibFile)) { $modelsLibFile = Join-Path (Split-Path $PSScriptRoot -Parent) "agy-models.ps1" }
+. $modelsLibFile
+$AvailableModelsFile = Join-Path $RuntimeDir "agy-models-available.json"
 
-# 사후에 알아내는" 대신 "어떤 모델을 쓸지 우리가 --model로 직접 지정"하는 방식을 씁니다.
+function Get-WatcherModelConfig { return (Get-AgyModelConfig) }
 
-# 맨 위(가장 강력한 모델)부터 순서대로 시도하고, 쿼터 초과/일시적 사용 불가 오류가 나면
+# 워처가 시작할 때 확인한 모델 목록(없거나 못 읽으면 빈 배열 = 확인하지 않은 것으로 보고 거르지 않는다)
+function Get-WatcherAvailableModels {
+    try {
+        if (-not (Test-Path -LiteralPath $AvailableModelsFile)) { return @() }
+        $j = [System.IO.File]::ReadAllText($AvailableModelsFile, [System.Text.Encoding]::UTF8).TrimStart([char]0xFEFF) | ConvertFrom-Json
+        return @(@($j.models) | Where-Object { $_ } | ForEach-Object { [string]$_ })
+    } catch { return @() }
+}
 
-# 자동으로 다음 순위 모델로 넘어갑니다. 우리가 지정해서 성공한 값이므로 model 컬럼은 100%
-
-# 정확합니다. 아래 ID 목록은 지금 계정에서 실제로 쓸 수 있는 모델입니다(2026-11 기준: 3.8 flash 의 high/medium/low 세 개뿐).
-
-# Gemini 계열 모델만 사용합니다(Claude/GPT-OSS 제외). 새 모델이 나오면 `agy models` 로 ID 를 확인해서 여기에 다시 적는다.
-
-$ModelPriority = @(
-
-    "gemini-3.8-flash-high",
-
-    "gemini-3.8-flash-medium",
-
-    "gemini-3.8-flash-low"
-
-)
-
-
+# 모델을 고르지 않았고 자동 선택도 꺼졌을 때 쓰는 단계(설정의 auto.write, 기본 build)의 모델 순서
+function Get-WatcherDefaultChain {
+    $cfg = Get-WatcherModelConfig
+    $tier = if ($cfg.Auto -and $cfg.Auto.write) { [string]$cfg.Auto.write } else { "build" }
+    return @(Get-AgyTierChain $cfg $tier (Get-WatcherAvailableModels))
+}
 
 # 이 패턴에 걸리는 오류일 때만 "다음 모델로 자동 폴백"합니다 (쿼터 초과/요청 과다/일시적
-
 # 사용 불가 등). 프롬프트 자체 문제 같은, 모델을 바꿔도 똑같이 실패할 오류까지 모든 모델로
-
 # 재시도하면 시간만 낭비하므로 걸러냅니다.
-
 $FallbackErrorPattern = '(?i)(quota|rate.?limit|429|resource.?exhausted|overloaded|unavailable|capacity|too many requests|exceeded|throttle)'
 
 # --- 요청에서 고르는 모델 (@model:) ---
-# 지시파일 맨 위에 "@model: <ID>" 줄을 쓰면 위의 우선순위 목록 대신 그 모델 하나만 씁니다.
-# 지정한 모델이 쿼터 초과/사용 불가여도 다른 모델로 자동 전환하지 않고 실패로 기록합니다
-# (원하지 않은 모델의 결과를 조용히 받지 않게 하려는 것이고, 어떻게 할지는 Claude 가 사용자에게 묻습니다).
-# Gemini 계열만 허용합니다(위 정책과 같음). 우선순위 목록과 같은 3.8 flash 세 단계입니다.
-# 이 목록에 없는 값은 agy 를 부르지 않고 바로 실패 처리합니다.
-$SelectableModels = @(@("gemini-3.8-flash-high", "gemini-3.8-flash-medium", "gemini-3.8-flash-low") + $ModelPriority | Select-Object -Unique)
+# 지시파일 맨 위에 "@model: <단계 또는 모델>" 줄을 씁니다.
+#   단계 이름(quick · build · build-hard · feature · think · deep, 옛 별칭 low · medium · high): 그 단계의 주 모델부터, 한도 · 과부하 오류면 폴백 순서대로.
+#   모델 이름(설정의 allowed): 그 모델 하나만 씁니다. 쿼터 초과/사용 불가여도 다른 모델로 자동 전환하지 않고 실패로 기록합니다
+#   (원하지 않은 모델의 결과를 조용히 받지 않게 하려는 것이고, 어떻게 할지는 Claude 가 정합니다).
+# 단계도 모델도 아닌 값은 agy 를 부르지 않고 바로 실패 처리합니다.
 
 # 지시파일 맨 위의 "@키: 값" 줄(순서 무관, 여러 줄 가능)을 읽고, 그 형식이 아닌 첫 줄부터를 프롬프트 본문으로 돌려줍니다.
 #   @cwd:     agy 의 워크스페이스에 추가할 폴더 (--add-dir). 여러 줄 가능: 줄마다 폴더 하나, 폴더마다 --add-dir 를 한 번씩 넘긴다(줄 순서 유지, 같은 경로는 대소문자·끝의 \ 를 무시하고 한 번만)
 #   @session: 대화를 이어갈 세션 이름
-#   @model:   이번 호출에 쓸 모델 하나 (위 $SelectableModels)
+#   @model:   이번 호출의 모델 단계(quick · build · ...) 또는 모델 이름 하나 (위 설명)
 #   @raw:     true 면 워처가 표준 규칙(DO NOT COMMIT 등, agy-rules.ps1)을 프롬프트에 자동으로 붙이지 않는다
 #   @upgrade: true 면 @session 으로 이어가는 대화에 다른 @model 을 줘도 오류 대신 "모델 승격"을 한다: 새 대화를 시작하고 이전 질문·답 글을 지시문 위에 붙인다(Resolve-RequestedModel)
 # 반환: @{ Cwd; Session; Model; Raw; Upgrade; Prompt }  (Cwd 는 폴더 배열이고 없으면 빈 배열, Session/Model 은 없으면 $null, Raw/Upgrade 는 $true/$false)
@@ -161,24 +162,32 @@ function ConvertFrom-TaskDirectives([string]$rawText) {
     return @{ Cwd = @(ConvertTo-CwdList $cwdRaw.ToArray()); Session = $session; Model = $model; Raw = $raw; Upgrade = $upgrade; Prompt = $prompt }
 }
 
-# 요청한 @model 을 확인합니다. 반환: @{ Model = <정식 ID 또는 $null>; Error = <사용자에게 보일 사유 또는 $null> }
-#   - 목록에 없으면 오류(대소문자는 구분하지 않고 정식 ID 로 바꿔 줍니다).
+# 요청한 @model 을 확인합니다.
+# 반환: @{ Model = <첫 모델 또는 $null>; Chain = <시도할 모델 순서>; Tier = <단계 이름 또는 "">; Kind = 'tier'|'model'|$null; Error; Upgrade }
+#   - 단계 이름이면 그 단계의 모델 순서(폴백 포함, 워처가 확인한 목록에 없는 모델은 뺌), 모델 이름이면 그 모델 하나.
+#   - 단계도 모델도 아니면 오류(대소문자는 구분하지 않고 정식 이름으로 바꿔 줍니다).
 #   - 이어가는 세션(@session 으로 기존 대화를 잇는 경우)은 agy 가 시작할 때의 모델을 유지하므로,
 #     다른 모델을 요청하면 조용히 무시하지 않고 오류로 알립니다(원래 대화를 지키려는 것: 실수로 모델을 잘못 적어도 대화가 바뀌지 않는다).
+#     단계를 요청했으면 시작 모델이 그 단계의 모델 순서 안에 있을 때 같은 것으로 봅니다(폴백으로 시작한 대화도 그대로 잇는다).
 #   - 단 @upgrade: true 를 명시했으면 오류 대신 Upgrade = $true 로 돌려줍니다(호출한 쪽이 새 대화를 시작하고 이전 질문·답 글을 붙인다).
 #     이어가는 대화가 없거나 모델이 같으면 @upgrade 는 할 일이 없다(Upgrade = $false).
 function Resolve-RequestedModel([string]$requested, [string]$conversationId, [string]$knownModel, [string]$sessionName, [bool]$upgrade = $false) {
-    if (-not $requested) { return @{ Model = $null; Error = $null } }
-    $canonical = @($SelectableModels | Where-Object { $_ -ieq $requested }) | Select-Object -First 1
-    if (-not $canonical) {
-        return @{ Model = $null; Error = "지정한 @model 을 쓸 수 없습니다: $requested (쓸 수 있는 모델: $($SelectableModels -join ', '))" }
+    if (-not $requested) { return @{ Model = $null; Chain = @(); Tier = ""; Kind = $null; Error = $null; Upgrade = $false } }
+    $spec = Resolve-AgyModelSpec $requested (Get-WatcherModelConfig) (Get-WatcherAvailableModels)
+    if ($spec.Kind -eq "unknown") {
+        return @{ Model = $null; Chain = @(); Tier = ""; Kind = $null; Error = $spec.Error; Upgrade = $false }
     }
-    if ($conversationId -and ($canonical -ne $knownModel)) {
-        if ($upgrade) { return @{ Model = $canonical; Error = $null; Upgrade = $true } }
-        $was = if ($knownModel) { $knownModel } else { "기록 없음" }
-        return @{ Model = $canonical; Error = "이어가는 세션 '$sessionName' 은 시작할 때의 모델($was)로 계속됩니다. 다른 모델($canonical)을 쓰려면 @upgrade: true 를 지시문에 추가해 새 대화로 승격하거나(이전 질문·답 글을 붙여 줍니다. 파일 읽기 기록은 이어지지 않습니다), @session 없이 보내거나 새 세션 이름으로 보내세요." }
+    $base = @{ Model = [string]$spec.Model; Chain = @($spec.Chain); Tier = [string]$spec.Tier; Kind = [string]$spec.Kind; Error = $null; Upgrade = $false }
+    if ($conversationId) {
+        $same = if ($spec.Kind -eq "tier") { [bool]($knownModel -and (@($spec.Chain) -icontains $knownModel)) } else { [string]$spec.Model -ieq $knownModel }
+        if (-not $same) {
+            if ($upgrade) { $base.Upgrade = $true; return $base }
+            $was = if ($knownModel) { $knownModel } else { "기록 없음" }
+            $base.Error = "이어가는 세션 '$sessionName' 은 시작할 때의 모델($was)로 계속됩니다. 다른 모델($($spec.Model))을 쓰려면 @upgrade: true 를 지시문에 추가해 새 대화로 승격하거나(이전 질문·답 글을 붙여 줍니다. 파일 읽기 기록은 이어지지 않습니다), @session 없이 보내거나 새 세션 이름으로 보내세요."
+            return $base
+        }
     }
-    return @{ Model = $canonical; Error = $null; Upgrade = $false }
+    return $base
 }
 
 
@@ -468,12 +477,6 @@ function Initialize-QaStore {
     } catch {
         Log "기록 저장소 초기화 중 오류: $($_.Exception.Message)"
     }
-    try {
-        $tokenTurnsRemoved = Remove-TokenTurnsOlderThan $AgyDbPath 60
-        if ($tokenTurnsRemoved -gt 0) { Log "보관 기간(60일)이 지난 토큰 통계 턴 $tokenTurnsRemoved 건을 정리했습니다." }
-    } catch {
-        Log "토큰 통계 정리 중 오류: $($_.Exception.Message)"
-    }
 }
 
 
@@ -573,44 +576,6 @@ function Complete-TaskQaRecord([string]$TaskId, [string]$SourcePath, [string]$Do
         Update-QAReport
     }
 }
-
-# 위임이 끝났을 때 백그라운드에서 토큰 통계를 비동기로 갱신한다. 10분 이내 재시작은 건너뛴다.
-function Start-TokenStatsTrigger {
-    param([switch]$Force)
-    try {
-        $tokenStatsScript = Join-Path $PSScriptRoot "token-stats.ps1"
-        if (-not (Test-Path -LiteralPath $tokenStatsScript)) { return }
-        $dataDir = if ($Layout -and $Layout.DataDir) { $Layout.DataDir } else { Split-Path $AgyDbPath -Parent }
-        $triggerFile = Join-Path $dataDir "token-stats-last-trigger.txt"
-        if (-not $Force -and (Test-Path -LiteralPath $triggerFile)) {
-            try {
-                $raw = [System.IO.File]::ReadAllText($triggerFile, [System.Text.Encoding]::UTF8)
-                if ($raw -and $raw.Trim()) {
-                    $lastTime = [DateTime]::Parse($raw.Trim(), $null, [System.Globalization.DateTimeStyles]::RoundtripKind)
-                    if ([Math]::Abs(((Get-Date) - $lastTime).TotalMinutes) -lt 10) {
-                        return
-                    }
-                }
-            } catch {}
-        }
-        [System.IO.File]::WriteAllText($triggerFile, (Get-Date).ToString("o"), [System.Text.Encoding]::UTF8)
-
-        $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName = "powershell.exe"
-        $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$tokenStatsScript`" -Update -RuntimeDir `"$RuntimeDir`""
-        $psi.UseShellExecute = $false
-        $psi.CreateNoWindow = $true
-        $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
-        $psi.RedirectStandardInput = $true
-        $proc = [System.Diagnostics.Process]::Start($psi)
-        if ($null -ne $proc) {
-            try { $proc.StandardInput.Close() } catch {}
-        }
-    } catch {
-        Log "토큰 통계 갱신 프로세스 시작 실패: $($_.Exception.Message)"
-    }
-}
-
 
 # 사용량 행(tasks 표)을 쓴다: 작업이 끝났을 때 한 번.
 function Write-UsageRow($taskId, $model, $attempts, $triedModels, $inputTokens, $outputTokens, $thinkingTokens, $totalTokens, $elapsedSec, $status, [string]$session = "", [string]$sessionId = "", $cumInputTokens = $null, $cumOutputTokens = $null, $cumThinkingTokens = $null, $cumTotalTokens = $null, [string]$usageBasis = "") {
@@ -853,7 +818,7 @@ function Invoke-AgyOnce($agyArgs, $errFile, $workDir, [string]$marker = "") {
     return @{ TimedOut = $false; Raw = $outText.Trim(); StdErr = $errText }
 }
 
-# $conversationId가 없으면: $ModelPriority 목록을 순서대로 시도합니다(기존 동작).
+# $conversationId가 없으면: 모델 순서($modelChain, 단계의 주 모델 + 폴백)를 차례로 시도합니다.
 
 # $conversationId가 있으면(@session:으로 이어가는 경우): --conversation으로 그 대화를
 
@@ -915,7 +880,7 @@ function Get-OtherRunningMarkers([string]$ExceptTaskId) {
     return @{ Markers = $markers; Total = $total }
 }
 
-function Invoke-AgyWithFallback($safePrompt, $targetCwd, [bool]$skipPerm, $errFile, [string]$conversationId = "", [string]$knownModel = "", [string]$taskId = "", [string]$promptFile = "", [string]$requestedModel = "", [string]$autoModel = "") {
+function Invoke-AgyWithFallback($safePrompt, $targetCwd, [bool]$skipPerm, $errFile, [string]$conversationId = "", [string]$knownModel = "", [string]$taskId = "", [string]$promptFile = "", [string[]]$modelChain = @(), [string]$tier = "") {
     $result = [ordered]@{
         Success        = $false
         Response       = $null
@@ -933,6 +898,7 @@ function Invoke-AgyWithFallback($safePrompt, $targetCwd, [bool]$skipPerm, $errFi
         ConversationId = $null
         SessionRenewed = $false
         StdErr         = ""
+        Tier           = ""
     }
 
     $overallStart = Get-Date
@@ -940,10 +906,13 @@ function Invoke-AgyWithFallback($safePrompt, $targetCwd, [bool]$skipPerm, $errFi
     # if/스크립트 출력 캡처 과정에서 그냥 $null로 뭉개버려서(직접 겪음: $candidates.Count가
     # 0이 되고 foreach가 한 번도 안 돎), 세션을 이어가려던 호출이 조용히 아무것도 안 하고
     # "실패(시도한 모델: )"로 끝나버립니다. 그래서 $null이 아닌 문자열 자리표시자를 씁니다.
-    # 이어가는 세션: 호출 한 번. @model 로 지정했으면 그 모델 하나만(폴백 없음). 아니면 우선순위 목록.
+    # 이어가는 세션: 호출 한 번. 아니면 호출한 쪽이 정한 모델 순서($modelChain: 단계면 주 모델 + 폴백, 모델 이름이면 그 하나).
+    # 순서가 비어 있으면 기본 단계(build)의 순서. 한도 · 과부하 오류일 때만 다음 모델로 넘어간다(아래 $FallbackErrorPattern).
     # @() 로 감싸는 이유: if 식은 원소 하나짜리 배열을 문자열로 풀어서 $candidates[-1] 이 마지막 "글자"가 된다.
-    # 자동 선택($autoModel, 낮은 단계)은 지정이 아니라 "먼저 시도할 모델"이라, 쿼터 초과 같은 오류면 우선순위 목록으로 이어서 폴백한다.
-    $candidates = @(if ($conversationId) { "(continue)" } elseif ($requestedModel) { $requestedModel } elseif ($autoModel) { @($autoModel) + @($ModelPriority | Where-Object { $_ -ne $autoModel }) } else { $ModelPriority })
+    $chain = @(@($modelChain) | Where-Object { $_ })
+    if ($chain.Count -eq 0) { $chain = @(Get-WatcherDefaultChain) }
+    $candidates = @(if ($conversationId) { "(continue)" } else { $chain })
+    $result.Tier = $tier
 
     foreach ($candidate in $candidates) {
         $result.Attempts++
@@ -961,7 +930,7 @@ function Invoke-AgyWithFallback($safePrompt, $targetCwd, [bool]$skipPerm, $errFi
 
         # 웹 뷰어 실시간 표시용: 현재 실행 중인 작업과 모델 정보를 current_task.json에 기록
         $modelForReport = if ($conversationId) {
-            if ($knownModel) { $knownModel } else { $ModelPriority[0] }
+            if ($knownModel) { $knownModel } else { "(session)" }
         } else {
             $candidate
         }
@@ -975,7 +944,7 @@ function Invoke-AgyWithFallback($safePrompt, $targetCwd, [bool]$skipPerm, $errFi
                     started_at = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
                 } | ConvertTo-Json -Compress | Set-Content -Path $currentTaskFile -Encoding UTF8 -ErrorAction SilentlyContinue
                 # 작업마다 따로 있는 표시 파일에도 모델·시도를 적는다(뷰어가 어느 작업이 어떤 모델로 도는지 읽는다)
-                Write-RunningClaim $taskId @{ model = $modelForReport; attempt = $result.Attempts; started_at = (Get-Date -Format "yyyy-MM-dd HH:mm:ss") }
+                Write-RunningClaim $taskId @{ model = $modelForReport; tier = [string]$tier; attempt = $result.Attempts; started_at = (Get-Date -Format "yyyy-MM-dd HH:mm:ss") }
             } catch {}
         }
 
@@ -1211,15 +1180,24 @@ function Resolve-DeadClaim($Claim, [string]$ClaimPath) {
         $cand = Join-Path $InboxDir ($taskId + $ext)
         if (Test-Path -LiteralPath $cand) { $inboxFile = $cand; break }
     }
+    # submit-task.ps1 -Cancel 이 작업자를 끝내기 전에 남기는 취소 표시(running\<ID>.cancel): 있으면 실패가 아니라 취소로 마무리한다
+    $cancelMarker = Join-Path $RunningDir ("{0}.cancel" -f $taskId)
+    $cancelReason = ""
+    $wasCancelled = $false
+    if (Test-Path -LiteralPath $cancelMarker) {
+        $wasCancelled = $true
+        try { $cancelReason = ([System.IO.File]::ReadAllText($cancelMarker, [System.Text.Encoding]::UTF8)).Trim() } catch {}
+    }
     if ($inboxFile) {
-        $msg = "작업을 처리하던 프로세스가 끝내지 못하고 사라졌습니다(워처를 껐거나 강제 종료됐을 수 있습니다). 같은 지시를 다시 보내 주세요."
-        Log "실패: $taskId - $msg"
+        $msg = if ($wasCancelled) { "취소됨(CANCELLED): " + $(if ($cancelReason) { $cancelReason } else { "사용자 요청으로 취소했습니다." }) } else { "작업을 처리하던 프로세스가 끝내지 못하고 사라졌습니다(워처를 껐거나 강제 종료됐을 수 있습니다). 같은 지시를 다시 보내 주세요." }
+        Log "$(if ($wasCancelled) { '취소' } else { '실패' }): $taskId - $msg"
         $outFile = Join-Path $OutboxDir "$taskId.response.md"
         if (-not (Test-Path -LiteralPath $outFile)) { Set-Content -Path $outFile -Value $msg -Encoding UTF8 }
-        Write-UsageRow $taskId $null $null $null $null $null $null $null $null "ERROR" ([string]$Claim.session) ""
+        Write-UsageRow $taskId $null $null $null $null $null $null $null $null $(if ($wasCancelled) { "CANCELLED" } else { "ERROR" }) ([string]$Claim.session) ""
         Move-Item -LiteralPath $inboxFile -Destination (Join-Path $ProcessedDir (Split-Path $inboxFile -Leaf)) -Force -ErrorAction SilentlyContinue
         Update-QAReport
     }
+    if ($wasCancelled) { Remove-Item -LiteralPath $cancelMarker -Force -ErrorAction SilentlyContinue }
     Remove-Item -LiteralPath $ClaimPath -Force -ErrorAction SilentlyContinue
 }
 
@@ -1414,14 +1392,17 @@ function Invoke-InboxTaskBody([System.IO.FileInfo]$file) {
     $modelCheck = Resolve-RequestedModel $requestedModel $conversationId $knownModel $sessionName ([bool]$directives.Upgrade)
     if ($modelCheck.Error) {
         Set-Content -Path $outFile -Value $modelCheck.Error -Encoding UTF8
+        Set-Content -Path $errFile -Value $modelCheck.Error -Encoding UTF8
         Log "실패: $($modelCheck.Error)"
         Write-UsageRow $baseName $null $null $requestedModel $null $null $null $null $null "ERROR" $sessionName $conversationId
         Complete-TaskQaRecord $baseName $file.FullName $doneFile
-        Start-TokenStatsTrigger
         return
     }
     $requestedModel = $modelCheck.Model
-    if ($requestedModel) { Log "  -> 지정 모델(@model): $requestedModel (다른 모델로 자동 전환하지 않음)" }
+    $modelChain = @($modelCheck.Chain)
+    $modelTier = [string]$modelCheck.Tier
+    if ($modelCheck.Kind -eq "tier") { Log "  -> 모델 단계(@model): $modelTier -> $($modelChain -join ' -> ') (한도 · 과부하 오류면 다음 모델)" }
+    elseif ($requestedModel) { Log "  -> 지정 모델(@model): $requestedModel (다른 모델로 자동 전환하지 않음)" }
 
     # 모델 승격(@upgrade): 이어가던 대화(시작 모델 $knownModel)를 버리고 새 대화로 시작한다. 이전 질문·답 글(최근 2쌍)을 지시문 위에 붙인다.
     # 새 대화가 성공하면 세션의 대화 ID·모델이 새 값으로 바뀐다. 실패하면 세션은 이전 대화 그대로 남는다(Write-Session 은 성공 때만 부른다).
@@ -1435,18 +1416,25 @@ function Invoke-InboxTaskBody([System.IO.FileInfo]$file) {
         Log "  -> 모델 승격(@upgrade): 세션 '$sessionName' 의 대화(ID: $oldConversation)를 이어가지 않고 $requestedModel 로 새 대화를 시작합니다(이전 질문·답 $($history.Count)쌍을 지시문에 붙임)"
     }
 
-    # 모델을 지정하지 않았고 새 대화(@session 없음)면 요청 난이도로 노력 단계를 자동 선택한다(agy-autotier.ps1).
-    # 분명히 쉬운 일만 low/medium 으로 낮추고, 애매하거나 어려우면 지금처럼 우선순위 목록(high)을 쓴다. 이어가는 세션은 시작할 때의 모델을 유지한다.
-    $autoModel = ""
+    # 모델을 지정하지 않았고 새 대화(@session 없음)면 요청 내용으로 단계를 자동 선택한다(agy-autotier.ps1).
+    # 자동 선택은 quick(읽기만 하는 짧은 일) / build(파일을 바꾸는 일)만 고른다. build-hard · feature · think · deep 은 Claude 가 @model 로 적는다.
+    # 이어가는 세션은 시작할 때의 모델을 유지한다.
     if (-not $requestedModel -and -not $sessionName -and (Test-AgyAutoTierEnabled)) {
         $autoTier = Get-AgyAutoTier $promptText (@($targetCwds).Count -gt 0)
-        if ($autoTier.Tier -ne "high") { $autoModel = [string]$autoTier.Model }
-        Log "  -> 모델 자동 선택: $($autoTier.Tier) ($($autoTier.Reason))$(if ($autoModel) { " -> $autoModel 먼저, 안 되면 기본 우선순위" } else { " -> 기본 우선순위" })"
+        $modelTier = [string]$autoTier.Tier
+        $modelChain = @(Get-AgyTierChain (Get-WatcherModelConfig) $modelTier (Get-WatcherAvailableModels))
+        Log "  -> 모델 자동 선택: $modelTier ($($autoTier.Reason)) -> $($modelChain -join ' -> ')"
+    } elseif (-not $requestedModel -and -not $conversationId) {
+        $cfgD = Get-WatcherModelConfig
+        $modelTier = if ($cfgD.Auto -and $cfgD.Auto.write) { [string]$cfgD.Auto.write } else { "build" }
+        $modelChain = @(Get-AgyTierChain $cfgD $modelTier (Get-WatcherAvailableModels))
     }
 
     $missingCwds = @(Get-MissingCwds $targetCwds)
     if ($missingCwds.Count -gt 0) {
-        Set-Content -Path $outFile -Value "지정한 @cwd 경로를 찾을 수 없습니다: $($missingCwds -join ', ')" -Encoding UTF8
+        $cwdErrMsg = "지정한 @cwd 경로를 찾을 수 없습니다: $($missingCwds -join ', ')"
+        Set-Content -Path $outFile -Value $cwdErrMsg -Encoding UTF8
+        Set-Content -Path $errFile -Value $cwdErrMsg -Encoding UTF8
         Log "실패: @cwd 경로 없음 ($($missingCwds -join ', '))"
         # agy를 호출하지 않고 여기서 바로 실패 처리하는 경우도, 나중에 "이 작업이
         # 있었는지" 조회할 수 있도록 다른 실패와 똑같이 위임 기록 DB 에 남깁니다
@@ -1454,8 +1442,6 @@ function Invoke-InboxTaskBody([System.IO.FileInfo]$file) {
         Write-UsageRow $baseName $null $null $null $null $null $null $null $null "ERROR" $sessionName $conversationId
 
         Complete-TaskQaRecord $baseName $file.FullName $doneFile
-
-        Start-TokenStatsTrigger
         return
     }
 
@@ -1513,7 +1499,7 @@ function Invoke-InboxTaskBody([System.IO.FileInfo]$file) {
         [System.IO.File]::WriteAllText($tempPromptFile, $promptForAgy, (New-Object System.Text.UTF8Encoding($false)))
         $safePrompt = $promptForAgy -replace '"', '\"'
 
-        $agyResult = Invoke-AgyWithFallback -safePrompt $safePrompt -targetCwd $targetCwds -skipPerm:$SkipPermissions -errFile $errFile -conversationId $conversationId -knownModel $knownModel -taskId $baseName -promptFile $tempPromptFile -requestedModel $requestedModel -autoModel $autoModel
+        $agyResult = Invoke-AgyWithFallback -safePrompt $safePrompt -targetCwd $targetCwds -skipPerm:$SkipPermissions -errFile $errFile -conversationId $conversationId -knownModel $knownModel -taskId $baseName -promptFile $tempPromptFile -modelChain $modelChain -tier $modelTier
 
         $agyStderr = [string]$agyResult.StdErr
 
@@ -1534,7 +1520,13 @@ function Invoke-InboxTaskBody([System.IO.FileInfo]$file) {
         $recTried    = $triedStr
 
         if ($agyResult.Success) {
-            Set-Content -Path $outFile -Value ($guardBanner + $agyResult.Response) -Encoding UTF8
+            # 단계의 앞 모델들이 한도 · 과부하로 막혀 맨 마지막 대안(3.8 Flash)으로 처리했으면 결과 맨 위에 알린다(검토를 더 꼼꼼히 하라는 뜻).
+            $lastResortBanner = ""
+            if (-not $conversationId -and $agyResult.Attempts -gt 1 -and (Test-AgyLastResortModel ([string]$agyResult.ModelUsed))) {
+                $lastResortBanner = "[알림] 단계 '$(if ($modelTier) { $modelTier } else { '기본' })' 의 앞 모델($(@($agyResult.TriedModels | Select-Object -SkipLast 1) -join ', '))이 한도 · 과부하로 막혀 맨 마지막 대안 $($agyResult.ModelUsed) 로 처리했습니다. 결과를 더 꼼꼼히 검토하세요.`r`n`r`n"
+                Log "  참고: 맨 마지막 대안 $($agyResult.ModelUsed) 로 처리했습니다(시도: $($agyResult.TriedModels -join ' -> '))"
+            }
+            Set-Content -Path $outFile -Value ($guardBanner + $lastResortBanner + $agyResult.Response) -Encoding UTF8
 
             # 이어가는 세션에서 agy 가 보고하는 duration_seconds 는 그 대화를 처음 연 때부터의 누적이라(사이에 쉰 시간 포함) 이번 호출의 시간이 아니다.
             # 그래서 이어가는 호출은 워처가 잰 이번 호출의 시간을 쓴다.
@@ -1666,7 +1658,11 @@ function Invoke-InboxTaskBody([System.IO.FileInfo]$file) {
             }
         } else {
             $failMsg = "agy 실행 실패 (시도한 모델: $triedStr) - $($agyResult.ErrorMessage)"
-            if ($requestedModel -and -not $conversationId) { $failMsg += " [@model 로 지정한 모델이라 다른 모델로 자동 전환하지 않았습니다]" }
+            if ($modelCheck.Kind -eq "model" -and -not $conversationId) { $failMsg += " [@model 로 지정한 모델이라 다른 모델로 자동 전환하지 않았습니다]" }
+            if ($modelTier -and -not $conversationId) {
+                $nextTier = Get-AgyEscalationTier (Get-WatcherModelConfig) $modelTier
+                if ($nextTier) { $failMsg += " [단계 $modelTier. 한 단계 올려 다시 보낼 곳: $nextTier]" } else { $failMsg += " [단계 $modelTier]" }
+            }
 
             Set-Content -Path $outFile -Value ($guardBanner + $failMsg) -Encoding UTF8
             Log $failMsg
@@ -1694,35 +1690,6 @@ function Invoke-InboxTaskBody([System.IO.FileInfo]$file) {
 
     # 지시파일을 processed 로 옮긴 뒤에 기록 저장소에 덧붙여야 방금 처리한 작업의 질문 내용도 바로 담긴다.
     Complete-TaskQaRecord $baseName $file.FullName $doneFile
-
-    $forceTrigger = $false
-
-    try {
-        if ($recStatus -eq "OK" -and $recModel -and $recElapsed) {
-            $dataDir = if ($Layout -and $Layout.DataDir) { $Layout.DataDir } else { Split-Path $AgyDbPath -Parent }
-            $calFile = Join-Path $dataDir "calibration.json"
-            if (Test-Path -LiteralPath $calFile) {
-                $calObj = Get-Content -LiteralPath $calFile -Raw -Encoding UTF8 | ConvertFrom-Json
-                $mLower = ([string]$recModel).ToLower()
-                $levelKey = if ($mLower -match 'low') { 'low' } elseif ($mLower -match 'medium') { 'medium' } elseif ($mLower -match 'high') { 'high' } else { $null }
-                if ($levelKey -and $calObj.time -and $calObj.time.agy_median_s) {
-                    $medVal = $calObj.time.agy_median_s.$levelKey
-                    $elVal = 0.0
-                    if ($medVal -and [double]::TryParse([string]$recElapsed, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$elVal)) {
-                        if ($elVal -gt (3.0 * [double]$medVal)) {
-                            $forceTrigger = $true
-                        }
-                    }
-                }
-            }
-        }
-    } catch {}
-
-    if ($forceTrigger) {
-        Start-TokenStatsTrigger -Force
-    } else {
-        Start-TokenStatsTrigger
-    }
 }
 
 # 작업자 모드: 지시파일 하나만 처리하고 끝낸다(워처 본체는 시작하지 않는다)
@@ -1787,8 +1754,13 @@ Log "  처리완료 폴더          : $ProcessedDir"
 
 Log "  로그 폴더              : $LogsDir"
 
-Log "  모델 우선순위          : $($ModelPriority -join ' -> ')"
-Log "  지정 가능 모델(@model:): $($SelectableModels -join ', ')"
+$startCfg = Get-WatcherModelConfig
+Log "  모델 설정 파일         : $(if (@($startCfg.Sources).Count -gt 0) { @($startCfg.Sources) -join ', ' } else { '(없음 - 내장 기본값)' })"
+foreach ($w in @($startCfg.Warnings)) { Log "  경고: $w" }
+foreach ($tn in $startCfg.TierNames) {
+    $t = $startCfg.Tiers[$tn]
+    Log ("  단계 {0,-11}: {1} (대기 한도 {2}초)" -f $tn, (@(@($t.Model) + @($t.Fallback)) -join ' -> '), $t.WaitSec)
+}
 Log "  모델 자동 선택         : $(if (Test-AgyAutoTierEnabled) { '켜짐 (AGY_AUTO_MODEL=off 로 끔)' } else { '꺼짐 (AGY_AUTO_MODEL)' })"
 
 Log "  컴퓨터 이름            : $ComputerName"
@@ -1871,6 +1843,25 @@ if (Test-Path $ManualStopFlag) {
 
 Initialize-QaStore
 Update-QAReport
+
+# 설정의 모델이 실제로 있는지 `agy models` 로 한 번 확인한다(20초 제한). 목록은 작업자들이 읽도록 파일에 적는다.
+# 실패하면 목록 파일을 지우고(= 거르지 않음) 그대로 시작한다. 없는 모델은 경고하고, 작업 때 그 단계의 다음 모델로 대신한다.
+try {
+    $agyExeForList = (Get-Command agy -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+    $avail = Get-AgyAvailableModels $agyExeForList 20
+    if ($avail -and @($avail).Count -gt 0) {
+        [System.IO.File]::WriteAllText($AvailableModelsFile, ([ordered]@{ checked_at = (Get-Date -Format "yyyy-MM-dd HH:mm:ss"); models = @($avail) } | ConvertTo-Json -Compress), (New-Object System.Text.UTF8Encoding($false)))
+        $missing = Get-AgyMissingTierModels $startCfg @($avail)
+        if ($missing.Count -eq 0) { Log "모델 확인: 설정의 모델이 모두 agy 에 있습니다(agy models $(@($avail).Count)개)." }
+        foreach ($tn in $missing.Keys) { Log "경고: 단계 '$tn' 의 모델 $(@($missing[$tn]) -join ', ') 이(가) agy models 에 없어 건너뜁니다(그 단계의 다음 모델로 대신)." }
+    } else {
+        Remove-Item -LiteralPath $AvailableModelsFile -Force -ErrorAction SilentlyContinue
+        Log "모델 확인: agy models 를 읽지 못해 확인 없이 시작합니다(설정 그대로 씀)."
+    }
+} catch {
+    Remove-Item -LiteralPath $AvailableModelsFile -Force -ErrorAction SilentlyContinue
+    Log "모델 확인: agy 를 찾지 못해 확인 없이 시작합니다 ($($_.Exception.Message))."
+}
 
 New-Item -ItemType Directory -Force -Path $RunningDir -ErrorAction SilentlyContinue | Out-Null
 Remove-StaleSessions -MaxAgeDays $SessionMaxAgeDays

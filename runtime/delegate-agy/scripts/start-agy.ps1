@@ -168,7 +168,11 @@ if ($CheckOnly) {
 function Get-WatcherProcessCount {
     try {
         return @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
-            Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -like "*watch-agy.ps1*" }).Count
+            Where-Object {
+                $_.ProcessId -ne $PID -and
+                $_.CommandLine -like "*watch-agy.ps1*" -and
+                (Test-WatcherCommandLineForRuntime $_.CommandLine $RuntimeDir)
+            }).Count
     } catch {
         return -1
     }
@@ -195,7 +199,11 @@ function Test-WatcherAlive {
 #     두 번째 워처를 띄웁니다 - 그러면 같은 질문을 둘이 처리합니다.
     try {
         $procs = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
-            Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -like "*watch-agy.ps1*" })
+            Where-Object {
+                $_.ProcessId -ne $PID -and
+                $_.CommandLine -like "*watch-agy.ps1*" -and
+                (Test-WatcherCommandLineForRuntime $_.CommandLine $RuntimeDir)
+            })
         if ($procs.Count -gt 0 -and (Test-Path $HeartbeatFile)) {
             $ageSec = [int]((Get-Date) - (Get-Item $HeartbeatFile).LastWriteTime).TotalSeconds
             if ($ageSec -le 300) { return $true }

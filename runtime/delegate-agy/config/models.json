@@ -1,0 +1,69 @@
+{
+  "version": 1,
+  "note": "agy 위임 모델 단계. 이 파일은 sync-installed.ps1 · install.ps1 이 항상 덮어쓴다. 바꾸고 싶은 값은 같은 폴더의 models.local.json 에 그 항목만 쓴다(단계는 단계 단위로 합친다).",
+  "tiers": {
+    "quick": {
+      "model": "gemini-4-hydrogen-low",
+      "fallback": ["gemini-4-hydrogen-medium", "gemini-3.8-flash-low"],
+      "wait_sec": 180,
+      "use": "조회 · 요약 · 번역 · 형식 변환 · 짧은 질문"
+    },
+    "build": {
+      "model": "gemini-4-hydrogen-medium",
+      "fallback": ["gemini-4-hydrogen-high", "gemini-3.8-flash-medium"],
+      "wait_sec": 480,
+      "use": "명세가 분명한 구현 · 몇 개 파일 수정 · 시험 작성 · 반복 수정"
+    },
+    "build-hard": {
+      "model": "gemini-4-hydrogen-high",
+      "fallback": ["gemini-4-argon-medium", "gemini-3.8-flash-medium"],
+      "wait_sec": 720,
+      "use": "build 인데 경계 조건이 많거나 한 번 실패한 일"
+    },
+    "feature": {
+      "model": "gemini-pro-orchestrator-g1-pro",
+      "fallback": ["gemini-4-hydrogen-high", "gemini-4-argon-medium", "gemini-3.8-flash-medium"],
+      "wait_sec": 1200,
+      "use": "작업 나누기 · 하위 계획까지 맡기는 여러 파일 새 기능 · 중대형 리팩터링"
+    },
+    "think": {
+      "model": "gemini-4-argon-high",
+      "fallback": ["gemini-4-argon-medium", "gemini-4-hydrogen-high"],
+      "wait_sec": 1200,
+      "use": "설계 검토 · 난해한 버그 원인 분석 · 상의(협의 기본)"
+    },
+    "deep": {
+      "model": "gemini-4-hydrogen-xhigh",
+      "fallback": ["gemini-4-argon-high", "gemini-4-hydrogen-high", "gemini-3.8-flash-medium"],
+      "wait_sec": 1200,
+      "use": "논리가 까다로운 구현(알고리즘 · 동시성 · 파서/상태 기계 · 수치 정밀도 · 성능 목표), Argon 이 원인을 짚은 버그 수정, build-hard 실패의 다시 보내기"
+    }
+  },
+  "escalate": {
+    "build": "build-hard",
+    "build-hard": "deep"
+  },
+  "auto": {
+    "read": "quick",
+    "write": "build"
+  },
+  "aliases": {
+    "low": "quick",
+    "medium": "build",
+    "high": "build-hard"
+  },
+  "handoff_default": "think",
+  "translate": "quick",
+  "allowed": [
+    "gemini-4-hydrogen-low",
+    "gemini-4-hydrogen-medium",
+    "gemini-4-hydrogen-high",
+    "gemini-4-hydrogen-xhigh",
+    "gemini-4-argon-low",
+    "gemini-4-argon-medium",
+    "gemini-4-argon-high",
+    "gemini-pro-orchestrator-g1-pro",
+    "gemini-3.8-flash-low",
+    "gemini-3.8-flash-medium"
+  ]
+}

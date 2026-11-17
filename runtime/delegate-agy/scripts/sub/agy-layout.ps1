@@ -22,6 +22,35 @@
 # 런타임 폴더 이름이 runtime 이면 data 는 그 옆(형제)이고, 아니면(시험용 임시 폴더 등) 런타임 폴더 안의 data 입니다.
 # 테스트: tests\delegate-agy\agy-layout.tests.ps1
 
+function Normalize-AgyPath([string]$Path) {
+    if (-not $Path) { return "" }
+    return $Path.Trim().Trim('"', "'").Replace('/', '\').TrimEnd('\')
+}
+
+# 프로세스 명령줄이 특정 런타임 폴더의 워처인지 검사합니다.
+# - 명령줄에 -RuntimeDir <경로> 가 있으면 그 경로가 $RuntimeDir 와 같을 때만 참 (따옴표 · / · \ · 대소문자 · 끝의 \ 무시)
+# - -RuntimeDir 가 없으면 $RuntimeDir 가 기본 런타임($DefaultRuntimeDir)과 같을 때만 참
+function Test-WatcherCommandLineForRuntime(
+    [string]$CommandLine,
+    [string]$RuntimeDir,
+    [string]$DefaultRuntimeDir = ""
+) {
+    if (-not $DefaultRuntimeDir) {
+        $DefaultRuntimeDir = Join-Path $env:USERPROFILE ".samjil\delegate-agy\runtime"
+    }
+
+    $normRuntime = Normalize-AgyPath $RuntimeDir
+
+    if ($CommandLine -match '(?i)(?:^|\s)-RuntimeDir(?:\s+|[:=])(?:"([^"]+)"|''([^'']+)''|([^\s"'']+))') {
+        $parsed = if ($matches[1]) { $matches[1] } elseif ($matches[2]) { $matches[2] } else { $matches[3] }
+        $normParsed = Normalize-AgyPath $parsed
+        return ($normParsed -eq $normRuntime)
+    }
+
+    $normDefault = Normalize-AgyPath $DefaultRuntimeDir
+    return ($normRuntime -eq $normDefault)
+}
+
 function Get-AgyDataDir([string]$RuntimeDir) {
     if ($env:AGY_DELEGATE_DATA) { return $env:AGY_DELEGATE_DATA }
     $trimmed = $RuntimeDir.TrimEnd('\', '/')

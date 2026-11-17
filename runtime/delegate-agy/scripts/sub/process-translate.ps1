@@ -1,6 +1,6 @@
 ﻿# process-translate.ps1
 # 과정 창의 "한글로 번역"이 쓰는 번역기. agy 의 생각(think)·진행 설명(say)·도구 라벨(label)은 영어로 나오는 일이 잦아서,
-# 사용자가 과정 창에서 눌렀을 때만 agy(gemini-3.8-flash-low)로 한국어로 옮겨 캐시에 저장합니다.
+# 사용자가 과정 창에서 눌렀을 때만 agy(설정의 translate 단계 = quick, 기본 gemini-4-hydrogen-low)로 한국어로 옮겨 캐시에 저장합니다.
 #
 # 사용:
 #   powershell -File process-translate.ps1 -ConversationId <agy 대화 id> -OutFile <캐시 파일>
@@ -21,13 +21,25 @@
 param(
     [string]$ConversationId = "",
     [string]$OutFile = "",
-    [string]$Model = "gemini-3.8-flash-low",
+    [string]$Model = "",
     [int]$ChunkChars = 5000,
     [int]$TimeoutSeconds = 170,
     [string]$Since = ""
 )
 
 . (Join-Path $PSScriptRoot "agy-progress.ps1")
+
+# 모델을 주지 않으면 설정(config\models.json)의 translate 단계(기본 quick)의 주 모델을 쓴다.
+if (-not $Model) {
+    $Model = "gemini-4-hydrogen-low"
+    try {
+        . (Join-Path $PSScriptRoot "agy-models.ps1")
+        $trCfg = Get-AgyModelConfig
+        $trTier = if ($trCfg.Translate -and $trCfg.Tiers.Contains([string]$trCfg.Translate)) { [string]$trCfg.Translate } else { "quick" }
+        $trModel = [string]$trCfg.Tiers[$trTier].Model
+        if ($trModel) { $Model = $trModel }
+    } catch {}
+}
 
 # 번역 대상 칸. 이 순서로 프롬프트에 담고 답을 읽는다.
 $script:TranslateFields = @('label', 'think', 'say')
@@ -55,9 +67,16 @@ function Test-NeedsTranslation([string]$Text) {
 function Read-TranslationCache([string]$Path) {
     $res = @{ Status = ""; Message = ""; StepsCovered = 0; Items = @{}; Model = ""; Updated = "" }
     if (-not $Path -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $res }
-    try {
-        $j = [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8).TrimStart([char]0xFEFF) | ConvertFrom-Json -ErrorAction Stop
-    } catch { return $res }
+    $j = $null
+    for ($attempt = 0; $attempt -lt 5; $attempt++) {
+        try {
+            $j = [System.IO.File]::ReadAllText($Path, [System.Text.Encoding]::UTF8).TrimStart([char]0xFEFF) | ConvertFrom-Json -ErrorAction Stop
+            break
+        } catch {
+            if ($attempt -lt 4) { Start-Sleep -Milliseconds 50 } else { return $res }
+        }
+    }
+    if ($null -eq $j) { return $res }
     $res.Status = [string]$j.status
     $res.Message = [string]$j.message
     $res.Model = [string]$j.model

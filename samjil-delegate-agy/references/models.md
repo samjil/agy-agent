@@ -1,16 +1,24 @@
-# Model choice
+# Model tiers
 
-Set a model per task with `@model: <id>` on the first line group of the instruction. Without it the watcher picks an effort level from the request text (rule based, so it can be wrong).
+Write `@model: <tier>` in the directive lines. The tiers, their models, fallbacks and wait limits live in `~/.samjil/delegate-agy/config/models.json` (repository: `runtime/delegate-agy/config/models.json`). Hydrogen is the default family; 3.8 Flash is only the last fallback; Claude and GPT-OSS models are not used.
 
-| Difficulty | Model | Examples |
-|---|---|---|
-| Easy | `gemini-3.8-flash-low` | mechanical conversion, naming, short summaries, translation |
-| Normal | `gemini-3.8-flash-medium` | small, well specified edits and tests, ordinary docs and analysis |
-| Harder | `gemini-3.8-flash-high` | implementation after a finished design, multi-file changes, code review |
+| Tier | When | Model, then fallbacks (quota/overload errors only) | Wait limit |
+|---|---|---|---|
+| `quick` | lookups, summaries, translation, format conversion, short questions | hydrogen-low -> hydrogen-medium -> 3.8-flash-low | 3 min |
+| `build` | clearly specified implementation, a few files, tests, repeated edits | hydrogen-medium -> hydrogen-high -> 3.8-flash-medium | 8 min |
+| `build-hard` | `build` with many edge cases, or a `build` that failed once | hydrogen-high -> argon-medium -> 3.8-flash-medium | 12 min |
+| `feature` | multi-file feature where agy also plans the split and the steps | orchestrator -> hydrogen-high -> argon-medium -> 3.8-flash-medium | 20 min |
+| `think` | design review, root cause of a hard bug, consultation (handoff default) | argon-high -> argon-medium -> hydrogen-high | 20 min |
+| `deep` | hard logic in few files (algorithms, concurrency, parsers/state machines, numeric precision, performance targets), the fix after Argon found a cause, a failed `build-hard` re-sent | hydrogen-xhigh (Extra) -> argon-high -> hydrogen-high -> 3.8-flash-medium | 20 min |
 
-- A well specified implementation (design done, locations and expected result clear): choose `medium` yourself. Automatic selection sends anything over about 500 characters or two files to `high` (about 10 minutes).
-- Use `high` when the spec is fuzzy, spans several modules, or a re-submission would be expensive.
-- Review failed: raise one step (low, medium, high). For a follow-up of the same job use `@session: <name>`, `@model: <higher>` and `@upgrade: true`. A running `@session` keeps its starting model; asking for another model without `@upgrade` returns an error and keeps the conversation safe.
-- If the user names a model ("use pro"), follow that. Only Gemini family models are allowed; the goal is to save Claude quota. Run `agy models` to see what the account can use.
-- Allowed list: only `gemini-3.8-flash-high|medium|low` (the three models the account can use now; automatic fallback goes high, then medium, then low). A model not on the list fails before agy is called; fix the value and resend, no need to ask the user. When a newer model appears, the user gives its name and the list in `watch-agy.ps1` is updated.
-- Typical time: `high` about 9 to 12 minutes, `medium` and `low` less. Batch small edits into one task rather than sending many.
+Full model IDs: `gemini-4-hydrogen-low|medium|high|xhigh`, `gemini-4-argon-low|medium|high`, `gemini-pro-orchestrator-g1-pro`, `gemini-3.8-flash-low|medium`.
+
+- Measured 2026-11-17 (one run each, test tasks with hidden tests): 4-file feature: Hydrogen medium 93 s, high 142 s, Argon medium 190 s, Orchestrator 247 s, Extra 299 s, Argon high 412 s, 3.8 Flash medium 562 s, all 17/17. Argon low got 2/4 on an easy task, so it is not in any tier.
+- Without `@model`: the watcher picks `quick` (short, read-only) or `build` (changes files, analysis, long). `AGY_AUTO_MODEL=off` turns this off (`build`).
+- A model name instead of a tier (`@model: gemini-4-argon-high`) uses exactly that model with no fallback; when it is blocked the task fails. Old aliases still work: `low` = `quick`, `medium` = `build`, `high` = `build-hard`.
+- A value that is neither a tier nor an allowed model fails before agy is called; fix it and resend.
+- The watcher runs `agy models` once at start (20 s limit). Models missing from the account are skipped (the tier continues with its next model) and logged in `watcher.log`.
+- A 3.8 Flash result after the Gemini 4 models were blocked starts with an `[알림]` line, and the viewer shows a `3.8 대체` badge.
+- Escalate a failed task once, one step: `build` -> `build-hard` -> `deep`. A failed `deep` is fixed by Claude.
+- A running `@session` keeps its starting model; asking for another model without `@upgrade` returns an error and keeps the conversation safe. For a tier, any model in the tier's chain counts as the same.
+- Change tiers for one PC in `models.local.json` next to `models.json`: only the tiers and fields you write are replaced (for example `{ "tiers": { "build": { "wait_sec": 600 } } }`). Updates overwrite `models.json`, never `models.local.json`.

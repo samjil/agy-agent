@@ -30,7 +30,7 @@
   document.getElementById("hljs-light").disabled = (theme !== "light");
 })();
 </script>
-<link rel="stylesheet" href="style.css?v=74">
+<link rel="stylesheet" href="style.css?v=83">
 </head>
 <body>
   <!-- 단색 선 아이콘 모음. 이모지 대신 써서 OS마다 모양이 달라지지 않게 한다. -->
@@ -75,10 +75,6 @@
           <svg class="icon nav-icon"><use href="#i-home"/></svg>
           <span class="nav-label">대시보드</span>
         </button>
-        <button class="nav-item" data-nav="stats" id="nav-btn-stats" role="tab" aria-selected="false" title="통계">
-          <svg class="icon nav-icon"><use href="#i-chart"/></svg>
-          <span class="nav-label">통계</span>
-        </button>
         <button class="nav-item" data-nav="qa" id="nav-btn-qa" role="tab" aria-selected="false" title="에이전트 위임">
           <svg class="icon nav-icon"><use href="#i-delegate"/></svg>
           <span class="nav-label">에이전트 위임</span>
@@ -86,6 +82,10 @@
         <button class="nav-item" data-nav="handoff" id="nav-btn-handoff" role="tab" aria-selected="false" title="에이전트 협의">
           <svg class="icon nav-icon"><use href="#i-handoff"/></svg>
           <span class="nav-label">에이전트 협의</span>
+        </button>
+        <button class="nav-item" data-nav="stats" id="nav-btn-stats" role="tab" aria-selected="false" title="실측 통계">
+          <svg class="icon nav-icon"><use href="#i-chart"/></svg>
+          <span class="nav-label">실측 통계</span>
         </button>
       </nav>
 
@@ -255,182 +255,6 @@
         </section>
 
         <!-- =============================================================== -->
-        <!-- 2. 토큰·위임 통계                                               -->
-        <!-- =============================================================== -->
-        <section id="view-stats" class="view-panel" style="display: none;">
-          <div class="stats-page-container">
-            <!-- 1) 헤더 및 컨트롤 -->
-            <header class="stats-header">
-              <div class="stats-header-title-wrap">
-                <h2 class="stats-page-title">토큰·위임 통계</h2>
-                <span class="stats-updated-text" id="stats-updated-time">갱신: -</span>
-              </div>
-              <div class="stats-header-controls">
-                <div class="stats-days-segment" role="group" aria-label="기간 선택">
-                  <button type="button" class="segment-btn" data-days="7">7일</button>
-                  <button type="button" class="segment-btn active" data-days="30">30일</button>
-                  <button type="button" class="segment-btn" data-days="60">60일</button>
-                </div>
-                <button type="button" id="stats-refresh-btn" class="stats-action-btn">지금 갱신</button>
-                <label class="stats-toggle-label">
-                  <input type="checkbox" id="stats-table-toggle"> 표로 보기
-                </label>
-              </div>
-            </header>
-
-            <!-- 수집 모드 안내 띠 (active 일 때만 표시) -->
-            <div id="stats-collect-banner" class="stats-collect-banner" style="display: none;">
-              <div class="stats-collect-head">
-                <span class="stats-collect-title" id="stats-collect-title">수집 중 · 위임 표본 0/20</span>
-                <span class="stats-collect-desc" id="stats-collect-desc">일정 수준이 모일 때까지 위임을 우선합니다. 20건이 되면 이 표시가 사라지고 보정식이 이 PC 의 패턴으로 바뀝니다.</span>
-              </div>
-              <div class="stats-collect-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
-                <div class="stats-collect-fill" id="stats-collect-fill" style="width: 0%;"></div>
-              </div>
-            </div>
-
-            <!-- 빈 상태 안내 -->
-            <div id="stats-empty-state" class="stats-empty-card" style="display: none;">
-              <p class="stats-empty-msg">아직 모인 통계가 없습니다. 위임이나 직접 처리 답변 끝에 '예상 토큰'이 적히면 다음 갱신 때 여기에 쌓입니다.<br>위임을 20건 하면 보정식이 이 PC 에 맞춰집니다.</p>
-              <button type="button" id="stats-empty-refresh-btn" class="stats-action-btn">지금 갱신</button>
-            </div>
-
-            <!-- 데이터 본문 영역 -->
-            <div id="stats-content-wrap">
-              <!-- 2) 헤드라인 -->
-              <section class="stats-headline-card">
-                <div class="stats-headline-hero">
-                  <span class="stats-hero-label" title="위임한 질문마다 (위임으로만 쓴 Claude 토큰 - 직접 했을 때의 예상)을 더한 값. + 는 위임해서 더 쓴 것, - 는 아낀 것. 직접 처리한 질문과 agy 토큰은 넣지 않는다">위임 손익 토큰 (직접 대비)</span>
-                  <div class="stats-hero-number stats-loading" id="stats-hero-saved">불러오는 중…</div>
-                  <p class="stats-hero-sub" id="stats-hero-desc">최근 30일 · 불러오는 중…</p>
-                </div>
-                <div class="stats-headline-divider" aria-hidden="true"></div>
-                <div class="stats-headline-summary">
-                  <div class="stats-summary-line" id="stats-sum-success">위임 성공률 -</div>
-                  <div class="stats-summary-line" id="stats-sum-accuracy">비율 -</div>
-                  <div class="stats-summary-line" id="stats-sum-formula">표본 0건 · 보정식 -</div>
-                  <div class="stats-summary-line" id="stats-sum-time">처리 시간 -</div>
-                </div>
-              </section>
-
-              <!-- 3) 차트 1: 위임 성공·실패 -->
-              <section class="stats-card" id="card-chart-tasks">
-                <div class="stats-card-head">
-                  <h3 class="stats-card-title">위임 성공·실패</h3>
-                  <div class="stats-legend">
-                    <span class="legend-item"><span class="legend-swatch ok"></span>성공</span>
-                    <span class="legend-item"><span class="legend-swatch err"></span>실패</span>
-                  </div>
-                </div>
-                <div class="stats-chart-viewport" id="chart-tasks-view"></div>
-                <div class="stats-table-viewport" id="table-tasks-view" style="display: none;"></div>
-              </section>
-
-              <!-- 4) 차트 2: 토큰 증감(+ 증가·더 소모 / - 감소·절약) -->
-              <section class="stats-card" id="card-chart-savings">
-                <div class="stats-card-head">
-                  <h3 class="stats-card-title">토큰 증감 (직접 대비, 추정)</h3>
-                  <div class="stats-legend">
-                    <span class="legend-item"><span class="legend-swatch ok"></span>- 감소(절약)</span>
-                    <span class="legend-item"><span class="legend-swatch err"></span>+ 증가(더 소모)</span>
-                    <span class="legend-item"><span class="legend-line cum"></span>누적</span>
-                  </div>
-                </div>
-                <div class="stats-chart-viewport" id="chart-savings-view"></div>
-                <div class="stats-table-viewport" id="table-savings-view" style="display: none;"></div>
-              </section>
-
-              <!-- 5) 차트 3: 예상은 얼마나 맞았나 -->
-              <section class="stats-card" id="card-chart-accuracy">
-                <div class="stats-card-head">
-                  <h3 class="stats-card-title">예상은 얼마나 맞았나</h3>
-                  <div class="stats-legend">
-                    <span class="legend-item"><span class="legend-line claude"></span>직접</span>
-                    <span class="legend-item"><span class="legend-line agy"></span>위임</span>
-                    <span class="legend-item"><span class="legend-line dashed"></span>정확(1.00)</span>
-                  </div>
-                </div>
-                <div class="stats-chart-viewport" id="chart-accuracy-view"></div>
-                <div class="stats-table-viewport" id="table-accuracy-view" style="display: none;"></div>
-              </section>
-
-              <!-- 6) 차트 4: 호출 수와 실제 토큰 -->
-              <section class="stats-card" id="card-chart-scatter">
-                <div class="stats-card-head">
-                  <h3 class="stats-card-title">호출 수와 실제 토큰</h3>
-                  <div class="stats-legend">
-                    <span class="legend-item"><span class="legend-marker circle claude"></span>직접</span>
-                    <span class="legend-item"><span class="legend-marker square agy"></span>위임</span>
-                    <span class="legend-item stats-scatter-crossover" id="stats-scatter-crossover"></span>
-                  </div>
-                </div>
-                <div class="stats-chart-viewport" id="chart-scatter-view"></div>
-                <div class="stats-table-viewport" id="table-scatter-view" style="display: none;"></div>
-              </section>
-
-              <!-- 7) 차트 5: 처리 시간: 예상은 얼마나 맞았나 -->
-              <section class="stats-card" id="card-chart-time-accuracy">
-                <div class="stats-card-head">
-                  <h3 class="stats-card-title">처리 시간: 예상은 얼마나 맞았나</h3>
-                  <div class="stats-legend">
-                    <span class="legend-item"><span class="legend-line claude"></span>직접</span>
-                    <span class="legend-item"><span class="legend-line agy"></span>위임</span>
-                    <span class="legend-item"><span class="legend-line dashed"></span>정확(1.00)</span>
-                  </div>
-                </div>
-                <div class="stats-chart-viewport" id="chart-time-accuracy-view"></div>
-                <div class="stats-table-viewport" id="table-time-accuracy-view" style="display: none;"></div>
-              </section>
-
-              <!-- 8) 표: 질문 기록 -->
-              <section class="stats-card" id="card-table-recent">
-                <div class="stats-card-head">
-                  <h3 class="stats-card-title" title="최근순 정렬">질문 기록</h3>
-                  <div class="stats-recent-controls">
-                    <label class="stats-reason-toggle" title="각 행 아래에 직접/위임을 고른 사유를 보입니다"><input type="checkbox" id="stats-recent-reason"> 사유 보기</label>
-                    <select id="stats-recent-path" aria-label="처리 방식 필터" title="처리 방식 필터">
-                      <option value="">전체</option>
-                      <option value="delegate">위임</option>
-                      <option value="direct">직접</option>
-                      <option value="chat">대화</option>
-                    </select>
-                    <button type="button" id="stats-recent-prev" aria-label="이전 쪽" title="이전 쪽">‹</button>
-                    <span id="stats-recent-pageinfo"></span>
-                    <button type="button" id="stats-recent-next" aria-label="다음 쪽" title="다음 쪽">›</button>
-                  </div>
-                </div>
-                <div class="stats-recent-table-wrap">
-                  <div class="stats-recent-loading" id="stats-recent-loading" style="display: none;" role="status" aria-live="polite">
-                    <span class="stats-recent-spinner" aria-hidden="true"></span>
-                    <span class="stats-recent-loading-text">불러오는 중…</span>
-                  </div>
-                  <table class="stats-recent-table" id="stats-recent-table">
-                    <thead>
-                      <tr>
-                        <th title="사용자가 질문(프롬프트)을 입력한 시각(위)과 Claude Code 프로젝트 폴더 이름(아래). 마우스를 올리면 연·초, 작업이 끝난 시각, 전체 이름이 보입니다">시각 · 프로젝트</th>
-                        <th title="누가 처리했는지(직접 · 위임 · 대화)와 그 질문의 도구 호출 횟수(위임한 질문은 위임과 관련된 호출)">처리 · 호출</th>
-                        <th class="num" title="결정 시점에 기록한 두 처리 방식의 Claude 토큰 예상입니다. 굵은 쪽이 실제로 한 방식입니다. 위임한 질문은 직접 처리했어도 생겼을 공통분을 뺀 값이라 같은 범위끼리 비교됩니다">예상 토큰</th>
-                        <th class="num" title="그 질문에 Claude가 실제로 쓴 토큰입니다. 직접 처리한 질문은 직접 줄에, 위임한 질문은 위임 줄(위임과 관련된 부분만)에 보입니다.">실제 토큰</th>
-                        <th class="num" title="위임 줄: 위임 손익 = 위임으로 쓴 실제 - 직접 했을 때의 예상(- 는 아낀 토큰, + 는 더 쓴 토큰). 직접 줄: 실제 - 예상 직접(예상 오차, 손익에는 넣지 않음).">증감</th>
-                        <th class="num" title="비율 = 실제 ÷ 예상(굵게 표시된 쪽의 예상). 1.00 에 가까울수록 정확하고, 1 보다 크면 실제가 예상보다 컸고 작으면 예상이 더 컸습니다. 이 값의 최근 중앙값이 다음 예상을 구할 때 보정 계수로 쓰입니다">비율</th>
-                        <th class="num" title="결정 시점에 기록한 두 처리 방식의 처리 시간 예상입니다. 굵은 쪽이 실제로 한 방식입니다. 위임한 질문은 위임과 무관한 Claude 시간을 뺀 값입니다">예상 시간</th>
-                        <th class="num" title="직접 시간: 그 질문에서 Claude가 일한 시간(사용자 응답을 기다린 긴 빈 구간은 뺌). 위임 시간: agy가 처리한 시간 + 위임과 관련된 Claude 시간(위임한 질문만, 직접 처리한 질문은 -)">실제 시간</th>
-                        <th class="num" title="직접 = 직접 시간 - 예상 직접 시간, 위임 = 위임 시간 - 예상 위임 시간. + 는 예상보다 더 걸린 것(주황), - 는 덜 걸린 것(초록)">시간 증감</th>
-                      </tr>
-                    </thead>                   <tbody id="stats-recent-tbody"></tbody>
-                  </table>
-                </div>
-              </section>
-
-              <p class="stats-footnote">예상은 질문을 받을 때 기록한 값 그대로이며 나중에 바뀌지 않습니다. 토큰 증감은 실제 토큰에서 직접 처리 예상을 뺀 값입니다: 위임한 질문은 위임으로만 쓴 실제 토큰 기준(- 이면 위임으로 아낀 것), 직접 처리한 질문은 예상 오차입니다. 손익 합계는 위임한 질문만 세고, 직접 처리한 질문의 토큰과 agy 토큰은 넣지 않습니다. 시간 증감은 실제 시간에서 처리한 쪽의 예상 시간을 뺀 값입니다. + 는 늘어난 것(더 소모·더 걸림), - 는 줄어든 것(절약)입니다.</p>
-            </div>
-
-            <!-- Hover Tooltip -->
-            <div id="stats-tooltip" class="stats-tooltip" style="display: none;" role="tooltip"></div>
-          </div>
-        </section>
-
-        <!-- =============================================================== -->
         <!-- 3. 에이전트 위임                                                -->
         <!-- =============================================================== -->
         <section id="view-qa" class="view-panel" style="display: none;">
@@ -449,7 +273,6 @@
               <span class="meta-chip" id="chip-qa-models">모델: 전체</span>
               <span class="meta-chip" id="chip-qa-status">상태: 전체</span>
               <span class="meta-chip" id="chip-qa-time">최근 작업: -</span>
-              <span class="meta-chip saved-tokens" id="chip-qa-saved">Claude 토큰 증감: -</span>
             </div>
             <div class="qa-session-chips" id="qa-session-chips" role="group" aria-label="agy 세션 고르기" hidden></div>
           </div>
@@ -499,6 +322,64 @@
             </div>
           </div>
         </section>
+
+        <!-- =============================================================== -->
+        <!-- 5. 실측 통계: 질문마다 직접/위임 · 모델 · 시간 · 토큰 · 사유(측정값만) -->
+        <!-- =============================================================== -->
+        <section id="view-stats" class="view-panel" style="display: none;">
+          <div class="dash usage">
+            <header class="usage-head">
+              <p class="usage-note">측정된 값만 보입니다. 예상치는 없습니다.</p>
+              <div class="usage-controls">
+                <span class="usage-updated" id="usage-updated" aria-live="polite"></span>
+                <div class="usage-days" role="group" aria-label="기간">
+                  <button type="button" class="usage-day-btn" data-days="7" aria-pressed="true">7일</button>
+                  <button type="button" class="usage-day-btn" data-days="30" aria-pressed="false">30일</button>
+                  <button type="button" class="usage-day-btn" data-days="90" aria-pressed="false">90일</button>
+                </div>
+                <button type="button" class="text-btn" id="usage-refresh">지금 갱신</button>
+              </div>
+            </header>
+
+            <p class="usage-message" id="usage-message" hidden></p>
+
+            <section class="dash-block">
+              <header class="dash-block-head">
+                <h2>요약</h2>
+                <span class="dash-count" id="usage-count"></span>
+              </header>
+              <dl class="stat-line" id="usage-summary"></dl>
+              <div class="usage-table-wrap"><table class="usage-table" id="usage-modes"></table></div>
+            </section>
+
+            <section class="dash-block">
+              <header class="dash-block-head">
+                <h2>모델 조합</h2>
+              </header>
+              <div class="usage-table-wrap"><table class="usage-table" id="usage-models"></table></div>
+            </section>
+
+            <section class="dash-block">
+              <header class="dash-block-head">
+                <h2>일별 질문</h2>
+                <span class="usage-legend" aria-hidden="true">
+                  <span class="usage-key usage-key-direct">직접</span>
+                  <span class="usage-key usage-key-delegate">위임</span>
+                  <span class="usage-key usage-key-chat">대화</span>
+                </span>
+              </header>
+              <div id="usage-daily"></div>
+            </section>
+
+            <section class="dash-block">
+              <header class="dash-block-head">
+                <h2>질문 기록</h2>
+                <span class="dash-count" id="usage-rows-count"></span>
+              </header>
+              <div class="usage-table-wrap"><table class="usage-table usage-rows" id="usage-rows"></table></div>
+            </section>
+          </div>
+        </section>
       </main>
     </div>
   </div>
@@ -508,6 +389,6 @@
   <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
-  <script src="app.js?v=95"></script>
+  <script src="app.js?v=103"></script>
 </body>
 </html>

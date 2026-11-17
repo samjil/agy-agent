@@ -210,8 +210,10 @@ function Initialize-AgySqlite {
 # ============================================================================
 
 # 표나 열을 더하면 이 숫자를 올린다. 이미 있는 DB 는 user_version 이 이 값보다 낮을 때만 스키마를 다시 확인하므로, 안 올리면 새 표가 만들어지지 않는다.
-#   1: tasks · agy_sessions · meta   2: + token_files · token_turns · token_task_links(토큰 통계)   3: + cum_* · usage_basis(이어 보낸 세션 토큰 분리)   4: + calls_related · d_related(위임 관련 호출 및 증가량 분리)   6: + anomaly(이상치)   12: + token_estimates.session(기록한 Claude 세션 번호)
-$script:AgyDbSchemaVersion = 12
+#   1: tasks · agy_sessions · meta   3: + cum_* · usage_basis(이어 보낸 세션 토큰 분리)
+#   15: 토큰 통계 표(token_files · token_turns · token_task_links · token_estimates)는 더 만들지 않는다. 이미 있는 DB 의 표는 지우지 않고 그냥 안 쓴다.
+#   16: 실측 통계 표(usage_files · usage_notes · usage_questions). 수집은 sub\usage-stats.ps1, 사유 기록은 note-choice.ps1 · submit-task.ps1(@reason).
+$script:AgyDbSchemaVersion = 16
 $script:AgyDbSchemaSql = @(
     "CREATE TABLE IF NOT EXISTS tasks (
         task_id TEXT PRIMARY KEY NOT NULL,
@@ -227,55 +229,19 @@ $script:AgyDbSchemaSql = @(
         conversation_id TEXT, cwd TEXT NOT NULL DEFAULT '[]', model TEXT,
         created_at TEXT, last_used_at TEXT, turn_count INTEGER NOT NULL DEFAULT 0)",
     "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY NOT NULL, value TEXT)",
-    "CREATE TABLE IF NOT EXISTS token_files (
-        path TEXT PRIMARY KEY,
-        offset INTEGER,
-        last_ctx INTEGER)",
-    "CREATE TABLE IF NOT EXISTS token_turns (
-        file TEXT,
-        turn_ts TEXT,
-        project TEXT,
-        path TEXT,
-        calls INTEGER,
-        submits INTEGER,
-        polls INTEGER,
-        out_tokens INTEGER,
-        d_tokens INTEGER,
-        est_direct REAL,
-        est_delegate REAL,
-        choice TEXT,
-        est_ver TEXT,
-        cr_tokens INTEGER,
-        dur_sec INTEGER,
-        est_time_direct INTEGER,
-        est_time_delegate INTEGER,
-        calls_related INTEGER,
-        d_related INTEGER,
-        level TEXT,
-        anomaly TEXT,
-        PRIMARY KEY(file, turn_ts))",
-    "CREATE TABLE IF NOT EXISTS token_task_links (
-        task_id TEXT PRIMARY KEY,
-        file TEXT,
-        turn_ts TEXT)",
-    "CREATE TABLE IF NOT EXISTS token_estimates (
-        id INTEGER PRIMARY KEY,
-        recorded_at TEXT NOT NULL,
-        project TEXT,
-        est_direct REAL,
-        est_delegate REAL,
-        est_time_direct INTEGER,
-        est_time_delegate INTEGER,
-        choice TEXT,
-        level TEXT,
-        factor_direct REAL,
-        factor_delegate REAL,
-        kind TEXT,
-        reason TEXT,
-        switch_to INTEGER,
-        merged INTEGER DEFAULT 0,
-        session TEXT)",
-    "CREATE INDEX IF NOT EXISTS idx_token_turns_project_ts ON token_turns(project, turn_ts)"
+    # 실측 통계: 대화 기록 파일별로 어디까지 읽었는지 / Claude 가 남긴 사유 / 질문 한 건의 측정값(시각은 모두 UTC ISO 글자)
+    "CREATE TABLE IF NOT EXISTS usage_files (path TEXT PRIMARY KEY NOT NULL, offset INTEGER NOT NULL DEFAULT 0, mtime TEXT)",
+    "CREATE TABLE IF NOT EXISTS usage_notes (id INTEGER PRIMARY KEY, session TEXT, noted_at TEXT, mode TEXT, reason TEXT)",
+    "CREATE INDEX IF NOT EXISTS idx_usage_notes_session ON usage_notes(session, noted_at)",
+    "CREATE TABLE IF NOT EXISTS usage_questions (
+        session TEXT NOT NULL, q_ts TEXT NOT NULL, project TEXT, mode TEXT,
+        claude_model TEXT, agy_models TEXT,
+        dur_sec INTEGER, calls INTEGER,
+        in_tokens INTEGER, cc_tokens INTEGER, cr_tokens INTEGER, out_tokens INTEGER,
+        agy_tokens INTEGER, agy_sec INTEGER, task_ids TEXT, task_ok INTEGER, task_fail INTEGER, task_cancel INTEGER,
+        reason TEXT, preview TEXT, auto INTEGER DEFAULT 0, end_ts TEXT,
+        PRIMARY KEY(session, q_ts))",
+    "CREATE INDEX IF NOT EXISTS idx_usage_questions_ts ON usage_questions(q_ts)"
 )
 
 # 기록 한 건의 칸과 순서. New-QaRecord(common.ps1)와 뷰어 API 가 같은 목록을 쓴다.
@@ -287,67 +253,6 @@ $script:QaRecordFields = @('timestamp', 'computer_name', 'task_id', 'source', 'm
 function Initialize-AgyDbSchema($Db, [string]$Path = "") {
     [void]$Db.Execute("PRAGMA journal_mode=WAL", $null)
     foreach ($sql in $script:AgyDbSchemaSql) { [void]$Db.Execute($sql, $null) }
-    $cols = @{}
-    try {
-        $info = $Db.Query("PRAGMA table_info(token_turns)", $null)
-        if ($info) {
-            foreach ($row in $info) {
-                if ($row["name"]) { $cols[[string]$row["name"]] = $true }
-            }
-        }
-    } catch {}
-    $neededCols = @(
-        @{ Name = "est_ver"; Type = "TEXT" },
-        @{ Name = "cr_tokens"; Type = "INTEGER" },
-        @{ Name = "dur_sec"; Type = "INTEGER" },
-        @{ Name = "est_time_direct"; Type = "INTEGER" },
-        @{ Name = "est_time_delegate"; Type = "INTEGER" },
-        @{ Name = "calls_related"; Type = "INTEGER" },
-        @{ Name = "d_related"; Type = "INTEGER" },
-        @{ Name = "level"; Type = "TEXT" },
-        @{ Name = "anomaly"; Type = "TEXT" },
-        @{ Name = "end_ts"; Type = "TEXT" },
-        @{ Name = "est_factor_direct"; Type = "REAL" },
-        @{ Name = "est_factor_delegate"; Type = "REAL" },
-        @{ Name = "est_kind"; Type = "TEXT" },      # 스키마 9: NULL = 질문을 받을 때 낸 예상, backfill = 나중에 질문 원문만 보고 채운 예상
-        @{ Name = "choice_reason"; Type = "TEXT" }  # 직접/위임을 고른 사유
-    )
-    foreach ($col in $neededCols) {
-        if ($cols.Count -gt 0 -and -not $cols.ContainsKey($col.Name)) {
-            try { [void]$Db.Execute(("ALTER TABLE token_turns ADD COLUMN {0} {1}" -f $col.Name, $col.Type), $null) } catch {}
-        }
-    }
-    # token_estimates 에 보정 계수 열(스키마 8)
-    $estCols = @{}
-    try {
-        $einfo = $Db.Query("PRAGMA table_info(token_estimates)", $null)
-        if ($einfo) { foreach ($erow in $einfo) { if ($erow["name"]) { $estCols[[string]$erow["name"]] = $true } } }
-    } catch {}
-    foreach ($ec in @("factor_direct", "factor_delegate")) {
-        if ($estCols.Count -gt 0 -and -not $estCols.ContainsKey($ec)) {
-            try { [void]$Db.Execute(("ALTER TABLE token_estimates ADD COLUMN {0} REAL" -f $ec), $null) } catch {}
-        }
-    }
-    if ($estCols.Count -gt 0 -and -not $estCols.ContainsKey("kind")) {
-        try { [void]$Db.Execute("ALTER TABLE token_estimates ADD COLUMN kind TEXT", $null) } catch {}
-    }
-    if ($estCols.Count -gt 0 -and -not $estCols.ContainsKey("switch_to")) {
-        try { [void]$Db.Execute("ALTER TABLE token_estimates ADD COLUMN switch_to INTEGER", $null) } catch {}
-    }
-    # 스키마 11: 질문 행에 붙인 기록 표시(merged). 수집기가 새 기록만 붙이게 한다. 이미 있던 기록은 0 이라 다음 수집에서 한 번 전부 다시 붙는다
-    if ($estCols.Count -gt 0 -and -not $estCols.ContainsKey("merged")) {
-        try { [void]$Db.Execute("ALTER TABLE token_estimates ADD COLUMN merged INTEGER DEFAULT 0", $null) } catch {}
-    }
-    if ($estCols.Count -gt 0 -and -not $estCols.ContainsKey("session")) {
-        try { [void]$Db.Execute("ALTER TABLE token_estimates ADD COLUMN session TEXT", $null) } catch {}
-    }
-    if ($estCols.Count -gt 0 -and -not $estCols.ContainsKey("reason")) {
-        try { [void]$Db.Execute("ALTER TABLE token_estimates ADD COLUMN reason TEXT", $null) } catch {}
-    }
-    try {
-        [void]$Db.Execute("UPDATE token_turns SET est_ver = 'v1' WHERE (est_ver IS NULL OR est_ver = '') AND (est_direct IS NOT NULL OR est_delegate IS NOT NULL)", $null)
-    } catch {}
-
     # 스키마 v3: tasks 표에 누적 토큰(cum_*) 및 산출 기준(usage_basis) 열 추가 및 기존 기록 마이그레이션
     $taskCols = @{}
     try {
@@ -689,18 +594,6 @@ function Remove-QaRecordsOlderThan([string]$DbPath, [int]$Months) {
     $db = Open-AgyDb $DbPath
     try {
         return $db.Execute("DELETE FROM tasks WHERE timestamp IS NOT NULL AND timestamp <> '' AND timestamp < ?", [object[]]@($cut))
-    } finally { $db.Dispose() }
-}
-
-# 보관 기간(기본 60일)이 지난 토큰 통계 턴과 작업 연결을 지운다. 돌려주는 값: 지운 턴 건수.
-function Remove-TokenTurnsOlderThan([string]$DbPath, [int]$Days = 60) {
-    if (-not (Test-Path -LiteralPath $DbPath)) { return 0 }
-    $cutIso = (Get-Date).ToUniversalTime().AddDays(-$Days).ToString('yyyy-MM-ddTHH:mm:ss')
-    $cutSpace = (Get-Date).AddDays(-$Days).ToString('yyyy-MM-dd HH:mm:ss')
-    $db = Open-AgyDb $DbPath
-    try {
-        [void]$db.Execute("DELETE FROM token_task_links WHERE turn_ts IS NOT NULL AND turn_ts <> '' AND (CASE WHEN turn_ts LIKE '%T%' THEN turn_ts < ? ELSE turn_ts < ? END)", [object[]]@($cutIso, $cutSpace))
-        return $db.Execute("DELETE FROM token_turns WHERE turn_ts IS NOT NULL AND turn_ts <> '' AND (CASE WHEN turn_ts LIKE '%T%' THEN turn_ts < ? ELSE turn_ts < ? END)", [object[]]@($cutIso, $cutSpace))
     } finally { $db.Dispose() }
 }
 

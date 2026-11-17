@@ -99,9 +99,12 @@ function Test-AgyWatcherAlive {
         }
     }
 
-    # (2) 보조 수단: 프로세스 목록에서 watch-agy.ps1 을 찾습니다.
+    # (2) 보조 수단: 프로세스 목록에서 watch-agy.ps1 을 찾습니다(해당 런타임 폴더의 워처만).
     $localProcs = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
-        Where-Object { $_.CommandLine -like "*watch-agy.ps1*" })
+        Where-Object {
+            $_.CommandLine -like "*watch-agy.ps1*" -and
+            (Test-WatcherCommandLineForRuntime $_.CommandLine $RuntimeDir)
+        })
     if ($localProcs.Count -gt 0) {
         return $true
     }

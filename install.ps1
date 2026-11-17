@@ -311,8 +311,6 @@ if (Test-Path $srcRuntime) {
             try {
                 $offOut = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $regSession -Remove 2>&1 | Out-String).Trim()
                 Write-Host "[+] SessionStart hook removed (-AlwaysOff): $offOut" -ForegroundColor Green
-                $regGuardOff = Join-Path $destDelegate "scripts\sub\register-estimate-guard.ps1"
-                if (Test-Path $regGuardOff) { try { [void](& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $regGuardOff -Remove 2>&1 | Out-String) } catch {} }
             } catch {
                 Write-Warning "SessionStart hook removal failed: $_"
             }
@@ -320,18 +318,20 @@ if (Test-Path $srcRuntime) {
             try {
                 $sessOut = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $regSession 2>&1 | Out-String).Trim()
                 Write-Host "[+] agy 워처 SessionStart 훅 등록: $sessOut (~/.claude/settings.json)" -ForegroundColor Green
-                # 질문마다 예상(record-estimate)을 반드시 기록하게 하는 훅 셋(UserPromptSubmit · PreToolUse HTTP · Stop). 위임 여부를 예상으로 정하므로 예상 없는 질문은 통계에 못 쓴다.
-                $regGuard = Join-Path $destDelegate "scripts\sub\register-estimate-guard.ps1"
-                if (Test-Path $regGuard) {
-                    try {
-                        $guardOut = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $regGuard 2>&1 | Out-String).Trim()
-                        Write-Host "[+] 예상 기록 강제 훅 등록: $guardOut (~/.claude/settings.json)" -ForegroundColor Green
-                    } catch {
-                        Write-Warning "예상 기록 강제 훅 등록 중 오류: $_"
-                    }
-                }
             } catch {
                 Write-Warning "agy 워처 SessionStart 훅 등록 중 오류: $_"
+            }
+        }
+
+        # 3-1b. 옛 버전이 넣어 둔 "질문마다 예상 기록 강제" 훅(estimate-guard)이 settings.json 에 남아 있으면 지운다.
+        #       예상 기록 장치는 없어졌다. 바꾸기 전에 settings.json 을 백업한다(remove-estimate-guard.ps1).
+        $rmGuard = Join-Path $destDelegate "scripts\sub\remove-estimate-guard.ps1"
+        if (Test-Path $rmGuard) {
+            try {
+                $guardRes = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $rmGuard 2>&1 | Out-String).Trim()
+                if ($guardRes -eq "REMOVED") { Write-Host "[+] 옛 예상 기록 강제 훅 제거 (~/.claude/settings.json, 백업: settings.json.bak-*)" -ForegroundColor Green }
+            } catch {
+                Write-Warning "옛 예상 기록 강제 훅 제거 중 오류: $_"
             }
         }
     }

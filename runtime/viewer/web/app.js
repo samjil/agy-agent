@@ -17,9 +17,9 @@
 
     // 1차 네비게이션
     navBtnDashboard:      document.getElementById("nav-btn-dashboard"),
-    navBtnStats:          document.getElementById("nav-btn-stats"),
     navBtnQa:             document.getElementById("nav-btn-qa"),
     navBtnHandoff:        document.getElementById("nav-btn-handoff"),
+    navBtnStats:          document.getElementById("nav-btn-stats"),
 
     // 2차 서브 패널
     subDashboard:         document.getElementById("sidebar-sub-dashboard"),
@@ -64,48 +64,20 @@
 
     // 메인 뷰 패널들
     viewDashboard:        document.getElementById("view-dashboard"),
-    viewStats:            document.getElementById("view-stats"),
     viewQa:               document.getElementById("view-qa"),
     viewHandoff:          document.getElementById("view-handoff"),
+    viewStats:            document.getElementById("view-stats"),
+    usageUpdated:         document.getElementById("usage-updated"),
+    usageRefresh:         document.getElementById("usage-refresh"),
+    usageMessage:         document.getElementById("usage-message"),
+    usageCount:           document.getElementById("usage-count"),
+    usageSummary:         document.getElementById("usage-summary"),
+    usageModes:           document.getElementById("usage-modes"),
+    usageModels:          document.getElementById("usage-models"),
+    usageDaily:           document.getElementById("usage-daily"),
+    usageRowsCount:       document.getElementById("usage-rows-count"),
+    usageRows:            document.getElementById("usage-rows"),
     mainScroll:           document.getElementById("main-content-scroll"),
-
-    // 통계 뷰 내부 엘리먼트
-    statsUpdatedTime:     document.getElementById("stats-updated-time"),
-    statsRefreshBtn:      document.getElementById("stats-refresh-btn"),
-    statsEmptyRefreshBtn: document.getElementById("stats-empty-refresh-btn"),
-    statsTableToggle:     document.getElementById("stats-table-toggle"),
-    statsCollectBanner:   document.getElementById("stats-collect-banner"),
-    statsCollectTitle:    document.getElementById("stats-collect-title"),
-    statsCollectDesc:     document.getElementById("stats-collect-desc"),
-    statsCollectFill:     document.getElementById("stats-collect-fill"),
-    statsEmptyState:      document.getElementById("stats-empty-state"),
-    statsContentWrap:     document.getElementById("stats-content-wrap"),
-    statsHeroSaved:       document.getElementById("stats-hero-saved"),
-    statsHeroDesc:        document.getElementById("stats-hero-desc"),
-    statsSumSuccess:      document.getElementById("stats-sum-success"),
-    statsSumAccuracy:     document.getElementById("stats-sum-accuracy"),
-    statsSumFormula:      document.getElementById("stats-sum-formula"),
-    statsSumTime:         document.getElementById("stats-sum-time"),
-    chartTasksView:       document.getElementById("chart-tasks-view"),
-    tableTasksView:       document.getElementById("table-tasks-view"),
-    chartSavingsView:     document.getElementById("chart-savings-view"),
-    tableSavingsView:     document.getElementById("table-savings-view"),
-    chartAccuracyView:    document.getElementById("chart-accuracy-view"),
-    tableAccuracyView:    document.getElementById("table-accuracy-view"),
-    chartScatterView:     document.getElementById("chart-scatter-view"),
-    tableScatterView:     document.getElementById("table-scatter-view"),
-    chartTimeAccuracyView: document.getElementById("chart-time-accuracy-view"),
-    tableTimeAccuracyView: document.getElementById("table-time-accuracy-view"),
-    statsScatterCrossover: document.getElementById("stats-scatter-crossover"),
-    statsRecentTbody:     document.getElementById("stats-recent-tbody"),
-    statsRecentTableWrap: document.querySelector(".stats-recent-table-wrap"),
-    statsRecentLoading:   document.getElementById("stats-recent-loading"),
-    statsRecentReason:    document.getElementById("stats-recent-reason"),
-    statsRecentPath:      document.getElementById("stats-recent-path"),
-    statsRecentPrev:      document.getElementById("stats-recent-prev"),
-    statsRecentNext:      document.getElementById("stats-recent-next"),
-    statsRecentPageInfo:  document.getElementById("stats-recent-pageinfo"),
-    statsTooltip:         document.getElementById("stats-tooltip"),
 
     // 대시보드 내부 엘리먼트
     dashNow:              document.getElementById("dash-now"),
@@ -130,7 +102,6 @@
     chipQaModels:         document.getElementById("chip-qa-models"),
     chipQaStatus:         document.getElementById("chip-qa-status"),
     chipQaTime:           document.getElementById("chip-qa-time"),
-    chipQaSaved:          document.getElementById("chip-qa-saved"),
     cards:                document.getElementById("cards"),
     loadMoreBtn:          document.getElementById("loadmore"),
 
@@ -145,21 +116,11 @@
   };
 
   // 애플리케이션 상태
-  var currentNav = "dashboard"; // "dashboard" | "stats" | "qa" | "handoff"
-  var statsData = null;
-  var statsDays = 30;
-  var recentPage = 1;
-  var recentPath = "";
-  var recentShowReason = false;
-  try {
-    if (typeof localStorage !== "undefined" && localStorage && localStorage.getItem("stats.showReason") === "1") {
-      recentShowReason = true;
-    }
-  } catch (e) {}
-  var statsRecentEventsBound = false;
-  var statsTableView = false;
-  var lastStatsFetchAt = 0;
-  var isStatsHovering = false;
+  var currentNav = "dashboard"; // "dashboard" | "qa" | "handoff" | "stats"
+  var usageDays = 7;            // 실측 통계의 기간(7 · 30 · 90일)
+  var usageData = null;         // /api/usage-stats 의 마지막 응답
+  var usageError = "";
+  var usageTimer = null;
   var currentQaSession = "";    // ""(프로젝트 전체) | 세션 노드 id
   var currentQaProject = "";    // ""(전체 프로젝트) | 프로젝트 노드 id
   var qaChipsExpanded = false;   // agy 세션 칩: 접힌 세션까지 모두 펼쳤는지
@@ -216,6 +177,62 @@
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;")
       .replace(/'/g, "&#039;");
+  }
+
+  function shortClaudeModel(name) {
+    if (!name) return "";
+    var s = String(name).trim();
+    if (s.indexOf("claude-") === 0) {
+      return s.slice(7);
+    }
+    return s;
+  }
+
+  // agy 모델 이름을 짧게(전체 이름은 툴팁에): gemini-4-hydrogen-medium -> hydrogen-medium, gemini-4-hydrogen-xhigh -> hydrogen-extra,
+  // gemini-4-argon-high -> argon-high, gemini-pro-orchestrator-g1-pro -> orchestrator, gemini-3.8-flash-medium -> flash-medium.
+  // "a -> b" 처럼 시도한 모델을 이은 글은 하나씩 줄인다. 모르는 이름은 그대로.
+  function shortAgyModel(name) {
+    if (!name) return "";
+    var s = String(name).trim();
+    if (s.indexOf("->") >= 0) {
+      return s.split("->").map(function (x) { return shortAgyModel(x); }).filter(Boolean).join(" → ");
+    }
+    if (/^gemini-4-hydrogen-xhigh$/i.test(s)) return "hydrogen-extra";
+    var m = s.match(/^gemini-4-(hydrogen|argon)-(\w+)$/i);
+    if (m) return m[1].toLowerCase() + "-" + m[2].toLowerCase();
+    if (/^gemini-pro-orchestrator/i.test(s)) return "orchestrator";
+    m = s.match(/^gemini-\d+(?:\.\d+)?-(flash|pro|lite)-(\w+)$/i);
+    if (m) return m[1].toLowerCase() + "-" + m[2].toLowerCase();
+    return s;
+  }
+
+  // 단계의 앞 모델들이 한도 · 과부하로 막혀 맨 마지막 대안(3.8 Flash)으로 처리한 기록인가(시도한 모델이 둘 이상이고 쓴 모델이 3.8 Flash).
+  function isLastResortFallback(r) {
+    if (!r) return false;
+    var used = String(r.model || "").trim();
+    return /^gemini-3\.8-flash-/i.test(used) && String(r.tried_models || "").indexOf("->") >= 0;
+  }
+
+  function cardModelHtml(agyModel, claudeModel, claudeEffort, fellBack) {
+    if (!agyModel) return "";
+    var full = String(agyModel);
+    var agyStr = '<span title="' + escapeHtml(full) + '">' + escapeHtml(shortAgyModel(full)) + '</span>';
+    if (fellBack) {
+      agyStr += ' <span class="badge model-fallback" title="앞 모델이 한도 · 과부하로 막혀 맨 마지막 대안(3.8 Flash)으로 처리했습니다. 결과를 더 꼼꼼히 확인하세요.">3.8 대체</span>';
+    }
+    if (!claudeModel) return agyStr;
+    var cShort = escapeHtml(shortClaudeModel(claudeModel));
+    var cTitle = "이 위임을 보낸 Claude 모델: " + claudeModel + (claudeEffort ? " (effort " + claudeEffort + ")" : "");
+    return '<span class="dim" title="' + escapeHtml(cTitle) + '">' + cShort + ' → </span>' + agyStr;
+  }
+
+  function buildCardModelMeta(agyModel, claudeModel, claudeEffort, fellBack) {
+    var item = labeledMeta("", "", "model", "모델");
+    var mv = item.querySelector(".mv");
+    if (mv) {
+      mv.innerHTML = cardModelHtml(agyModel, claudeModel, claudeEffort, fellBack);
+    }
+    return item;
   }
 
   // index.html 의 <symbol id="i-..."> 아이콘을 참조하는 SVG 마크업
@@ -368,9 +385,15 @@
     return r.tried_models ? String(r.tried_models).trim() : "";
   }
 
-  function isOkStatus(r) {
-    if (!r || r.status == null) return false;
-    return String(r.status).trim() === "OK";
+  // 위임 결과 상태가 성공인가. 기록(객체)이나 상태 글자를 받는다. OK · success · 성공(앞뒤 공백, 대소문자 무시)을 성공으로 본다.
+  function isOkStatus(s) {
+    if (s == null) return false;
+    var raw = (typeof s === "object" && "status" in s) ? s.status : s;
+    if (raw == null) return false;
+    var str = String(raw).trim();
+    if (str === "성공") return true;
+    var lower = str.toLowerCase();
+    return lower === "ok" || lower === "success";
   }
 
 
@@ -633,13 +656,11 @@
       });
     }
 
-    if (path === "#/stats") {
-      var d = parseInt(params.days, 10);
-      if (d !== 7 && d !== 30 && d !== 60) d = 30;
-      return { nav: "stats", days: d, session: "", project: "" };
-    }
     if (path === "#/qa") {
       return { nav: "qa", session: params.session || "", project: params.project || "", agy: params.agy || "", task: params.task || "" };
+    }
+    if (path === "#/stats") {
+      return { nav: "stats", session: "", project: "" };
     }
     var matchHandoff = path.match(/^#\/handoff$/);
     if (matchHandoff) {
@@ -650,11 +671,7 @@
 
   function updateHash(replace) {
     var newHash = "#/" + currentNav;
-    if (currentNav === "stats") {
-      if (statsDays && statsDays !== 30) {
-        newHash += "?days=" + statsDays;
-      }
-    } else if (currentNav === "qa") {
+    if (currentNav === "qa") {
       var parts = [];
       if (currentQaProject) {
         parts.push("project=" + encodeURIComponent(currentQaProject));
@@ -716,7 +733,7 @@
     currentNav = nav;
 
     // 1차 네비게이션 버튼 활성화
-    [els.navBtnDashboard, els.navBtnStats, els.navBtnQa, els.navBtnHandoff].forEach(function (btn) {
+    [els.navBtnDashboard, els.navBtnQa, els.navBtnHandoff, els.navBtnStats].forEach(function (btn) {
       if (btn) {
         var isActive = (btn.dataset.nav === nav);
         btn.classList.toggle("active", isActive);
@@ -725,15 +742,15 @@
     });
 
     // 2차 서브 패널 전환
-    if (els.subDashboard) els.subDashboard.style.display = (nav === "dashboard" ? "flex" : "none");
+    if (els.subDashboard) els.subDashboard.style.display = ((nav === "dashboard" || nav === "stats") ? "flex" : "none");
     if (els.subQa) els.subQa.style.display = (nav === "qa" ? "flex" : "none");
     if (els.subHandoff) els.subHandoff.style.display = (nav === "handoff" ? "flex" : "none");
 
     // 메인 뷰 전환
     if (els.viewDashboard) els.viewDashboard.style.display = (nav === "dashboard" ? "block" : "none");
-    if (els.viewStats) els.viewStats.style.display = (nav === "stats" ? "block" : "none");
     if (els.viewQa) els.viewQa.style.display = (nav === "qa" ? "block" : "none");
     if (els.viewHandoff) els.viewHandoff.style.display = (nav === "handoff" ? "block" : "none");
+    if (els.viewStats) els.viewStats.style.display = (nav === "stats" ? "block" : "none");
 
     // 상단 브레드크럼 및 상태 갱신
     updateBreadcrumbs();
@@ -762,12 +779,13 @@
     if (nav !== "dashboard") { stopNowTicker(); }
     if (nav === "dashboard") {
       renderDashboard();
-    } else if (nav === "stats") {
-      fetchAndRenderStats(false);
     } else if (nav === "qa") {
       applyQaFilters();
     } else if (nav === "handoff") {
       renderHandoffView();
+    }
+    if (typeof enterOrLeaveUsageStats === "function") {
+      enterOrLeaveUsageStats(nav === "stats");
     }
   }
 
@@ -777,9 +795,6 @@
     if (currentNav === "dashboard") {
       els.topbarCategory.textContent = "홈";
       els.topbarCurrent.textContent = "대시보드";
-    } else if (currentNav === "stats") {
-      els.topbarCategory.textContent = "홈";
-      els.topbarCurrent.textContent = "통계";
     } else if (currentNav === "qa") {
       els.topbarCategory.textContent = "에이전트 위임";
       if (!currentQaProject) {
@@ -806,6 +821,9 @@
           els.topbarCurrent.textContent = hTitles.projectName + " / " + hTitles.sessionTitle;
         }
       }
+    } else if (currentNav === "stats") {
+      els.topbarCategory.textContent = "실측 통계";
+      els.topbarCurrent.textContent = "최근 " + usageDays + "일";
     }
   }
 
@@ -814,14 +832,14 @@
 
     if (currentNav === "dashboard") {
       els.topbarCount.textContent = "총 " + allItems.length + "건 위임 / " + handoffProjects.length + "개 프로젝트";
-    } else if (currentNav === "stats") {
-      els.topbarCount.textContent = "토큰·위임 통계 (" + statsDays + "일)";
     } else if (currentNav === "qa") {
       var count = filteredQa.length + filteredPending.length;
       els.topbarCount.textContent = count + "건 표시 중 (전체 " + allItems.length + "건)";
     } else if (currentNav === "handoff") {
       var hMsgs = handoffMessagesOf(handoffChannels, claudeTree, currentHandoffProject, currentHandoffSession);
       els.topbarCount.textContent = hMsgs.length + "개 메시지";
+    } else if (currentNav === "stats") {
+      els.topbarCount.textContent = "질문 " + ((usageData && usageData.summary) ? usageData.summary.total : 0) + "건";
     }
 
     var t = new Date();
@@ -985,7 +1003,6 @@
       });
       allItems = items;
       qaSeq = (res && typeof res.seq === "number") ? res.seq : qaSeq;
-      requestSavedFileSizes(items).then(function (got) { if (got) { refreshSavedViews(); } });
       requestRecordContexts(items).then(function (got) { if (got) { refreshTokenMetas(); } });
       return { changed: true };
     });
@@ -1069,7 +1086,7 @@
         map[sKey] = { name: sKey, total: 0, pending: 0, errors: 0, latestTime: r.timestamp || "", models: {} };
       }
       map[sKey].total++;
-      if (r.status && String(r.status).trim() !== "OK") {
+      if (r.status && !isOkStatus(r)) {
         map[sKey].errors++;
       }
       if (recordModel(r)) {
@@ -1272,7 +1289,7 @@
       if (!item || typeof item !== "object") return;
       var nodeInfo = qaNodeOf(item, tree);
       var time = isPending ? (item.created || "") : (item.timestamp || "");
-      var isErr = !isPending && item.status && String(item.status).trim() !== "OK";
+      var isErr = !isPending && item.status && !isOkStatus(item);
 
       var targetSession = null;
       if (nodeInfo.projectId === QA_UNLINKED) {
@@ -1488,7 +1505,7 @@
         entry.pending++;
       } else {
         entry.total++;
-        if (item.status && String(item.status).trim() !== "OK") {
+        if (item.status && !isOkStatus(item)) {
           entry.errors++;
         }
       }
@@ -2987,8 +3004,6 @@
       var pfx = els2[i].getAttribute("data-label-prefix") || "";
       (els2[i].querySelector(".mv") || els2[i]).textContent = pfx + formatDuration((Date.now() - Number(els2[i].getAttribute("data-start"))) / 1000);
     }
-    var tds = document.querySelectorAll(".live-time-delta[data-start]");
-    for (var t2 = 0; t2 < tds.length; t2++) { paintTimeDelta(tds[t2], Date.now()); }
     var etas = document.querySelectorAll(".live-eta[data-start]");
     for (var e = 0; e < etas.length; e++) { paintEta(etas[e], Date.now()); }
     var deltas = document.querySelectorAll(".live-eta-delta[data-start]");
@@ -3054,7 +3069,7 @@
         title = "마지막 위임: " + (extractQuestionKeyword(last.question) || "(질문 내용 없음)");
         meta.push('<span>' + formatRelativeTime(last.timestamp) + '</span>');
         meta.push('<span>' + (isOkStatus(last) ? "성공" : (last.status ? "실패 (" + escapeHtml(last.status) + ")" : "상태 미기록")) + '</span>');
-        if (recordModel(last)) { meta.push('<span><code>' + escapeHtml(recordModel(last)) + '</code></span>'); }
+        if (recordModel(last)) { meta.push('<span><code title="' + escapeHtml(recordModel(last)) + '">' + escapeHtml(shortAgyModel(recordModel(last))) + '</code></span>'); }
         clickItem = last;
       } else {
         title = "아직 위임 기록이 없습니다";
@@ -3148,233 +3163,7 @@
     return n >= 10000 ? (n / 10000).toFixed(1) + "만" : n.toLocaleString();
   }
 
-  // ==========================================================================
-  // Claude 토큰 절약(예상)
-  //   Claude 가 쓴 토큰은 이 도구가 잴 수 없다. agy 의 토큰 수는 방식이 달라(입력이 단계마다 맥락을 다시 읽는 누적) 그대로 쓰지 않고,
-  //   "같은 일을 Claude 가 직접 했다면" 필요했을 분량을 agy 가 남긴 과정(읽은 파일 · 쓴 파일 · 실행한 명령 · 생각)에서 어림한다:
-  //     읽기  : 읽은 파일(같은 파일은 한 번)의 크기를 토큰으로(파일이 없으면 기본값, 한 파일 상한 있음)
-  //     쓰기  : 새로 쓴 파일의 크기 / 고친 곳은 한 군데당 어림값
-  //     명령  : 명령 글자 + 출력 어림값
-  //     생각  : 과정에 남은 생각 글의 길이 × 2(요약본이라 실제 생각은 더 길다)
-  //     단계마다 도구 호출 형식 몫
-  //   거기서 위임하느라 Claude 가 쓴 질문(Claude 가 쓴 글)을 뺀다. 최종 답은 Claude 가 직접 했어도 써야 하고 위임해도 읽어야 해서 서로 상쇄된다.
-  //   성공한 위임만 세고, 과정이 없는 기록(MCP 호출 등)은 어림할 근거가 없어 센 값이 없다.
-  // ==========================================================================
-  var SAVED_READ_CAP_TOKENS = 30000;     // 한 파일을 읽는 데 드는 토큰 상한
-  var SAVED_READ_DEFAULT_TOKENS = 2500;  // 크기를 모르는 읽은 파일
-  var SAVED_WRITE_DEFAULT_TOKENS = 1500; // 크기를 모르는 쓴 파일
-  var SAVED_EDIT_TOKENS = 600;           // 파일 한 군데를 고치는 도구 호출(바꿀 부분 + 앞뒤)
-  var SAVED_CMD_RESULT_TOKENS = 300;     // 명령 하나의 출력
-  var SAVED_STEP_TOKENS = 80;            // 도구 호출 하나의 형식(이름 · 인자 틀)
-
-  var SAVED_READ_TOOLS = { view_file: 1, read_file: 1 };
-  var SAVED_WRITE_TOOLS = { write_to_file: 1, write_file: 1 };
-  var SAVED_EDIT_TOOLS = { replace_file_content: 1, edit_file: 1, multi_replace_file_content: 1 };
-
-  // 글자 수를 토큰으로 어림: 영문·숫자·기호는 4자에 1토큰, 한글 등은 1.5자에 1토큰.
-  function estimateTextTokens(s) {
-    var str = String(s == null ? "" : s);
-    var ascii = 0, other = 0;
-    for (var i = 0; i < str.length; i++) { if (str.charCodeAt(i) < 128) { ascii++; } else { other++; } }
-    return Math.ceil(ascii / 4 + other / 1.5);
-  }
-
-  // 파일 바이트 수를 토큰으로 어림(코드·한글이 섞인 글은 3.2바이트에 1토큰 안팎).
-  function bytesToTokens(bytes) { return Math.ceil((Number(bytes) || 0) / 3.2); }
-
   function tokenRecordKey(r) { return r && r.task_id ? String(r.task_id) : "t:" + String(r && r.timestamp || ""); }
-
-  // 과정의 detail 이 파일 경로로 보이는가(절대 경로만). 글 내용이 들어 있는 경우(write_file 의 본문 등)는 거른다.
-  function savedLooksLikePath(s) {
-    var v = String(s == null ? "" : s);
-    if (v.length === 0 || v.length > 400 || v.indexOf("\n") >= 0) { return false; }
-    return /^[A-Za-z]:[\\/]/.test(v) || v.charAt(0) === "/";
-  }
-
-  // agy 자신의 작업 파일(지시문 파일 · 내부 기록)은 일의 분량이 아니라서 센 값에서 뺀다.
-  function savedIsInternalPath(p) {
-    return /[\\/]\.gemini[\\/]|[\\/]antigravity-cli[\\/]|[\\/]delegate-agy[\\/]runtime[\\/]|[\\/]\.samjil[\\/]delegate-agy[\\/]/i.test(String(p));
-  }
-
-  function savedNormPath(p) { return String(p).replace(/\\/g, "/"); }
-
-  // 한 위임 기록의 과정에서 일의 종류별 양을 뽑는다. 과정이 없으면 null.
-  function analyzeSavedWork(r) {
-    var steps = r && Array.isArray(r.process) ? r.process : [];
-    if (steps.length === 0) { return null; }
-    var w = { reads: [], writes: [], writesNoPath: 0, edits: 0, commands: [], thinkChars: 0, steps: 0 };
-    var readSeen = {}, writeSeen = {};
-    steps.forEach(function (st) {
-      if (!st) { return; }
-      var tool = String(st.tool || "");
-      var detail = String(st.detail == null ? "" : st.detail);
-      w.thinkChars += String(st.think == null ? "" : st.think).length;
-      if (SAVED_READ_TOOLS[tool]) {
-        w.steps++;
-        if (savedLooksLikePath(detail) && !savedIsInternalPath(detail)) {
-          var rp = savedNormPath(detail);
-          if (!readSeen[rp]) { readSeen[rp] = true; w.reads.push(rp); }
-        }
-      } else if (SAVED_WRITE_TOOLS[tool]) {
-        w.steps++;
-        if (savedLooksLikePath(detail)) {
-          if (!savedIsInternalPath(detail)) {
-            var wp = savedNormPath(detail);
-            if (!writeSeen[wp]) { writeSeen[wp] = true; w.writes.push(wp); }
-          }
-        } else { w.writesNoPath++; }
-      } else if (SAVED_EDIT_TOOLS[tool]) {
-        w.steps++;
-        if (!(savedLooksLikePath(detail) && savedIsInternalPath(detail))) { w.edits++; }
-      } else if (tool === "run_command") {
-        w.steps++;
-        w.commands.push(detail);
-      }
-      // manage_task · schedule 등 기다림·관리용 호출은 일의 분량이 아니라서 세지 않는다.
-    });
-    return w;
-  }
-
-  // 분석 결과와 파일 크기 지도(경로 -> 바이트, -1 은 없음)로 "Claude 가 직접 했다면" 쓸 토큰을 부분별로 어림한다.
-  function estimateDirectTokens(work, sizes) {
-    sizes = sizes || {};
-    var read = 0;
-    work.reads.forEach(function (p) {
-      var sz = sizes[p];
-      read += (typeof sz === "number" && sz >= 0) ? Math.min(bytesToTokens(sz), SAVED_READ_CAP_TOKENS) : SAVED_READ_DEFAULT_TOKENS;
-    });
-    var write = 0;
-    work.writes.forEach(function (p) {
-      var sz = sizes[p];
-      write += (typeof sz === "number" && sz >= 0) ? bytesToTokens(sz) : SAVED_WRITE_DEFAULT_TOKENS;
-    });
-    write += work.writesNoPath * SAVED_WRITE_DEFAULT_TOKENS;
-    var edit = work.edits * SAVED_EDIT_TOKENS;
-    var cmd = 0;
-    work.commands.forEach(function (c) { cmd += estimateTextTokens(c) + SAVED_CMD_RESULT_TOKENS; });
-    var think = Math.ceil(work.thinkChars / 4) * 2;   // 생각 글은 대부분 영문이라 4자에 1토큰, 요약본이라 × 2
-    var steps = work.steps * SAVED_STEP_TOKENS;
-    return { read: read, write: write, edit: edit, cmd: cmd, think: think, steps: steps, total: read + write + edit + cmd + think + steps };
-  }
-
-  // 파일 크기 지도. 서버(/api/qa/file-sizes)에서 받아 채운다. 받기 전에는 기본값으로 어림하고, 받으면 다시 그린다.
-  var savedFileSizes = {};
-  var savedSizeRequested = {};
-  function savedMissingPaths(records) {
-    var out = [];
-    (Array.isArray(records) ? records : []).forEach(function (r) {
-      if (!isOkStatus(r)) { return; }
-      var w = analyzeSavedWork(r);
-      if (!w) { return; }
-      w.reads.concat(w.writes).forEach(function (p) {
-        if (!Object.prototype.hasOwnProperty.call(savedFileSizes, p) && !savedSizeRequested[p]) { savedSizeRequested[p] = true; out.push(p); }
-      });
-    });
-    return out;
-  }
-  function requestSavedFileSizes(records) {
-    var paths = savedMissingPaths(records);
-    if (paths.length === 0 || typeof fetch !== "function") { return Promise.resolve(false); }
-    var chunks = [];
-    for (var i = 0; i < paths.length; i += 300) { chunks.push(paths.slice(i, i + 300)); }
-    return Promise.all(chunks.map(function (chunk) {
-      return fetch("/api/qa/file-sizes", { method: "POST", headers: { "X-Samjil-Viewer": "1", "Content-Type": "application/json" }, body: JSON.stringify({ paths: chunk }) })
-        .then(function (res) { return res.ok ? res.json() : null; })
-        .then(function (data) {
-          var got = data && data.sizes ? data.sizes : {};
-          chunk.forEach(function (p) { savedFileSizes[p] = typeof got[p] === "number" ? got[p] : -1; });
-          return true;
-        })
-        .catch(function () { chunk.forEach(function (p) { savedSizeRequested[p] = false; }); return false; });
-    })).then(function (rs) { return rs.some(Boolean); });
-  }
-
-  // 성공한 위임 한 건의 Claude 토큰 절약 어림. 어림할 수 없으면(실패 · 과정 없음) null.
-  function savedTokensOf(r) {
-    if (!isOkStatus(r)) { return null; }
-    var w = analyzeSavedWork(r);
-    if (!w) { return null; }
-    var d = estimateDirectTokens(w, savedFileSizes);
-    var asked = estimateTextTokens(r.question);
-    return { saved: Math.max(0, d.total - asked), direct: d.total, asked: asked, parts: d, reads: w.reads.length, writes: w.writes.length + w.writesNoPath, edits: w.edits, commands: w.commands.length };
-  }
-
-  // 여러 건의 합. 센 건수와 함께 돌려준다.
-  function sumSavedTokens(items) {
-    var saved = 0, count = 0;
-    (Array.isArray(items) ? items : []).forEach(function (r) {
-      var s = savedTokensOf(r);
-      if (s) { saved += s.saved; count++; }
-    });
-    return { saved: saved, count: count };
-  }
-
-  function sumClaudeSavedTokens(items) {
-    var saved = 0, count = 0;
-    (Array.isArray(items) ? items : []).forEach(function (r) {
-      if (r && r.claude && typeof r.claude.saved === "number") {
-        saved += r.claude.saved;
-        count++;
-      }
-    });
-    return { saved: saved, count: count };
-  }
-
-  // 어림한 절약량(saved)을 증감으로 뒤집어 부호와 k·M 단위로 보인다: + 는 직접 했을 때보다 늘어남(더 소모), - 는 줄어듦(절약). 0 은 "0k".
-  function savedDeltaShort(saved) {
-    var d = -Math.round(Number(saved) || 0);
-    if (d === 0) { return "0k"; }
-    if (Math.abs(d) < 1000) { return (d > 0 ? "+" : "-") + Math.abs(d); }   // 1k 미만은 0.0k 로 뭉개지 않고 그대로
-    return (d > 0 ? "+" : "-") + formatTokenCompact(Math.abs(d));
-  }
-  function savedTokensText(n) { return "Claude 토큰 증감 ≈ " + savedDeltaShort(n) + " (예상)"; }
-  var SAVED_TOKENS_NOTE = "같은 일을 Claude 가 직접 했다면 쓸 분량을 agy 가 남긴 과정(읽은 파일·쓴 파일·명령·생각)에서 어림하고, 위임하느라 쓴 질문 분량을 뺀 예상값입니다. 증감의 부호: - 는 직접 했을 때보다 줄어든 것(절약), + 는 늘어난 것(더 소모)입니다. 실제 Claude 사용량은 이 도구가 잴 수 없습니다.";
-  function savedTokensDetail(sv) {
-    return SAVED_TOKENS_NOTE + " 직접 했다면 약 " + sv.direct.toLocaleString() + " (읽기 " + sv.parts.read.toLocaleString() + " · 쓰기 " + (sv.parts.write + sv.parts.edit).toLocaleString() +
-      " · 명령 " + sv.parts.cmd.toLocaleString() + " · 생각 " + sv.parts.think.toLocaleString() + " · 도구 호출 " + sv.parts.steps.toLocaleString() + ") − 질문 약 " + sv.asked.toLocaleString() +
-      " · 읽은 파일 " + sv.reads + "개 · 쓴 파일 " + sv.writes + "개 · 고친 곳 " + sv.edits + "곳 · 명령 " + sv.commands + "회";
-  }
-
-  // 진행 중인 위임의 절약 예상: 지금까지 모은 과정(liveProc 의 단계)과 질문으로 끝난 카드와 같은 방식으로 어림한다. 단계가 아직 없으면 null.
-  function liveSavedOf(p) {
-    if (!p) { return null; }
-    var opts = pendingProcessOpts(p, []);
-    var steps = opts && Array.isArray(opts.steps) ? opts.steps : [];
-    if (steps.length === 0) { return null; }
-    return savedTokensOf({ status: "OK", question: p.question, process: steps });
-  }
-
-  // 새 단계나 파일 크기가 들어오면 진행 중 카드의 절약 표시를 제자리에서 고친다(카드를 다시 그리지 않는다).
-  function refreshLiveSaved() {
-    var nodes = document.querySelectorAll("[data-saved-live]");
-    for (var i = 0; i < nodes.length; i++) {
-      var id = nodes[i].getAttribute("data-saved-live");
-      var p = null;
-      for (var j = 0; j < pendingItems.length; j++) { if (pendingItems[j] && pendingItems[j].task_id === id) { p = pendingItems[j]; break; } }
-      var sv = liveSavedOf(p);
-      if (!sv) { continue; }
-      var inner = nodes[i].querySelector(".pg-saved");
-      if (inner) { inner.textContent = savedTokensText(sv.saved); inner.title = savedTokensDetail(sv); }
-      nodes[i].hidden = false;
-    }
-  }
-
-  // 파일 크기가 도착해 값이 바뀌면 지금 화면의 토큰 절약 표시(카드 · 칩 · 대시보드)를 다시 계산한다.
-  function refreshSavedViews() {
-    var byKey = {};
-    allItems.forEach(function (r) { byKey[tokenRecordKey(r)] = r; });
-    var nodes = document.querySelectorAll("[data-saved-task]");
-    for (var i = 0; i < nodes.length; i++) {
-      var r = byKey[nodes[i].getAttribute("data-saved-task")];
-      var sv = r ? savedTokensOf(r) : null;
-      if (sv) {
-        if (nodes[i].classList.contains("tok-item")) { setTokItem(nodes[i], "Claude 토큰 증감", "≈ " + savedDeltaShort(sv.saved), "예상"); } else { nodes[i].textContent = savedTokensText(sv.saved); }
-        nodes[i].title = savedTokensDetail(sv);
-      }
-    }
-    refreshLiveSaved();
-    if (currentNav === "dashboard") { renderStats(); } else if (currentNav === "qa") { updateQaHeader(); }
-  }
 
   // 한 채널의 핸드오프 위임 기록(위임 완료 레코드)에서 "메시지 번호 -> 그 호출이 쓴 토큰"을 만든다.
   // 레코드의 task_id 는 handoff_<채널>_<c2a 번호>_<시각> 이다. agy 는 채널마다 대화 하나를 이어 쓰고 usage 는 그 대화의 누적값이라,
@@ -3542,7 +3331,8 @@
 
   // 모델 ID -> 사람이 읽는 이름. 모르는 모양이면 추측하지 않고 그대로 돌려준다.
   //   claude-opus-4-5-20251101 -> Claude Opus 4.5 · claude-sonnet-5-5 -> Claude Sonnet 5.5 · claude-3-5-sonnet-20241022 -> Claude 3.5 Sonnet
-  //   gemini-3.8-flash-high -> Gemini 3.8 Flash (High) · "Claude Opus 5.5" 처럼 이미 사람이 쓴 이름(공백·대문자)은 그대로
+  //   gemini-4-hydrogen-medium -> Gemini 4 Hydrogen (Medium) · gemini-4-hydrogen-xhigh -> Gemini 4 Hydrogen (Extra)
+  //   gemini-pro-orchestrator-g1-pro -> Orchestrator (Argon) · gemini-3.8-flash-high -> Gemini 3.8 Flash (High) · "Claude Opus 5.5" 처럼 이미 사람이 쓴 이름(공백·대문자)은 그대로
   function formatModelName(raw) {
     var s = String(raw == null ? "" : raw).trim();
     if (!s) return "";
@@ -3553,6 +3343,9 @@
     if (m) return "Claude " + cap(m[1]) + " " + m[2] + (m[3] ? "." + m[3] : "");
     m = s.match(/^claude-(\d+)(?:-(\d+))?-(opus|sonnet|haiku)(?:-\d{8})?$/);
     if (m) return "Claude " + m[1] + (m[2] ? "." + m[2] : "") + " " + cap(m[3]);
+    if (/^gemini-pro-orchestrator/.test(s)) return "Orchestrator (Argon)";
+    m = s.match(/^gemini-(\d+)-(hydrogen|argon)-(low|medium|high|xhigh)$/);
+    if (m) return "Gemini " + m[1] + " " + cap(m[2]) + " (" + (m[3] === "xhigh" ? "Extra" : cap(m[3])) + ")";
     m = s.match(/^gemini-(\d+(?:\.\d+)?)-(flash|pro|ultra|nano|lite)(?:-(low|medium|high))?$/);
     if (m) return "Gemini " + m[1] + " " + cap(m[2]) + (m[3] ? " (" + cap(m[3]) + ")" : "");
     return s;
@@ -3567,7 +3360,7 @@
     return low.charAt(0).toUpperCase() + low.slice(1);
   }
 
-  // 모델 ID(+노력)를 화면 이름으로. agy(Gemini) 모델 ID 는 이름에 노력이 들어 있다("Gemini 3.8 Flash (High)").
+  // 모델 ID(+노력)를 화면 이름으로. agy(Gemini) 모델 ID 는 이름에 노력이 들어 있다("Gemini 4 Hydrogen (Medium)").
   // Claude 는 모델 ID 에 노력이 없으니 메시지 머리말의 `노력:` 을 "Claude Sonnet 5.5 (High)" 처럼 덧붙인다. 모델을 모르면 빈 문자열.
   function handoffNameOf(model, effort, party) {
     var base = formatModelName(model);
@@ -3622,8 +3415,14 @@
 
   // 채널의 위임 기록으로 "이 c2a 번호를 처리한 agy 모델"을 찾는 함수를 만든다.
   //   채널 응답의 auto.dispatches(번호 -> 위임 작업 ID) -> 진행 중이면 대기 작업(pendingItems)의 모델, 끝났으면 위임 기록(allItems)의 모델.
-  //   둘 다 모르면 위임 때 고른 단계(tier)로 gemini-3.8-flash-<tier> 를 짐작한다(inferred).
+  //   둘 다 모르면 위임 때 고른 단계(tier)의 기본 주 모델(config\models.json 의 기본값)을 짐작한다(inferred).
+  //   옛 기록의 low · medium · high 는 그때 쓰던 gemini-3.8-flash-<단계> 로 짐작한다.
   function handoffDispatchResolver(channelData, records, pendings) {
+    // 단계 -> 기본 주 모델(화면에서 짐작할 때만 쓴다. 실제 선택은 워처가 config\models.json 으로 한다).
+    var tierModels = {
+      "quick": "gemini-4-hydrogen-low", "build": "gemini-4-hydrogen-medium", "build-hard": "gemini-4-hydrogen-high",
+      "feature": "gemini-pro-orchestrator-g1-pro", "think": "gemini-4-argon-high", "deep": "gemini-4-hydrogen-xhigh"
+    };
     var ds = channelData && channelData.auto && Array.isArray(channelData.auto.dispatches) ? channelData.auto.dispatches : [];
     var recs = Array.isArray(records) ? records : [];
     var pend = Array.isArray(pendings) ? pendings : [];
@@ -3638,6 +3437,7 @@
           for (j = 0; j < pend.length; j++) { if (pend[j] && pend[j].task_id === id && (v = usable(pend[j].model))) return { model: v, inferred: false }; }
           for (j = 0; j < recs.length; j++) { if (recs[j] && recs[j].task_id === id && (v = usable(recs[j].model))) return { model: v, inferred: false }; }
         }
+        if (d.tier && Object.prototype.hasOwnProperty.call(tierModels, String(d.tier))) return { model: tierModels[String(d.tier)], inferred: true };
         if (d.tier && /^(low|medium|high)$/.test(String(d.tier))) return { model: "gemini-3.8-flash-" + d.tier, inferred: true };
         return null;
       }
@@ -3691,7 +3491,7 @@
     return { senderParty: senderParty, sender: sender, receiverParty: receiverParty, receiver: receiver, inferred: inferred, senderInferred: senderInferred };
   }
 
-  // 방향 표시: 모델명으로 "Claude Opus 5.5 → Gemini 3.8 Flash (High)". 채널 정보가 없으면 예전처럼 Claude/agy.
+  // 방향 표시: 모델명으로 "Claude Opus 5.5 → Gemini 4 Argon (High)". 채널 정보가 없으면 예전처럼 Claude/agy.
   function dirLabelHtml(dir, m, channelName) {
     var data = (m && channelName && handoffChannels[channelName]) ? handoffChannels[channelName] : null;
     var parts = m ? handoffLabelParts(m, data ? data.messages : null, data ? handoffDispatchResolver(data, allItems, pendingItems) : null) : null;
@@ -3810,7 +3610,7 @@
             time: r.timestamp,
             titleHtml: escapeHtml(extractQuestionKeyword(r.question) || "(질문 내용 없음)"),
             subHtml: '<span>위임 실패</span>' +
-              (recordModel(r) ? '<span>' + escapeHtml(recordModel(r)) + '</span>' : "") +
+              (recordModel(r) ? '<span title="' + escapeHtml(recordModel(r)) + '">' + escapeHtml(shortAgyModel(recordModel(r))) + '</span>' : "") +
               '<span>' + escapeHtml(r.session || "단발성") + '</span>',
             sideHtml: qaStatusBadge(r),
             onClick: goQaSession(r)
@@ -3868,7 +3668,7 @@
             time: r.timestamp,
             titleHtml: escapeHtml(extractQuestionKeyword(r.question) || "(질문 내용 없음)"),
             subHtml: '<span>위임</span>' +
-              (recordModel(r) ? '<span>' + escapeHtml(recordModel(r)) + '</span>' : "") +
+              (recordModel(r) ? '<span title="' + escapeHtml(recordModel(r)) + '">' + escapeHtml(shortAgyModel(recordModel(r))) + '</span>' : "") +
               '<span>' + escapeHtml(r.session || "단발성") + '</span>',
             sideHtml: qaStatusBadge(r),
             onClick: goQaSession(r)
@@ -3905,16 +3705,10 @@
     var elapsedItemCount = 0;
     var todayKey = localDateKey(new Date());
     var modelUsage = {};
-    var savedAll = 0, savedToday = 0, savedCount = 0;
 
     allItems.forEach(function (r) {
       if (isOkStatus(r)) { okCount++; } else if (r.status) { errCount++; }
       if (r.timestamp && String(r.timestamp).slice(0, 10) === todayKey) { todayCount++; }
-      var sv = savedTokensOf(r);
-      if (sv) {
-        savedAll += sv.saved; savedCount++;
-        if (r.timestamp && String(r.timestamp).slice(0, 10) === todayKey) { savedToday += sv.saved; }
-      }
       if (r.elapsed_sec && !isNaN(Number(r.elapsed_sec))) {
         totalElapsed += Number(r.elapsed_sec);
         elapsedItemCount++;
@@ -3936,8 +3730,6 @@
         ["오늘", todayCount + "건"],
         ["성공률", successRate],
         ["평균 소요", avgSec],
-        ["Claude 토큰 증감(예상)", savedCount > 0 ? "≈ " + savedDeltaShort(savedAll) : "-", SAVED_TOKENS_NOTE + " 성공한 위임 " + savedCount.toLocaleString() + "건 기준"],
-        ["오늘 토큰 증감(예상)", savedCount > 0 ? "≈ " + savedDeltaShort(savedToday) : "-", SAVED_TOKENS_NOTE],
         ["협의 채널", handoffProjects.length + "개"],
         ["메시지", totalHandoffMsgs.toLocaleString() + "개"]
       ];
@@ -4006,6 +3798,296 @@
 
     els.modelBarsContainer.innerHTML = "";
     els.modelBarsContainer.appendChild(frag);
+  }
+
+  // ==========================================================================
+  // 실측 통계 (#/stats): 질문마다 직접/위임 · 모델 · 소요 시간 · 토큰 · 사유. 측정된 값만 보인다(예상치 없음).
+  // 데이터는 /api/usage-stats?days=7|30|90. 서버가 대화 기록을 읽는 동안(collecting)은 3초마다 다시 묻는다.
+  // ==========================================================================
+
+  function usageModeLabel(mode) {
+    return mode === "delegate" ? "위임" : (mode === "chat" ? "대화" : "직접");
+  }
+
+  function usageNum(n) {
+    return (n === null || n === undefined) ? "-" : tokenShort(n);
+  }
+
+  function usageDur(sec) {
+    return (sec === null || sec === undefined) ? "-" : formatDuration(sec);
+  }
+
+  // UTC 기록 시각(ISO) -> 이 PC 시각 "11-13 09:05"
+  function usageWhen(iso) {
+    var d = new Date(iso);
+    if (!iso || isNaN(d.getTime())) return "";
+    return pad2(d.getMonth() + 1) + "-" + pad2(d.getDate()) + " " + pad2(d.getHours()) + ":" + pad2(d.getMinutes());
+  }
+
+  // 폴더 경로의 마지막 이름(프로젝트 표시용)
+  function usageProjectName(path) {
+    var parts = String(path || "").split(/[\\/]/).filter(function (p) { return p; });
+    return parts.length ? parts[parts.length - 1] : "";
+  }
+
+  // 요약 한 줄: [이름, 값, 툴팁]
+  function usageSummaryStats(summary) {
+    var s = summary || {};
+    var m = s.by_mode || {};
+    var count = function (k) { return (m[k] && m[k].count) || 0; };
+    var t = s.tasks || {};
+    var r = s.reason || {};
+    var rate = r.total > 0 ? Math.round((r.with / r.total) * 100) + "% (" + r.with + "/" + r.total + ")" : "-";
+    var out = [
+      ["질문", (s.total || 0).toLocaleString() + "건"],
+      ["직접", count("direct").toLocaleString() + "건", "도구를 쓰고 Claude 가 직접 처리한 질문"],
+      ["위임", count("delegate").toLocaleString() + "건", "agy 에 작업을 보낸 질문"],
+      ["대화", count("chat").toLocaleString() + "건", "도구 호출 없이 답한 질문"],
+      ["위임 작업", "성공 " + (t.ok || 0) + " · 실패 " + (t.fail || 0) + " · 취소 " + (t.cancel || 0), "위임 질문들이 보낸 agy 작업의 결과"],
+      ["사유 기록", rate, "사유가 남은 직접 · 위임 질문의 비율. 사유는 Claude 가 남긴 것만 보입니다."]
+    ];
+    if (s.auto > 0) out.push(["자동 진행", s.auto + "건", "/loop · 예약 실행으로 이어진 질문(구간을 나눌 수 없어 한 건으로 셉니다)"]);
+    return out;
+  }
+
+  function usageModeTableHtml(summary) {
+    var m = (summary && summary.by_mode) || {};
+    var head = '<thead><tr><th scope="col">방식</th><th scope="col" class="num">건수</th><th scope="col" class="num">소요 시간(중앙값)</th>' +
+      '<th scope="col" class="num">총 토큰(중앙값)</th><th scope="col" class="num">캐시 읽기(중앙값)</th><th scope="col" class="num">agy 토큰(중앙값)</th>' +
+      '<th scope="col" class="num">총 토큰 합</th><th scope="col" class="num">소요 시간 합</th></tr></thead>';
+    var body = ["direct", "delegate", "chat"].map(function (k) {
+      var x = m[k] || {};
+      return '<tr><th scope="row"><span class="badge usage-' + k + '">' + usageModeLabel(k) + '</span></th>' +
+        '<td class="num">' + (x.count || 0).toLocaleString() + '</td>' +
+        '<td class="num">' + usageDur(x.dur_median) + '</td>' +
+        '<td class="num">' + usageNum(x.tokens_median) + '</td>' +
+        '<td class="num">' + usageNum(x.cr_median) + '</td>' +
+        '<td class="num">' + (k === "delegate" ? usageNum(x.agy_tokens_median) : "") + '</td>' +
+        '<td class="num">' + (x.count ? usageNum(x.tokens_sum) : "-") + '</td>' +
+        '<td class="num">' + (x.count ? usageDur(x.dur_sum) : "-") + '</td></tr>';
+    }).join("");
+    return head + "<tbody>" + body + "</tbody>";
+  }
+
+  function usageModelTableHtml(list) {
+    var rows = list || [];
+    if (!rows.length) return "";
+    var head = '<thead><tr><th scope="col">모델</th><th scope="col" class="num">건수</th><th scope="col" class="num">소요 시간(중앙값)</th>' +
+      '<th scope="col" class="num">Claude 총 토큰(중앙값)</th><th scope="col" class="num">agy 토큰(중앙값)</th></tr></thead>';
+    var body = rows.map(function (x) {
+      return '<tr><th scope="row" class="usage-model">' + escapeHtml(x.combo) + '</th>' +
+        '<td class="num">' + (x.count || 0).toLocaleString() + '</td>' +
+        '<td class="num">' + usageDur(x.dur_median) + '</td>' +
+        '<td class="num">' + usageNum(x.tokens_median) + '</td>' +
+        '<td class="num">' + (x.mode === "delegate" ? usageNum(x.agy_tokens_median) : "") + '</td></tr>';
+    }).join("");
+    return head + "<tbody>" + body + "</tbody>";
+  }
+
+  // 일별 쌓은 막대(직접 · 위임 · 대화). 날짜 이름은 칸이 많으면 띄엄띄엄 붙인다.
+  function usageDailyHtml(daily) {
+    var days = daily || [];
+    var max = 0;
+    days.forEach(function (d) { max = Math.max(max, (d.direct || 0) + (d.delegate || 0) + (d.chat || 0)); });
+    if (!days.length || max === 0) return "";
+    var step = days.length <= 10 ? 1 : (days.length <= 31 ? 5 : 15);
+    var cols = days.map(function (d, i) {
+      var total = (d.direct || 0) + (d.delegate || 0) + (d.chat || 0);
+      var label = String(d.date || "").slice(5);
+      var tip = label + " · 직접 " + (d.direct || 0) + " · 위임 " + (d.delegate || 0) + " · 대화 " + (d.chat || 0);
+      var segs = [["chat", d.chat], ["delegate", d.delegate], ["direct", d.direct]].map(function (p) {
+        return p[1] > 0 ? '<span class="usage-seg usage-seg-' + p[0] + '" style="flex:' + p[1] + '"></span>' : "";
+      }).join("");
+      var showLabel = ((days.length - 1 - i) % step === 0);
+      return '<div class="usage-bar-col" title="' + escapeHtml(tip) + '">' +
+        '<div class="usage-bar-stack" style="height:' + (total > 0 ? Math.max(3, Math.round((total / max) * 100)) : 0) + '%">' + segs + '</div>' +
+        '<span class="usage-bar-label">' + (showLabel ? escapeHtml(label) : "") + '</span></div>';
+    }).join("");
+    return '<p class="usage-bars-max">가장 많은 날 ' + max + '건</p><div class="usage-bars" role="img" aria-label="일별 질문 수(직접 · 위임 · 대화)">' + cols + '</div>';
+  }
+
+  // 토큰 칸: 직접 · 대화는 Claude 총 토큰, 위임은 agy 총 토큰(Claude 가 제출 · 검토에 쓴 몫은 툴팁)
+  function usageTokenText(r) {
+    if (r.mode !== "delegate") return usageNum(r.tokens);
+    return usageNum(r.agy_tokens);
+  }
+  // 토큰 칸의 툴팁: 위임이면 agy 와 Claude(제출 · 검토에 쓴 몫)를 둘 다 밝힌다
+  function usageTokenTitle(r) {
+    if (r.mode !== "delegate") return "Claude 토큰(입력 + 캐시 쓰기 + 출력)";
+    return "agy " + usageNum(r.agy_tokens) + " · Claude " + usageNum(r.tokens) + "(제출 · 검토)";
+  }
+
+  // agy 모델 이름을 짧게(shortAgyModel 과 같다): "gemini-4-hydrogen-medium" -> "hydrogen-medium" (전체 이름은 툴팁 · 펼친 줄에)
+  function usageAgyShort(name) {
+    return shortAgyModel(String(name || "").trim());
+  }
+  // 모델 칸: 직접은 Claude 모델, 위임은 "Claude → agy 모델들"(짧은 이름, 셋 이상이면 "외 N")
+  function usageComboText(r) {
+    var claude = r.claude_model || String(r.combo || "").split(" → ")[0] || "?";
+    if (r.mode !== "delegate") return claude;
+    var agy = String(r.agy_models || "").split(",").map(function (m) { return usageAgyShort(m); }).filter(Boolean);
+    if (!agy.length) return claude + " → ?";
+    return claude + " → " + (agy.length > 2 ? agy[0] + " 외 " + (agy.length - 1) : agy.join(", "));
+  }
+
+  // 질문 행의 열고 닫음: 5초마다 표를 다시 그려도 펼친 질문은 펼친 채로 남게 키(세션 + 질문 시각)로 기억한다.
+  var usageOpenRows = {};
+  function usageRowKey(r) { return String(r.session || "") + "|" + String(r.q_ts || ""); }
+
+  // 방식 칸의 작업: 하나면 그 카드로 가는 링크, 여럿이면 "작업 N" 버튼. 누르면 행 아래에 표 전체 폭의 줄이 열린다.
+  function usageTaskButtonHtml(r, open) {
+    var ids = r.task_ids || [];
+    if (!ids.length) return "";
+    if (ids.length === 1) {
+      return '<a class="usage-task" href="#/qa?task=' + encodeURIComponent(ids[0]) + '" title="위임 카드 열기: ' + escapeHtml(ids[0]) + '">작업 1</a>';
+    }
+    return '<button type="button" class="usage-task-more" data-row="' + escapeHtml(usageRowKey(r)) + '" aria-expanded="' + (open ? "true" : "false") + '" title="작업 ' + ids.length + '개 펼치기 · 접기">작업 ' + ids.length + (open ? " ▾" : " ▸") + '</button>';
+  }
+  function usageTaskStatusLabel(st) {
+    if (!st) return "진행 중";
+    if (st === "OK") return "성공";
+    if (st === "CANCELLED") return "취소";
+    return "실패";
+  }
+  // 펼친 줄: 작업마다 "작업 1 · hydrogen-medium · 성공 · 12분" 칩(누르면 위임 카드로)
+  function usageTaskDetailHtml(r, open) {
+    var ids = r.task_ids || [];
+    if (ids.length < 2) return "";
+    var byId = {};
+    (r.tasks || []).forEach(function (t) { if (t && t.id) byId[t.id] = t; });
+    var chips = ids.map(function (id, i) {
+      var t = byId[id] || {};
+      var parts = ["작업 " + (i + 1)];
+      if (t.model) parts.push(usageAgyShort(t.model));
+      parts.push(usageTaskStatusLabel(t.status));
+      if (t.sec !== null && t.sec !== undefined) parts.push(usageDur(t.sec));
+      var cls = "usage-chip" + (t.status === "OK" ? "" : (t.status ? " usage-chip-bad" : " usage-chip-wait"));
+      return '<a class="' + cls + '" href="#/qa?task=' + encodeURIComponent(id) + '" title="' + escapeHtml(id + (t.model ? " · " + t.model : "")) + '">' + escapeHtml(parts.join(" · ")) + '</a>';
+    }).join("");
+    return '<tr class="usage-detail" data-row="' + escapeHtml(usageRowKey(r)) + '"' + (open ? "" : " hidden") + '><td colspan="8"><div class="usage-chips">' + chips + '</div></td></tr>';
+  }
+  if (typeof document !== "undefined" && document.addEventListener) {
+    document.addEventListener("click", function (e) {
+      var btn = e.target && e.target.closest ? e.target.closest(".usage-task-more") : null;
+      if (!btn) return;
+      var key = btn.getAttribute("data-row");
+      var row = btn.closest("tr");
+      var detail = row ? row.nextElementSibling : null;
+      if (!detail || !detail.classList.contains("usage-detail")) return;
+      var open = detail.hidden;
+      detail.hidden = !open;
+      if (open) { usageOpenRows[key] = true; } else { delete usageOpenRows[key]; }
+      btn.setAttribute("aria-expanded", open ? "true" : "false");
+      btn.textContent = btn.textContent.replace(/ [▸▾]$/, open ? " ▾" : " ▸");
+    });
+  }
+
+  function usageRowHtml(r) {
+    var open = Boolean(usageOpenRows[usageRowKey(r)]);
+    var tasks = usageTaskButtonHtml(r, open);
+    var project = usageProjectName(r.project);
+    var reason = r.reason
+      ? '<span class="usage-clip" title="' + escapeHtml(r.reason) + '">' + escapeHtml(r.reason) + '</span>'
+      : '<span class="usage-muted">기록 없음</span>';
+    var preview = r.preview ? escapeHtml(r.preview) : '<span class="usage-muted">(글 없음)</span>';
+    return '<tr>' +
+      '<td class="usage-when">' + usageWhen(r.q_ts) + '</td>' +
+      '<td class="usage-mode-cell"><span class="badge usage-' + escapeHtml(r.mode) + '">' + usageModeLabel(r.mode) + '</span>' +
+        (r.auto ? ' <span class="badge" title="자동 진행: /loop · 예약 실행으로 이어진 구간이라 한 건으로 묶였습니다">자동</span>' : '') + tasks + '</td>' +
+      '<td class="usage-model" title="' + escapeHtml(r.combo) + '">' + escapeHtml(usageComboText(r)) + '</td>' +
+      '<td class="num" data-label="소요">' + usageDur(r.dur_sec) + '</td>' +
+      '<td class="num" data-label="토큰" title="' + escapeHtml(usageTokenTitle(r)) + '">' + usageTokenText(r) + '</td>' +
+      '<td class="num" data-label="캐시 읽기">' + usageNum(r.cr_tokens) + '</td>' +
+      '<td class="usage-reason" data-label="사유">' + reason + '</td>' +
+      '<td class="usage-q"><span class="usage-clip usage-clip-wide" title="' + escapeHtml((r.project ? r.project + "\n" : "") + (r.preview || "")) + '">' +
+        (project ? '<span class="usage-muted">' + escapeHtml(project) + '</span> ' : '') + preview + '</span></td>' +
+      '</tr>' + usageTaskDetailHtml(r, open);
+  }
+
+  function usageRowsHtml(rows) {
+    var list = rows || [];
+    if (!list.length) return "";
+    return '<thead><tr><th scope="col">시각</th><th scope="col">방식</th><th scope="col">모델</th><th scope="col" class="num">소요 시간</th>' +
+      '<th scope="col" class="num">총 토큰</th><th scope="col" class="num">캐시 읽기</th><th scope="col">사유</th><th scope="col" class="usage-q">질문 앞부분</th></tr></thead>' +
+      '<tbody>' + list.map(usageRowHtml).join("") + '</tbody>';
+  }
+
+  // 화면 위쪽 안내 한 줄(없으면 빈 글자): 오류 > 수집 중 > 기록 없음
+  function usageMessageText(data, error) {
+    if (error) return error;
+    if (!data) return "불러오는 중입니다.";
+    var total = (data.summary && data.summary.total) || 0;
+    if (data.collecting) {
+      return total > 0 ? "대화 기록을 읽는 중입니다. 읽은 만큼 먼저 보입니다." : "대화 기록을 읽는 중입니다. 처음에는 수십 초 걸릴 수 있습니다.";
+    }
+    if (total === 0) return "이 기간에 기록된 질문이 없습니다. Claude Code 에서 질문을 한 뒤 '지금 갱신'을 누르세요.";
+    return "";
+  }
+
+  function renderUsageStats() {
+    if (!els.viewStats) return;
+    Array.prototype.forEach.call(document.querySelectorAll(".usage-day-btn"), function (btn) {
+      btn.setAttribute("aria-pressed", parseInt(btn.dataset.days, 10) === usageDays ? "true" : "false");
+    });
+    var d = usageData;
+    var msg = usageMessageText(d, usageError);
+    if (els.usageMessage) {
+      els.usageMessage.textContent = msg;
+      els.usageMessage.hidden = !msg;
+      els.usageMessage.classList.toggle("usage-message-error", !!usageError);
+    }
+    if (els.usageUpdated) {
+      els.usageUpdated.textContent = (d && d.collecting) ? "수집 중" : ((d && d.updated_at) ? usageWhen(d.updated_at) + " 갱신" : "");
+    }
+    var summary = (d && d.summary) || null;
+    if (els.usageCount) els.usageCount.textContent = "최근 " + usageDays + "일";
+    if (els.usageSummary) {
+      els.usageSummary.innerHTML = summary ? usageSummaryStats(summary).map(function (s) {
+        return '<div' + (s[2] ? ' title="' + escapeHtml(s[2]) + '"' : '') + '><dt>' + s[0] + '</dt><dd>' + escapeHtml(s[1]) + '</dd></div>';
+      }).join("") : "";
+    }
+    if (els.usageModes) els.usageModes.innerHTML = (summary && summary.total > 0) ? usageModeTableHtml(summary) : "";
+    if (els.usageModels) els.usageModels.innerHTML = d ? (usageModelTableHtml(d.by_model) || "") : "";
+    if (els.usageDaily) els.usageDaily.innerHTML = d ? (usageDailyHtml(d.daily) || '<span class="empty-hint">표시할 날이 없습니다.</span>') : "";
+    if (els.usageRows) els.usageRows.innerHTML = d ? usageRowsHtml(d.rows) : "";
+    if (els.usageRowsCount) {
+      var shown = (d && d.rows) ? d.rows.length : 0;
+      var total = summary ? summary.total : 0;
+      els.usageRowsCount.textContent = shown < total ? "최근 " + shown + "건 (전체 " + total.toLocaleString() + "건)" : shown + "건";
+    }
+    updateTopbarMeta();
+  }
+
+  // 화면 전환 때: 실측 통계로 들어오면 그리고 불러오고, 나가면 다시 묻기 예약을 푼다.
+  function enterOrLeaveUsageStats(entering) {
+    if (entering) {
+      renderUsageStats();
+      loadUsageStats(false);
+    } else if (usageTimer) {
+      clearTimeout(usageTimer);
+      usageTimer = null;
+    }
+  }
+
+  function loadUsageStats(refresh) {
+    if (usageTimer) { clearTimeout(usageTimer); usageTimer = null; }
+    var asked = usageDays;
+    return fetchJson("/api/usage-stats?days=" + asked + (refresh ? "&refresh=1" : ""))
+      .then(function (d) {
+        if (asked !== usageDays) return;
+        usageData = d;
+        usageError = "";
+      })
+      .catch(function () {
+        if (asked !== usageDays) return;
+        usageError = "실측 통계를 불러오지 못했습니다. 뷰어 서버가 켜져 있는지 확인하세요.";
+      })
+      .then(function () {
+        if (asked !== usageDays || currentNav !== "stats") return;
+        renderUsageStats();
+        // 수집 중이면 3초 뒤, 아니면 1분 뒤 다시 묻는다(화면이 열려 있는 동안만)
+        usageTimer = setTimeout(function () { loadUsageStats(false); }, (usageData && usageData.collecting) ? 3000 : 60000);
+      });
   }
 
   // ==========================================================================
@@ -4169,9 +4251,9 @@
       if (!qaItemMatchesAgy(r, currentQaAgy)) return false;
       if (model && recordModel(r) !== model) return false;
       if (status) {
-        var st = (r.status == null ? "" : String(r.status)).trim();
-        if (status === "OK" && st !== "OK") return false;
-        if (status === "ERROR" && st === "OK") return false;
+        var isOkRec = isOkStatus(r);
+        if (status === "OK" && !isOkRec) return false;
+        if (status === "ERROR" && isOkRec) return false;
       }
       if (q) {
         var hay = [recordModel(r), r.computer_name, r.task_id, r.source, r.session, r.session_id, r.question, r.answer]
@@ -4275,23 +4357,6 @@
     if (els.chipQaStatus) {
       var sVal = els.statusFilter ? els.statusFilter.value : "";
       els.chipQaStatus.textContent = "상태: " + (sVal || "전체");
-    }
-    if (els.chipQaSaved) {
-      var cSaved = sumClaudeSavedTokens(filteredQa);
-      if (cSaved.count > 0) {
-        // saved 는 절약량(+ 면 직접 했을 때보다 덜 씀)이라 증감 부호는 반대다: 절약이면 "-"(초록), 오히려 더 썼으면 "+"(주황)
-        var sign = cSaved.saved > 0 ? "-" : (cSaved.saved < 0 ? "+" : "");
-        var absVal = Math.abs(cSaved.saved);
-        var shortVal = formatTokenCompact(absVal);
-        els.chipQaSaved.style.color = cSaved.saved < 0 ? "var(--loss)" : "";   // 더 썼으면 초록 대신 주황 계열
-        els.chipQaSaved.textContent = "Claude 토큰 증감 " + sign + shortVal + " (실측 기반 " + cSaved.count.toLocaleString() + "건)";
-        els.chipQaSaved.title = "지금 보이는 위임 중 실측 연결된 " + cSaved.count.toLocaleString() + "건의 증감 합계입니다. 직접 했다면 예상보다 + 는 늘어난 것(더 소모), - 는 줄어든 것(절약)입니다.";
-      } else {
-        var sumSv = sumSavedTokens(filteredQa);
-        els.chipQaSaved.style.color = "";
-        els.chipQaSaved.textContent = sumSv.count > 0 ? savedTokensText(sumSv.saved) : "Claude 토큰 증감: -";
-        els.chipQaSaved.title = SAVED_TOKENS_NOTE + (sumSv.count > 0 ? " 지금 보이는 성공한 위임 " + sumSv.count.toLocaleString() + "건의 합계" : "");
-      }
     }
   }
 
@@ -5286,444 +5351,20 @@
     return el;
   }
 
-  // "agy 토큰 보기"를 눌러 펼친 카드의 기록 키. 5초마다 카드가 다시 그려져도 펼친 상태를 이어 가려고 기억한다.
-  var agyTokOpen = {};
-  function agyTokLabel(open) { return (open ? "agy 토큰 접기" : "agy 토큰 보기") + (open ? " ▾" : " ▸"); }
-  // "계산 정보 보기": 호출 수 · 다른 작업 제외 · 실측 여부 · 몫. 줄이 길어져 줄바꿈이 생기던 보조 정보를 펼침 메뉴로 옮겼다. 펼친 상태도 5초 갱신에서 유지한다.
-  var calcTokOpen = {};
-  function calcTokLabel(open) { return (open ? "계산 정보 접기" : "계산 정보 보기") + (open ? " ▾" : " ▸"); }
-
+  // agy 토큰 줄(총 토큰 · 입력 · 출력 · 현재 컨텍스트)을 접지 않고 실행 줄 바로 아래에 한 줄로 보인다.
+  // 다른 줄(실행 · 식별)처럼 머리말을 달아 내용이 같은 자리에서 시작한다.
   function fillTokenMeta(row, r) {
-    var tokKey = tokenRecordKey(r);
-    var wasExpanded = Boolean(agyTokOpen[tokKey]);
-    var existingBtn = row.querySelector(".btn-toggle-agy-tok");
-    if (existingBtn && existingBtn.getAttribute("aria-expanded") === "true") {
-      wasExpanded = true;
-    }
-
     while (row.firstChild) { row.removeChild(row.firstChild); }
-
-    var claudeLine = document.createElement("div");
-    claudeLine.className = "token-claude-line";
-
-    var claudeTimeLine = null;
-    var calcItems = [];   // 펼침 메뉴("계산 정보")에 들어갈 보조 항목
-
-    if (r && r.claude) {
-      var nTasks = r.claude.tasks_in_turn || 1;
-      if (nTasks >= 2) {
-        var turnEstStr = "";
-        var estTurn = r.claude.est_direct_turn != null ? r.claude.est_direct_turn : r.claude.est_direct_adj;
-        if (estTurn != null) {
-          turnEstStr = "직접 했다면 예상은 턴 전체 " + formatTokenK(estTurn, false);
-          if (r.claude.est_direct != null && r.claude.est_direct !== estTurn) {
-            turnEstStr += "(예상 " + formatTokenK(r.claude.est_direct, false) + "을 보정 비율로 나눔)";
-          }
-          turnEstStr += ", ";
-        }
-        var turnUsedVal = r.claude.used_turn != null ? r.claude.used_turn : r.claude.used;
-        var turnUsedStr = "턴에 Claude가 실제 쓴 토큰은 " + formatTokenK(turnUsedVal != null ? turnUsedVal : 0, false);
-        var sharePctVal = r.claude.share != null ? (r.claude.share * 100).toFixed(1) : "0.0";
-        claudeLine.title = "이 턴에 위임 " + nTasks + "건을 함께 보냈습니다. " + turnEstStr + turnUsedStr + "이며 이 카드는 agy 작업량 비율 " + sharePctVal + "% 만큼 가집니다.";
-      } else {
-        claudeLine.title = "그 턴 전체를 위임들의 agy 작업량 비율로 나눈 값입니다";
-      }
-
-      var head = buildTokItem("토큰", "", "", "Claude 가 쓴 토큰입니다. agy 가 쓴 토큰은 오른쪽 버튼으로 봅니다.", "tok-claude-head");
-      claudeLine.appendChild(head);
-
-      var estDirectVal = r.claude.est_direct_share != null ? r.claude.est_direct_share : (nTasks === 1 ? r.claude.est_direct_adj : r.claude.est_direct);
-      var estVal = estDirectVal != null ? formatTokenK(estDirectVal, false) : "—";
-      claudeLine.appendChild(buildTokItem("직접", estVal, "", "직접 했다면 들었을 Claude 토큰 예상(지난 기록으로 보정한 추정값)", "tok-col"));
-
-      var usedVal = r.claude.used != null ? formatTokenK(r.claude.used, false) : "—";
-      var sv = r.claude.saved;
-      var estDelShare = r.claude.est_delegate_share;
-      if (estDelShare != null) {
-        claudeLine.appendChild(buildTokItem("위임", formatTokenK(estDelShare, false), "", "위임했을 때 들 것으로 예상한 Claude 토큰(지난 기록으로 보정한 추정값)", "tok-col"));
-      }
-      claudeLine.appendChild(buildTokItem("실제", usedVal, "", "위임하고 Claude 가 실제로 쓴 토큰(위임과 무관한 호출은 뺀 값)", "tok-col"));
-      // 식: 실제 - 직접 = 변화. + 는 직접 했을 때보다 늘어남(주황), - 는 줄어듦(절약, 초록)
-      if (estDirectVal != null && r.claude.used != null && sv != null) {
-        var tokDelta = r.claude.used - estDirectVal;
-        var fx = document.createElement("span");   // 식은 한 덩어리: 줄이 모자라면 식 전체가 다음 줄로 넘어간다
-        fx.className = "tok-formula";
-        fx.appendChild(buildTokItem("", "=>", "", "", "tok-op tok-arrow"));
-        fx.appendChild(buildTokItem("", usedVal, "", "", "tok-f-a"));
-        fx.appendChild(buildTokItem("", "-", "", "", "tok-op"));
-        fx.appendChild(buildTokItem("", estVal, "", "", "tok-f-b"));
-        fx.appendChild(buildTokItem("", "=", "", "", "tok-op"));
-        var deltaTitle = "실제 " + usedVal + " - 직접 " + estVal + " = " + (tokDelta > 0 ? "+" : tokDelta < 0 ? "-" : "+") + formatTokenK(Math.abs(tokDelta), false) +
-          "\n+ 는 직접 했을 때보다 토큰이 늘어난 것, - 는 줄어든 것(절약)입니다. 직접 했다면 예상은 지난 기록으로 보정한 추정값입니다.";
-        if (tokDelta > 0) {
-          fx.appendChild(buildTokItem("", "+" + formatTokenK(tokDelta, false), "", deltaTitle, "saved-err tok-f-r"));
-        } else if (tokDelta < 0) {
-          fx.appendChild(buildTokItem("", "-" + formatTokenK(-tokDelta, false), "", deltaTitle, "saved-ok tok-f-r"));
-        } else {
-          fx.appendChild(buildTokItem("", "+0.0k", "", deltaTitle, "tok-dim tok-f-r"));
-        }
-        claudeLine.appendChild(fx);
-      } else if (sv == null) {
-        claudeLine.appendChild(buildTokItem("", "—", "", "", "saved-none"));
-      }
-
-      var callsCount = (r.claude.calls_related != null ? r.claude.calls_related : (r.claude.calls || 0));
-      var callsText = "호출 " + callsCount + "회";
-      calcItems.push(buildTokItem("", callsText, "", "위임과 관련된 Claude 도구 호출 수입니다(위임과 무관한 호출은 뺀 값).", "tok-aux"));
-
-      if (r.claude.other_calls && r.claude.other_calls > 0) {
-        var otherTokK = (r.claude.other_tokens && r.claude.other_tokens > 0) ? formatTokenK(r.claude.other_tokens, true) : "+0.0k";
-        var excludedText = "다른 작업 " + r.claude.other_calls + "회·" + otherTokK + " 제외";
-        var excludedTitle = "이 턴에서 위임과 무관한 호출은 위임 비용에서 뺐습니다";
-        calcItems.push(buildTokItem("", excludedText, "", excludedTitle, "tok-aux tok-other-excluded"));
-      }
-
-      var basisText = r.claude.basis === "measured" ? "실측" : "일부 추정";
-      calcItems.push(buildTokItem("", basisText, "", r.claude.basis === "measured" ? "Claude 대화 기록으로 실제로 잰 값입니다." : "답변 끝의 예상이 없어 일부는 추정한 값입니다.", "tok-aux"));
-
-      if (nTasks >= 2 && r.claude.share != null) {
-        var pctText = "몫 " + (r.claude.share * 100).toFixed(1) + "%";
-        calcItems.push(buildTokItem("", pctText, "", "한 턴에 위임을 여러 건 보냈을 때 이 위임이 가진 몫입니다(agy 작업량 비율).", "tok-aux token-claude-share"));
-      }
-
-      // F2 절: 위임 카드 시간 줄 (시간 · 직접 했다면 예상 A · 위임 예상 B · agy 처리 실제 C)
-      // Claude 의 시간 예상(est_time_delegate)이 있을 때만 줄을 보인다
-      var estDelTime = r.claude.est_time_delegate_share != null ? r.claude.est_time_delegate_share : (r.claude.est_time_delegate != null ? r.claude.est_time_delegate : null);
-      if (estDelTime != null || r.claude.anomaly) {
-        var estDirTime = r.claude.est_time_direct_share != null ? r.claude.est_time_direct_share : (r.claude.est_time_direct != null ? r.claude.est_time_direct : null);
-        var agyTime = r.elapsed_sec != null ? r.elapsed_sec : (r.claude.elapsed_sec != null ? r.claude.elapsed_sec : null);
-        // 실제 = 위임에 걸린 전체 시간(agy 처리 + Claude 쪽). 서버가 못 주면 agy 처리 시간만 쓴다.
-        var actTime = r.claude.total_sec != null ? r.claude.total_sec : agyTime;
-        var actTip = r.claude.total_sec != null
-          ? "위임에 실제로 걸린 시간(agy 처리 " + (agyTime != null ? formatTimeKo(agyTime) : "—") + " / Claude 쪽 " + (r.claude.claude_sec != null ? formatTimeKo(r.claude.claude_sec) : "—") + " 를 더한 값)"
-          : "agy 가 실제로 처리한 시간(Claude 쪽 시간은 아직 모름)";
-        if (agyTime != null) { calcItems.push(buildTokItem("", "agy 처리 " + formatTimeKo(agyTime), "", "agy 가 작업을 처리한 시간입니다.", "tok-aux")); }
-        if (r.claude.claude_sec != null) { calcItems.push(buildTokItem("", "Claude 쪽 " + formatTimeKo(r.claude.claude_sec), "", "그 턴에서 위임에 쓴 Claude 시간(턴 시간 × 위임 관련 호출 비율)입니다. agy 를 기다린 시간이 일부 들어 있을 수 있어 합산한 실제 시간은 그만큼 겹쳐 센 근사값입니다.", "tok-aux")); }
-
-        claudeTimeLine = document.createElement("div");
-        claudeTimeLine.className = "token-claude-line token-claude-time-line";
-        claudeTimeLine.appendChild(buildTokItem("시간", "", "", "", "tok-claude-head"));
-        if (estDirTime != null) {
-          claudeTimeLine.appendChild(buildTokItem("직접", formatTimeKo(estDirTime), "", "직접 했다면 걸렸을 시간 예상", "tok-col"));
-        }
-        if (estDelTime != null) {
-          claudeTimeLine.appendChild(buildTokItem("위임", formatTimeKo(estDelTime), "", "위임했을 때 걸릴 시간 예상(agy 처리 + Claude 가 보내고 검토하는 시간)", "tok-col"));
-        }
-        if (actTime != null) {
-          claudeTimeLine.appendChild(buildTokItem("실제", formatTimeKo(actTime), "", actTip, "tok-col"));
-        }
-        // 식: 실제 - 직접 = 변화. + 는 직접 했을 때보다 오래 걸림(주황), - 는 짧아짐(초록)
-        if (estDirTime != null && actTime != null) {
-          var timeDelta = actTime - estDirTime;
-          var tfx = document.createElement("span");
-          tfx.className = "tok-formula";
-          tfx.appendChild(buildTokItem("", "=>", "", "", "tok-op tok-arrow"));
-          tfx.appendChild(buildTokItem("", formatTimeKo(actTime), "", "", "tok-f-a"));
-          tfx.appendChild(buildTokItem("", "-", "", "", "tok-op"));
-          tfx.appendChild(buildTokItem("", formatTimeKo(estDirTime), "", "", "tok-f-b"));
-          tfx.appendChild(buildTokItem("", "=", "", "", "tok-op"));
-          var timeTitle = "실제 " + formatTimeKo(actTime) + " - 직접 " + formatTimeKo(estDirTime) + " = " + (timeDelta < 0 ? "-" : "+") + formatTimeKo(Math.abs(timeDelta)) +
-            "\n+ 는 직접 했을 때보다 오래 걸린 것, - 는 짧아진 것입니다.";
-          if (Math.abs(timeDelta) < 5) {
-            tfx.appendChild(buildTokItem("", "+0초", "", timeTitle, "tok-dim tok-f-r"));
-          } else if (timeDelta > 0) {
-            tfx.appendChild(buildTokItem("", "+" + formatTimeKo(timeDelta), "", timeTitle, "saved-err tok-f-r"));
-          } else {
-            tfx.appendChild(buildTokItem("", "-" + formatTimeKo(-timeDelta), "", timeTitle, "saved-ok tok-f-r"));
-          }
-          claudeTimeLine.appendChild(tfx);
-        }
-        if (r.claude.anomaly) {
-          var anomMap = {
-            agy_slow: "agy 지연",
-            scope: "예상 범위 불일치",
-            weak_estimate: "근거 약한 예상",
-            unknown: "원인 모름"
-          };
-          var anomText = anomMap[r.claude.anomaly] || r.claude.anomaly;
-          var anomSpan = document.createElement("span");
-          anomSpan.className = "anomaly-pill";
-          anomSpan.textContent = "이상치 · " + anomText;
-          anomSpan.title = "예상과 실제가 최근 같은 경로 턴들보다 크게 다릅니다. 보정 식은 이 건에 흔들리지 않습니다.";
-          var calcBtnInTime = claudeTimeLine.querySelector(".btn-toggle-calc");
-          if (calcBtnInTime) {
-            claudeTimeLine.insertBefore(anomSpan, calcBtnInTime);
-          } else {
-            claudeTimeLine.appendChild(anomSpan);
-          }
-        }
-      }
-    } else {
-      // 아직 Claude 쪽 사용량이 연결되지 않은 카드(끝난 직후, 수집기가 돌기 전): 완성된 카드와 같은 두 줄(토큰 / 시간) 구조를 두고
-      // 아직 모르는 값은 — 로 둔다. 수집기가 돌아 연결되면 같은 자리에 값이 채워진다. agy 작업량으로 어림한 증감이 있으면 결과 자리에 흐리게 보인다.
-      var waitTip = "아직 이 위임을 보낸 Claude 쪽 사용량과 연결되지 않았습니다. 수집기가 돈 뒤(보통 몇 분 안)에 채워집니다.";
-      claudeLine.appendChild(buildTokItem("토큰", "", "", "Claude 가 쓴 토큰입니다. agy 가 쓴 토큰은 오른쪽 버튼으로 봅니다.", "tok-claude-head"));
-      // 위임을 보내기 전에 record-estimate 로 기록한 예상(서버가 claude_est 로 붙인다)은 수집기가 안 돌았어도 보인다. 진행 중 카드와 같은 값이다.
-      var ce = r && r.claude_est ? r.claude_est : null;
-      var ceDirTok = ce && ce.est_direct != null && !isNaN(ce.est_direct) ? formatTokenK(ce.est_direct, false) : "—";
-      var ceDelTok = ce && ce.est_delegate != null && !isNaN(ce.est_delegate) ? formatTokenK(ce.est_delegate, false) : "—";
-      var ceTip = "결정 시점에 기록한 예상(수집 전 값)";
-      claudeLine.appendChild(buildTokItem("직접", ceDirTok, "", ceDirTok === "—" ? waitTip : ceTip, "tok-col" + (ceDirTok === "—" ? " tok-dim" : "")));
-      claudeLine.appendChild(buildTokItem("위임", ceDelTok, "", ceDelTok === "—" ? waitTip : ceTip, "tok-col" + (ceDelTok === "—" ? " tok-dim" : "")));
-      claudeLine.appendChild(buildTokItem("실제", "—", "", waitTip, "tok-col tok-dim"));
-      var fxU = document.createElement("span");
-      fxU.className = "tok-formula";
-      fxU.appendChild(buildTokItem("", "=>", "", "", "tok-op tok-arrow"));
-      fxU.appendChild(buildTokItem("", "—", "", "", "tok-f-a tok-dim"));
-      fxU.appendChild(buildTokItem("", "-", "", "", "tok-op"));
-      fxU.appendChild(buildTokItem("", ceDirTok, "", "", "tok-f-b" + (ceDirTok === "—" ? " tok-dim" : "")));
-      fxU.appendChild(buildTokItem("", "=", "", "", "tok-op"));
-      var svOld = savedTokensOf(r);
-      if (svOld) {
-        fxU.appendChild(buildTokItem("", "≈ " + savedDeltaShort(svOld.saved), "", "agy 작업량으로 어림한 증감(집계 전 임시값, 예상). " + savedTokensDetail(svOld), "tok-dim tok-f-r"));
-      } else {
-        fxU.appendChild(buildTokItem("", "집계 전", "", waitTip, "tok-dim tok-f-r"));
-      }
-      claudeLine.appendChild(fxU);
-
-      claudeTimeLine = document.createElement("div");
-      claudeTimeLine.className = "token-claude-line token-claude-time-line";
-      claudeTimeLine.appendChild(buildTokItem("시간", "", "", "", "tok-claude-head"));
-      var actU = (r && r.elapsed_sec != null && !isNaN(Number(r.elapsed_sec))) ? formatTimeKo(Number(r.elapsed_sec)) : "—";
-      var ceDirT = ce && ce.est_time_direct != null && !isNaN(ce.est_time_direct) ? formatTimeKo(ce.est_time_direct) : "—";
-      var ceDelT = ce && ce.est_time_delegate != null && !isNaN(ce.est_time_delegate) ? formatTimeKo(ce.est_time_delegate) : "—";
-      claudeTimeLine.appendChild(buildTokItem("직접", ceDirT, "", ceDirT === "—" ? waitTip : ceTip, "tok-col" + (ceDirT === "—" ? " tok-dim" : "")));
-      claudeTimeLine.appendChild(buildTokItem("위임", ceDelT, "", ceDelT === "—" ? waitTip : ceTip, "tok-col" + (ceDelT === "—" ? " tok-dim" : "")));
-      claudeTimeLine.appendChild(buildTokItem("실제", actU, "", "agy 가 실제로 처리한 시간", "tok-col"));
-      var tfxU = document.createElement("span");
-      tfxU.className = "tok-formula";
-      tfxU.appendChild(buildTokItem("", "=>", "", "", "tok-op tok-arrow"));
-      tfxU.appendChild(buildTokItem("", actU, "", "", "tok-f-a"));
-      tfxU.appendChild(buildTokItem("", "-", "", "", "tok-op"));
-      tfxU.appendChild(buildTokItem("", ceDirT, "", "", "tok-f-b" + (ceDirT === "—" ? " tok-dim" : "")));
-      tfxU.appendChild(buildTokItem("", "=", "", "", "tok-op"));
-      // 결과: agy 처리 시간 - 직접 예상 시간으로 지금 계산할 수 있으면 그 값(수집 뒤 Claude 쪽 시간이 더해져 바뀐다), 아니면 집계 전
-      if (r && r.elapsed_sec != null && !isNaN(Number(r.elapsed_sec)) && ce && ce.est_time_direct != null && !isNaN(ce.est_time_direct)) {
-        var tdU = Math.round(Number(r.elapsed_sec) - ce.est_time_direct);
-        var tdTip = "agy 처리 시간 " + actU + " - 직접 예상 " + ceDirT + " (집계 전 임시값: 수집되면 Claude 쪽 시간이 더해진 실제 시간으로 바뀝니다)";
-        if (tdU > 0) { tfxU.appendChild(buildTokItem("", "+" + formatTimeKo(tdU), "", tdTip, "saved-err tok-f-r")); }
-        else if (tdU < 0) { tfxU.appendChild(buildTokItem("", "-" + formatTimeKo(-tdU), "", tdTip, "saved-ok tok-f-r")); }
-        else { tfxU.appendChild(buildTokItem("", "+0초", "", tdTip, "tok-dim tok-f-r")); }
-      } else {
-        tfxU.appendChild(buildTokItem("", "집계 전", "", waitTip, "tok-dim tok-f-r"));
-      }
-      claudeTimeLine.appendChild(tfxU);
-    }
-
-    var calcDetails = null;
-    if (calcItems.length > 0) {
-      var wasCalcExpanded = Boolean(calcTokOpen[tokKey]);
-      calcDetails = document.createElement("div");
-      calcDetails.className = "token-agy-details token-calc-details";
-      calcDetails.style.display = wasCalcExpanded ? "flex" : "none";
-      calcDetails.setAttribute("aria-hidden", wasCalcExpanded ? "false" : "true");
-      calcItems.forEach(function (it) { calcDetails.appendChild(it); });
-
-      var calcBtn = document.createElement("button");
-      calcBtn.type = "button";
-      calcBtn.className = "btn-toggle-agy-tok btn-toggle-calc";
-      calcBtn.textContent = calcTokLabel(wasCalcExpanded);
-      calcBtn.setAttribute("aria-expanded", wasCalcExpanded ? "true" : "false");
-      calcBtn.title = "계산에 쓴 정보(호출 수 · 다른 작업 제외 · 실측 여부 · 몫) 펼치기/접기";
-      calcBtn.addEventListener("click", function (e) {
-        e.stopPropagation();
-        var next = this.getAttribute("aria-expanded") !== "true";
-        this.setAttribute("aria-expanded", next ? "true" : "false");
-        this.textContent = calcTokLabel(next);
-        if (next) { calcTokOpen[tokKey] = true; } else { delete calcTokOpen[tokKey]; }
-        calcDetails.style.display = next ? "flex" : "none";
-        calcDetails.setAttribute("aria-hidden", next ? "false" : "true");
-      });
-      claudeLine.appendChild(calcBtn);
-    }
-
-    var agyDetails = document.createElement("div");
-    agyDetails.className = "token-agy-details";
-    agyDetails.style.display = wasExpanded ? "flex" : "none";
-    agyDetails.setAttribute("aria-hidden", wasExpanded ? "false" : "true");
-
-    var agyItems = tokenMetaItems(r);
-    agyItems.forEach(function (it) {
-      agyDetails.appendChild(buildTokItem(it.label, it.value, it.sub, it.title, it.cls));
+    var items = tokenMetaItems(r);
+    if (items.length === 0) { return; }
+    row.appendChild(metaHead("토큰"));
+    items.forEach(function (it) {
+      row.appendChild(buildTokItem(it.label, it.value, it.sub, it.title, it.cls));
     });
-
-    if (agyItems.length > 0) {
-      var toggleBtn = document.createElement("button");
-      toggleBtn.type = "button";
-      toggleBtn.className = "btn-toggle-agy-tok";
-      toggleBtn.textContent = agyTokLabel(wasExpanded);
-      toggleBtn.setAttribute("aria-expanded", wasExpanded ? "true" : "false");
-      toggleBtn.title = "agy 세부 토큰(총 토큰·입력·출력·컨텍스트) 펼치기/접기";
-
-      toggleBtn.addEventListener("click", function (e) {
-        e.stopPropagation();
-        var exp = this.getAttribute("aria-expanded") === "true";
-        var next = !exp;
-        this.setAttribute("aria-expanded", next ? "true" : "false");
-        this.textContent = agyTokLabel(next);
-        if (next) { agyTokOpen[tokKey] = true; } else { delete agyTokOpen[tokKey]; }
-        agyDetails.style.display = next ? "flex" : "none";
-        agyDetails.setAttribute("aria-hidden", next ? "false" : "true");
-      });
-
-      claudeLine.appendChild(toggleBtn);
-    }
-
-    row.appendChild(claudeLine);
-    if (claudeTimeLine) {
-      row.appendChild(claudeTimeLine);
-    }
-    if (calcDetails) {
-      row.appendChild(calcDetails);
-    }
-    row.appendChild(agyDetails);
-  }
-
-  // 진행 중 카드 시간 줄의 결과: (지금 - 시작) - 직접 예상 시간을 부호와 색으로 다시 그린다. 1초마다 호출된다.
-  function paintTimeDelta(el, nowMs) {
-    var start = Number(el.getAttribute("data-start"));
-    var base = Number(el.getAttribute("data-base"));
-    var d = Math.round((nowMs - start) / 1000 - base);   // 초 단위로 반올림해 부호와 값이 흔들리지 않게 한다
-    var abs = Math.abs(d);
-    var text = abs < 1 ? "+0초" : (d < 0 ? "-" : "+") + formatDuration(abs);
-    var v = el.querySelector(".tok-val");
-    if (v) { v.textContent = text; }
-    el.classList.remove("saved-ok", "saved-err", "tok-dim");
-    el.classList.add(abs < 1 ? "tok-dim" : (d < 0 ? "saved-ok" : "saved-err"));
-  }
-
-  // 진행 중·대기 중 카드의 토큰 / 시간 줄. 끝난 카드(fillTokenMeta)와 같은 칸(직접 / 위임 / 실제 => 식)을 두고,
-  // 아직 모르는 값은 — 로 둔다. 실제 토큰은 지금까지 위임에 쓴 Claude 토큰, 실제 시간은 실행 경과(1초마다 늘어남)이다.
-  // 직접 · 위임 예상은 위임을 보내기 전에 정해 record-estimate 로 기록한 값(claude_live.est_*)이라 진행 중에도 보인다. 기록이 없을 때만 —.
-  function buildPendingTokenMeta(p, startMs, etaSec) {
-    var row = document.createElement("div");
-    row.className = "meta token-meta token-meta-pending";
-    var cl = p && p.claude_live ? p.claude_live : null;
-    var later = "작업이 끝나고 수집기가 돈 뒤에 채워집니다(위임을 보낸 턴의 답변 끝 예상으로 계산).";
-
-    var line = document.createElement("div");
-    line.className = "token-claude-line";
-    line.appendChild(buildTokItem("토큰", "", "", "Claude 가 쓴 토큰입니다. agy 가 쓴 토큰은 끝난 뒤 버튼으로 봅니다.", "tok-claude-head"));
-    var dirTok = cl && cl.est_direct != null && !isNaN(cl.est_direct) ? formatTokenK(cl.est_direct, false) : "—";
-    line.appendChild(buildTokItem("직접", dirTok, "", dirTok === "—" ? later : "직접 처리했을 때 들 것으로 예상한 Claude 토큰(결정 시점에 기록한 값)", "tok-col" + (dirTok === "—" ? " tok-dim" : "")));
-    var delTok = cl && cl.est_delegate != null && !isNaN(cl.est_delegate) ? formatTokenK(cl.est_delegate, false) : "—";
-    line.appendChild(buildTokItem("위임", delTok, "", delTok === "—" ? later : "위임했을 때 들 것으로 예상한 Claude 토큰", "tok-col" + (delTok === "—" ? " tok-dim" : "")));
-    var usedTok = cl && cl.used != null && !isNaN(cl.used) ? formatTokenK(cl.used, false) : "—";
-    var usedTip = cl ? formatClaudeLiveMeta(cl) : null;
-    line.appendChild(buildTokItem("실제", usedTok, "", usedTip ? usedTip.title : "아직 이 위임을 보낸 Claude 쪽 사용량과 연결되지 않았습니다.", "tok-col" + (usedTok === "—" ? " tok-dim" : "")));
-    var fx = document.createElement("span");
-    fx.className = "tok-formula";
-    fx.appendChild(buildTokItem("", "=>", "", "", "tok-op tok-arrow"));
-    fx.appendChild(buildTokItem("", usedTok, "", "", "tok-f-a" + (usedTok === "—" ? " tok-dim" : "")));
-    fx.appendChild(buildTokItem("", "-", "", "", "tok-op"));
-    fx.appendChild(buildTokItem("", dirTok, "", "", "tok-f-b" + (dirTok === "—" ? " tok-dim" : "")));
-    fx.appendChild(buildTokItem("", "=", "", "", "tok-op"));
-    // 결과는 "진행 중" 글자가 아니라 지금까지 쓴 토큰 - 직접 예상으로 그 시점마다 계산한다(5초마다 새로 그릴 때 갱신).
-    var tokLive = cl && cl.used != null && !isNaN(cl.used) && cl.est_direct != null && !isNaN(cl.est_direct) ? cl.used - cl.est_direct : null;
-    if (tokLive == null) {
-      fx.appendChild(buildTokItem("", "—", "", "직접 예상이나 지금까지 쓴 토큰을 몰라 계산하지 못합니다.", "tok-dim tok-f-r"));
-    } else {
-      var tokLiveTitle = "지금까지 실제 " + usedTok + " - 직접 " + dirTok + " = " + (tokLive < 0 ? "-" : "+") + formatTokenK(Math.abs(tokLive), false) +
-        "\n진행 중이라 지금까지 쓴 양으로 계산한 값입니다(5초마다 갱신). + 는 직접 예상보다 더 쓴 것, - 는 아직 덜 쓴 것입니다.";
-      if (tokLive > 0) { fx.appendChild(buildTokItem("", "+" + formatTokenK(tokLive, false), "", tokLiveTitle, "saved-err tok-f-r")); }
-      else if (tokLive < 0) { fx.appendChild(buildTokItem("", "-" + formatTokenK(-tokLive, false), "", tokLiveTitle, "saved-ok tok-f-r")); }
-      else { fx.appendChild(buildTokItem("", "+0.0k", "", tokLiveTitle, "tok-dim tok-f-r")); }
-    }
-    line.appendChild(fx);
-    row.appendChild(line);
-
-    var tl = document.createElement("div");
-    tl.className = "token-claude-line token-claude-time-line";
-    tl.appendChild(buildTokItem("시간", "", "", "", "tok-claude-head"));
-    var dirTime = cl && cl.est_time_direct != null && !isNaN(cl.est_time_direct) ? formatDuration(cl.est_time_direct) : "—";
-    tl.appendChild(buildTokItem("직접", dirTime, "", dirTime === "—" ? later : "직접 처리했을 때 걸릴 것으로 예상한 시간(결정 시점에 기록한 값)", "tok-col" + (dirTime === "—" ? " tok-dim" : "")));
-    var recDelTime = cl && cl.est_time_delegate != null && !isNaN(cl.est_time_delegate) && cl.est_time_delegate > 0;
-    var delTime = recDelTime ? formatDuration(cl.est_time_delegate) : (etaSec != null && etaSec > 0 ? formatDuration(etaSec) : "—");   // 실행 줄의 "예상 [..]" 과 같은 표기
-    tl.appendChild(buildTokItem("위임", delTime, "", delTime === "—" ? later : (recDelTime ? "위임했을 때 걸릴 것으로 예상한 시간(결정 시점에 기록한 값)" : "처음 예정 시간(같은 모델로 끝난 최근 위임의 보통 실행 시간)"), "tok-col" + (delTime === "—" ? " tok-dim" : "")));
-    var liveAct = function (cls) {
-      var it = buildTokItem(cls ? "" : "실제", startMs != null ? formatDuration((Date.now() - startMs) / 1000) : "—", "", "실행 경과 시간(1초마다 갱신). 끝나면 agy 처리 + Claude 쪽 시간으로 바뀝니다.", cls || "tok-col");
-      if (startMs != null) {
-        it.classList.add("live-elapsed");
-        it.setAttribute("data-start", String(startMs));
-        it.setAttribute("data-label-prefix", "");
-        var v = it.querySelector(".tok-val");
-        if (v) { v.classList.add("mv"); }
-      } else {
-        it.classList.add("tok-dim");
-      }
-      return it;
-    };
-    tl.appendChild(liveAct(""));
-    var tfx = document.createElement("span");
-    tfx.className = "tok-formula";
-    tfx.appendChild(buildTokItem("", "=>", "", "", "tok-op tok-arrow"));
-    tfx.appendChild(liveAct("tok-f-a"));
-    tfx.appendChild(buildTokItem("", "-", "", "", "tok-op"));
-    tfx.appendChild(buildTokItem("", dirTime, "", "", "tok-f-b" + (dirTime === "—" ? " tok-dim" : "")));
-    tfx.appendChild(buildTokItem("", "=", "", "", "tok-op"));
-    // 결과는 1초마다 갱신되는 값이다: 지금까지 흐른 실행 시간 - 직접 예상 시간(live-time-delta, paintTimeDelta 가 다시 그린다).
-    var recDirTime = cl && cl.est_time_direct != null && !isNaN(cl.est_time_direct);
-    if (startMs != null && recDirTime) {
-      var tr = buildTokItem("", "", "", "지금까지 흐른 실행 시간 - 직접 예상 시간(1초마다 갱신). + 는 직접 예상보다 더 걸린 것, - 는 아직 덜 걸린 것입니다.", "tok-f-r live-time-delta");
-      tr.setAttribute("data-start", String(startMs));
-      tr.setAttribute("data-base", String(cl.est_time_direct));
-      paintTimeDelta(tr, Date.now());
-      tfx.appendChild(tr);
-    } else {
-      tfx.appendChild(buildTokItem("", "—", "", "직접 예상 시간이나 시작 시각을 몰라 계산하지 못합니다.", "tok-dim tok-f-r"));
-    }
-    tl.appendChild(tfx);
-
-    // 끝난 카드와 같은 두 버튼(계산 정보 보기 / agy 토큰 보기). 진행 중에 아는 것만 계산 정보에 넣고, agy 토큰은 끝나야 알 수 있어 눌리지 않게 둔다.
-    var calcItems = [];
-    if (cl && cl.calls_related != null) { calcItems.push(buildTokItem("", "호출 " + cl.calls_related + "회", "", "지금까지 위임과 관련된 Claude 도구 호출 수입니다.", "tok-aux")); }
-    else if (cl && cl.calls != null) { calcItems.push(buildTokItem("", "호출 " + cl.calls + "회", "", "지금까지 위임과 관련된 Claude 도구 호출 수입니다.", "tok-aux")); }
-    if (cl && cl.other_calls > 0) {
-      var oTok = (cl.other_tokens != null && cl.other_tokens > 0) ? formatTokenK(cl.other_tokens, true) : "+0.0k";
-      calcItems.push(buildTokItem("", "다른 작업 " + cl.other_calls + "회·" + oTok + " 제외", "", "이 턴에서 위임과 무관한 호출은 위임 비용에서 뺐습니다", "tok-aux tok-other-excluded"));
-    }
-    calcItems.push(buildTokItem("", "진행 중", "", "끝나면 실측 여부와 몫이 채워집니다.", "tok-aux"));
-    var calcKey = "p:" + (p.task_id || "");
-    var calcOpen = Boolean(calcTokOpen[calcKey]);
-    var calcDetails = document.createElement("div");
-    calcDetails.className = "token-agy-details token-calc-details";
-    calcDetails.style.display = calcOpen ? "flex" : "none";
-    calcDetails.setAttribute("aria-hidden", calcOpen ? "false" : "true");
-    calcItems.forEach(function (it) { calcDetails.appendChild(it); });
-    var calcBtn = document.createElement("button");
-    calcBtn.type = "button";
-    calcBtn.className = "btn-toggle-agy-tok btn-toggle-calc";
-    calcBtn.textContent = calcTokLabel(calcOpen);
-    calcBtn.setAttribute("aria-expanded", calcOpen ? "true" : "false");
-    calcBtn.title = "계산에 쓴 정보(호출 수 · 다른 작업 제외) 펼치기/접기";
-    calcBtn.addEventListener("click", function (e) {
-      e.stopPropagation();
-      var next = this.getAttribute("aria-expanded") !== "true";
-      this.setAttribute("aria-expanded", next ? "true" : "false");
-      this.textContent = calcTokLabel(next);
-      if (next) { calcTokOpen[calcKey] = true; } else { delete calcTokOpen[calcKey]; }
-      calcDetails.style.display = next ? "flex" : "none";
-      calcDetails.setAttribute("aria-hidden", next ? "false" : "true");
-    });
-    line.appendChild(calcBtn);
-    var agyBtn = document.createElement("button");
-    agyBtn.type = "button";
-    agyBtn.className = "btn-toggle-agy-tok";
-    agyBtn.textContent = agyTokLabel(false);
-    agyBtn.disabled = true;
-    agyBtn.title = "agy 가 쓴 토큰은 작업이 끝나면 볼 수 있습니다.";
-    line.appendChild(agyBtn);
-
-    row.appendChild(tl);
-    row.appendChild(calcDetails);
-    return row;
   }
 
   function buildTokenMeta(r) {
-    var hasClaude = Boolean(r && r.claude);
-    var hasAgy = Boolean(Number(r && r.total_tokens));
-    var hasSaved = Boolean(savedTokensOf(r));
-    if (!hasClaude && !hasAgy && !hasSaved) return null;
+    if (!Number(r && r.total_tokens)) return null;
     var row = document.createElement("div");
     row.className = "meta token-meta";
     row.setAttribute("data-token-task", tokenRecordKey(r));
@@ -6385,8 +6026,6 @@
         if (lp.steps.length !== before || (res && res.reset)) {
           renderProcessDialog();
           updateProcessButtons();
-          refreshLiveSaved();
-          requestSavedFileSizes([{ status: "OK", process: lp.steps }]).then(function (got) { if (got) { refreshLiveSaved(); } });
         }
       })
       .catch(function () {})
@@ -6436,7 +6075,7 @@
   }
 
   // ---- 과정 번역("한글로 번역"). agy 의 생각·설명·라벨은 영어로 나올 때가 많다. 창에서 버튼을 눌렀을 때만 서버
-  // (/api/delegate/translate)가 agy(gemini-3.8-flash-low)로 옮기고, 결과는 서버에 캐시돼서 다음부터는 바로 보인다.
+  // (/api/delegate/translate)가 agy(quick 단계, 기본 gemini-4-hydrogen-low)로 옮기고, 결과는 서버에 캐시돼서 다음부터는 바로 보인다.
   var procTr = {};        // 대화 id -> { state: running|done|none|error|unavailable, message, items(단계 순번 -> label/think/say), model }
   var procTrView = {};    // 대화 id -> "orig" | "agy" | "browser": 사용자가 고른 보기(고르지 않았으면 있는 번역본)
   var procTrTimer = null;
@@ -6538,7 +6177,7 @@
     if (aState === "running") {
       out.push('<button type="button" class="proc-tr-btn" disabled>agy 번역 중… (30초~1분)</button>');
     } else if (aState !== "unavailable" && aState !== "done" && needA) {
-      out.push('<button type="button" class="proc-tr-btn" data-act="translate" title="agy(gemini-3.8-flash-low)가 번역합니다. 30초~1분 걸리고 agy 사용량을 씁니다. 결과는 서버에 저장됩니다.">' +
+      out.push('<button type="button" class="proc-tr-btn" data-act="translate" title="agy(quick 단계 · hydrogen-low)가 번역합니다. 30초~1분 걸리고 agy 사용량을 씁니다. 결과는 서버에 저장됩니다.">' +
         (nA > 0 ? "agy로 새 단계 번역" : (aState === "error" ? "agy로 다시 시도" : "agy로 번역")) + '</button>');
     }
 
@@ -6898,7 +6537,7 @@
     } else {
       healthEl.removeAttribute("data-health-task");
       if (src.record) {
-        var recOk = String(src.record.status == null ? "" : src.record.status).trim() === "OK";
+        var recOk = isOkStatus(src.record);
         dlgHealth = { kind: recOk ? "done" : "failed", label: recOk ? "끝남" : "실패", detail: recOk ? "" : String(src.record.status || "") };
       }
     }
@@ -6954,7 +6593,7 @@
 
   function buildCard(r) {
     var st = (r.status == null ? "" : String(r.status)).trim();
-    var isOk = (st === "OK");
+    var isOk = isOkStatus(r);
     var isErr = (st !== "" && !isOk);
 
     var card = document.createElement("div");
@@ -6969,14 +6608,14 @@
     meta.appendChild(labeledMeta("", String(submitText || r.timestamp || "").replace(/^\d{4}-/, ""), "ts", submitText ? "접수(프롬프트 입력) 시각 " + submitText + " · 완료 시각 " + (r.timestamp || "") : "완료 시각 " + (r.timestamp || "")));
 
     if (st) {
-      meta.appendChild(badge("status-" + (isOk ? "ok" : "err"), st));
+      meta.appendChild(badge("status-" + (isOk ? "ok" : "err"), st.toUpperCase() === "CANCELLED" ? "취소" : st));
     } else {
       meta.appendChild(badge("status-unknown", "상태 미기록"));
     }
 
     var modelName = recordModel(r) || null;
     var isSession = Boolean(r.session || r.session_id || r.model === "(session)");
-    if (modelName) { meta.appendChild(labeledMeta("", String(modelName), "model", "모델")); }
+    if (modelName) { meta.appendChild(buildCardModelMeta(modelName, r.claude_model, r.claude_effort, isLastResortFallback(r))); }
     if (r.elapsed_sec) {
       var elSec = Number(r.elapsed_sec);
       meta.appendChild(labeledMeta("소요", formatDuration(elSec), "elapsed", "실제 실행 시간: " + r.elapsed_sec + "초"));
@@ -7141,7 +6780,7 @@
       (Number(tk.turns) > 0 ? " · 모델 응답 " + Number(tk.turns) + "번" : "");
   }
 
-  function buildProgressHtml(pg, cwd, saved, taskId) {
+  function buildProgressHtml(pg, cwd) {
     if (!pg) return "";
     var parts = [];
     if (pg.step != null) {
@@ -7153,14 +6792,8 @@
       parts.push('<span class="pg-idle" data-ms="' + escapeHtml(String(pg.last_activity_ms)) + '">' +
         formatDuration((Date.now() - pg.last_activity_ms) / 1000) + ' 전 활동</span>');
     }
-    // Claude 토큰 절약(예상): 끝난 카드와 같은 방식. 단계가 모이기 전에는 숨겨 두고(자리만 만들어) 값이 생기면 제자리에서 채운다.
-    var savedHtml = "";
-    if (taskId) {
-      savedHtml = '<span class="pg-saved-wrap" data-saved-live="' + escapeHtml(taskId) + '"' + (saved ? "" : " hidden") + '><span class="pg-sep">·</span><span class="pg-saved saved-tokens"' +
-        (saved ? ' title="' + escapeHtml(savedTokensDetail(saved)) + '">' + escapeHtml(savedTokensText(saved.saved)) : ">") + '</span></span>';
-    }
     var action = buildProgressActionHtml(pg, cwd);
-    return '<div class="pending-progress">' + (parts.length ? '<div class="pg-line">' + parts.join('<span class="pg-sep">·</span>') + savedHtml + '</div>' : "") + action + '</div>';
+    return '<div class="pending-progress">' + (parts.length ? '<div class="pg-line">' + parts.join('<span class="pg-sep">·</span>') + '</div>' : "") + action + '</div>';
   }
 
   // ==========================================================================
@@ -7312,7 +6945,7 @@
     var rec = null;
     for (var j = 0; j < (records || []).length; j++) { if (records[j] && records[j].task_id === disp.taskId) { rec = records[j]; break; } }
     if (rec) {
-      var ok = String(rec.status == null ? "" : rec.status).trim() === "OK";
+      var ok = isOkStatus(rec);
       return { kind: ok ? "done" : "failed", label: ok ? "agy 작업 끝남" : "agy 작업 실패", detail: ok ? "회신 메시지를 정리하는 중입니다" : "회신 메시지에 실패 사유가 남습니다", taskId: disp.taskId, pending: null, canOpen: true };
     }
     if (watcherAlive === false) { return { kind: "stalled", label: "멈춘 것으로 보임", detail: "워처가 꺼져 있습니다", taskId: disp.taskId, pending: null, canOpen: false }; }
@@ -7423,10 +7056,8 @@
     if (p.task_id && (isProcessing || p.interrupted)) { stateBadge.setAttribute("data-health-task", p.task_id); }
     meta.appendChild(stateBadge);
 
-    if (p.model) { meta.appendChild(labeledMeta("", String(p.model), "model", "모델")); }
+    if (p.model) { meta.appendChild(buildCardModelMeta(p.model, p.claude_model, p.claude_effort)); }
 
-    var pendStartMs = null;     // 토큰/시간 줄의 실제 시간(실시간)에 쓴다
-    var pendEtaSec = null;      // 처음 예정 시간(같은 모델의 보통 실행 시간)
     if (isProcessing) {
       var createdTime = parseLocalTime(p.created);
       var actualStartTime = p.started_at ? parseLocalTime(p.started_at) : createdTime;
@@ -7435,7 +7066,6 @@
       // 1. 실제 실행 시간 라이브 배지 (1초마다 자동 갱신)
       if (startTime) {
         var elapsedSec = Math.max(0, (Date.now() - startTime.getTime()) / 1000);
-        pendStartMs = startTime.getTime();
         var live = labeledMeta("소요", formatDuration(elapsedSec), "elapsed live-elapsed", "실제 실행 경과 시간 (실행 시작: " + (p.started_at || p.created || "") + ")");
         live.setAttribute("data-start", String(startTime.getTime()));
         live.setAttribute("data-label-prefix", "");
@@ -7446,7 +7076,6 @@
         if (typ) {
           var etaBasis = "같은 모델(" + p.model + ")로 끝난 최근 위임 기준: 보통 " + formatDuration(typ.med) + ", 오래 걸린 경우 " + formatDuration(typ.p90) + ". 작업 크기에 따라 달라집니다.";
           var initMed = etaInitialMed(p.task_id || "", typ.med);
-          pendEtaSec = initMed;
           var etaItem = labeledMeta("예상", "", "eta live-eta", "추정. " + etaBasis + " 처음 예정 " + formatDuration(initMed) + ".");
           etaItem.setAttribute("data-start", String(startTime.getTime()));
           etaItem.setAttribute("data-med", String(typ.med));
@@ -7486,9 +7115,6 @@
 
     // 대기·진행 중인 작업은 모두 inbox 파일 위임(bridge)이라 경로를 따로 표시하지 않는다(MCP 호출은 끝난 뒤에 기록으로만 남는다).
     card.appendChild(meta);
-    // 끝난 카드와 같은 네 줄(실행 / 토큰 / 시간 / 식별). Claude 토큰은 실행 줄이 아니라 토큰 줄에 둔다.
-    card.appendChild(buildPendingTokenMeta(p, pendStartMs, pendEtaSec));
-
     card.appendChild(buildSessionMeta(p.session, p.session_id, p.task_id));   // 식별 줄: 모든 카드에(세션이 없으면 "세션 없음")
 
     var dq = document.createElement("details");
@@ -7573,7 +7199,7 @@
        p.interrupted ? '  <span>이 작업은 실행 중이라는 표시 파일만 남아 있고 작업자 프로세스는 없습니다. 아래는 마지막으로 확인된 진행 상황입니다.</span>' :
                       '  <span>' + pendingWaitReasonHtml(p) + ' 조건이 풀리면' + modelText + ' 자동으로 실행됩니다.</span>'),
       '</div>',
-      ((isProcessing || p.interrupted) ? buildProgressHtml(p.progress, effCwds, isProcessing ? liveSavedOf(p) : null, isProcessing ? p.task_id : "") : "")
+      ((isProcessing || p.interrupted) ? buildProgressHtml(p.progress, effCwds) : "")
     ].join("");
     da.appendChild(ab);
     card.appendChild(da);
@@ -7804,7 +7430,7 @@
 
     if (live.pending && live.pending.progress) {
       var wrap = document.createElement("div");
-      wrap.innerHTML = buildProgressHtml(live.pending.progress, cwdListOf(live.pending.cwd), liveSavedOf(live.pending), live.pending.task_id);
+      wrap.innerHTML = buildProgressHtml(live.pending.progress, cwdListOf(live.pending.cwd));
       while (wrap.firstChild) { el.appendChild(wrap.firstChild); }
     }
     return el;
@@ -7982,1281 +7608,10 @@
     updateTopbarMeta();
   }
 
-  // ==========================================================================
-  // Token & Delegation Statistics
-  // ==========================================================================
-
-  // 100만 이상은 M 로 줄여 쓴다(예 17.0M). 캐시 재읽기처럼 값이 아주 큰 칸이 표 너비를 키우지 않게 하려는 것이다. 그 밖에는 formatTokenK 와 같다.
-  function formatTokenCompact(num) {
-    if (num === null || num === undefined || isNaN(num)) return "-";
-    var n = Number(num);
-    if (Math.abs(n) >= 1000000) {
-      return (n < 0 ? "-" : "") + (Math.round(Math.abs(n) / 100000) / 10).toFixed(1) + "M";
-    }
-    return formatTokenK(n, false);
-  }
-
-  // 진행 중 위임 카드의 Claude 토큰 라이브 메타 항목 포맷팅
-  function formatClaudeLiveMeta(cl) {
-    if (!cl || cl.used == null || isNaN(cl.used)) return null;
-    var tokText = "Claude 토큰 위임 " + formatTokenCompact(cl.used);
-    var tipParts = ["이 위임을 보낸 턴에서 위임에 쓴 Claude 토큰(지금까지, 위임과 무관한 호출은 뺀 값)"];
-    if (cl.other_calls && cl.other_calls > 0) {
-      var oTokNum = (cl.other_tokens != null && cl.other_tokens > 0) ? cl.other_tokens : (cl.d_tokens != null && cl.d_tokens > cl.used ? cl.d_tokens - cl.used : 0);
-      var oTokStr = (oTokNum > 0) ? formatTokenK(oTokNum, true) : "+0.0k";
-      tipParts.push("다른 작업 " + cl.other_calls + "회·" + oTokStr + " 제외");
-    }
-    if (cl.est_delegate != null && !isNaN(cl.est_delegate)) {
-      tipParts.push("예상 " + formatTokenCompact(cl.est_delegate));
-    }
-    return {
-      text: tokText,
-      cls: "tok-claude-live",
-      title: tipParts.join(" · ")
-    };
-  }
-
-  function formatTokenK(num, withSign) {
-    if (num === null || num === undefined || isNaN(num)) return "-";
-    var n = Number(num);
-    var sign = "";
-    if (withSign) {
-      if (n > 0) sign = "+";
-      else if (n < 0) sign = "-";
-    } else if (n < 0) {
-      sign = "-";
-    }
-    var abs = Math.abs(n);
-    if (abs === 0) {
-      return "0k";
-    }
-    var rounded = Math.round(abs / 100) / 10;
-    return sign + rounded.toFixed(1) + "k";
-  }
-
-  function computeLinearIntersection(directA, directB, delegateA, delegateB) {
-    if (typeof directA !== "number" || typeof directB !== "number" ||
-        typeof delegateA !== "number" || typeof delegateB !== "number") {
-      return null;
-    }
-    var denom = directB - delegateB;
-    if (denom <= 0) return null;
-    var diffA = delegateA - directA;
-    if (diffA <= 0) return 0;
-    var x = diffA / denom;
-    return Math.round(x);
-  }
-
-  function computeNiceTicks(minVal, maxVal, maxTicks) {
-    if (typeof minVal !== "number" || typeof maxVal !== "number" || isNaN(minVal) || isNaN(maxVal)) {
-      return { min: 0, max: 1, step: 1, ticks: [0, 1] };
-    }
-    if (minVal === maxVal) {
-      if (minVal === 0) return { min: 0, max: 1, step: 1, ticks: [0, 1] };
-      if (minVal > 0) return { min: 0, max: minVal * 1.5, step: minVal * 0.5, ticks: [0, minVal, minVal * 1.5] };
-      return { min: minVal * 1.5, max: 0, step: Math.abs(minVal) * 0.5, ticks: [minVal * 1.5, minVal, 0] };
-    }
-    if (!maxTicks || maxTicks < 2) maxTicks = 5;
-
-    var span = maxVal - minVal;
-    var roughStep = span / (maxTicks - 1);
-    var stepMagnitude = Math.pow(10, Math.floor(Math.log(roughStep) / Math.LN10));
-    var stepNorm = roughStep / stepMagnitude;
-    var step;
-    if (stepNorm <= 1) step = 1 * stepMagnitude;
-    else if (stepNorm <= 2) step = 2 * stepMagnitude;
-    else if (stepNorm <= 5) step = 5 * stepMagnitude;
-    else step = 10 * stepMagnitude;
-
-    var niceMin = Math.floor(minVal / step) * step;
-    var niceMax = Math.ceil(maxVal / step) * step;
-    var ticks = [];
-    var cur = niceMin;
-    while (cur <= niceMax + (step * 0.5)) {
-      ticks.push(Math.round(cur * 1000) / 1000);
-      cur += step;
-    }
-    return { min: niceMin, max: niceMax, step: step, ticks: ticks };
-  }
-
-  function fillDateRange(startDateStr, endDateStr, existingItems) {
-    var map = {};
-    if (existingItems && existingItems.length) {
-      for (var i = 0; i < existingItems.length; i++) {
-        var it = existingItems[i];
-        if (it && it.date) {
-          map[it.date] = it;
-        }
-      }
-    }
-    var result = [];
-    var cur = new Date(startDateStr + "T00:00:00");
-    var end = new Date(endDateStr + "T00:00:00");
-    if (isNaN(cur.getTime()) || isNaN(end.getTime())) return result;
-
-    while (cur.getTime() <= end.getTime()) {
-      var y = cur.getFullYear();
-      var m = cur.getMonth() + 1;
-      var d = cur.getDate();
-      var dStr = y + "-" + (m < 10 ? "0" + m : m) + "-" + (d < 10 ? "0" + d : d);
-      if (map[dStr]) {
-        result.push(map[dStr]);
-      } else {
-        result.push({
-          date: dStr,
-          ok: 0,
-          fail: 0,
-          saved: 0,
-          cum_saved: 0,
-          direct_turns: 0,
-          delegate_turns: 0
-        });
-      }
-      cur.setDate(cur.getDate() + 1);
-    }
-    return result;
-  }
-
-  function computeCollectProgress(delegateN, target) {
-    var t = Number(target);
-    if (isNaN(t) || t <= 0) return 0;
-    var n = Number(delegateN);
-    if (isNaN(n) || n <= 0) return 0;
-    var pct = (n / t) * 100;
-    if (pct > 100) return 100;
-    return Math.round(pct * 10) / 10;
-  }
-
-  function getCollectBannerState(collect) {
-    if (!collect || !collect.active) {
-      return {
-        show: false,
-        n: 0,
-        target: 20,
-        pct: 0,
-        title: "",
-        desc: ""
-      };
-    }
-    var n = Math.max(0, parseInt(collect.delegate_n, 10) || 0);
-    var target = parseInt(collect.target, 10);
-    if (isNaN(target) || target <= 0) target = 20;
-    var pct = computeCollectProgress(n, target);
-    return {
-      show: true,
-      n: n,
-      target: target,
-      pct: pct,
-      title: "수집 중 · 위임 표본 " + n + "/" + target,
-      desc: "일정 수준이 모일 때까지 위임을 우선합니다. " + target + "건이 되면 이 표시가 사라지고 보정식이 이 PC 의 패턴으로 바뀝니다."
-    };
-  }
-
-  function formatTimeKo(sec) {
-    if (sec === null || sec === undefined || isNaN(sec)) return "—";
-    var n = Number(sec);
-    if (n < 0) return "—";
-    n = Math.round(n);
-    if (n < 60) return n + "초";
-    var h = Math.floor(n / 3600);
-    var rem = n % 3600;
-    var m = Math.floor(rem / 60);
-    var s = rem % 60;
-    if (h > 0) {
-      return h + "시간" + (m > 0 ? " " + m + "분" : "");
-    }
-    if (s > 0) {
-      return m + "분 " + s + "초";
-    }
-    return m + "분";
-  }
-
   function getCardWaitIcon(state, isProcessing, isInterrupted) {
     if (state === "waiting") return "hourglass";
     if (state === "queued" && !isProcessing && !isInterrupted) return "hourglass";
     return null;
-  }
-
-  function allocateTurnTokens(dTokens, turnSaved, taskTokensList) {
-    taskTokensList = Array.isArray(taskTokensList) ? taskTokensList : [];
-    var n = taskTokensList.length;
-    if (n === 0) return [];
-    var sum = 0;
-    var hasPositive = false;
-    for (var i = 0; i < n; i++) {
-      var val = Number(taskTokensList[i]);
-      if (!isNaN(val) && val > 0) {
-        sum += val;
-        hasPositive = true;
-      }
-    }
-    var weights = [];
-    for (var i = 0; i < n; i++) {
-      if (hasPositive && sum > 0) {
-        var val = Number(taskTokensList[i]);
-        weights.push((!isNaN(val) && val > 0) ? (val / sum) : 0);
-      } else {
-        weights.push(1 / n);
-      }
-    }
-    var maxIdx = 0;
-    for (var i = 1; i < n; i++) {
-      if (weights[i] > weights[maxIdx]) maxIdx = i;
-    }
-    var usedList = [];
-    var usedSum = 0;
-    for (var i = 0; i < n; i++) {
-      var u = Math.round(dTokens * weights[i]);
-      usedList.push(u);
-      usedSum += u;
-    }
-    var diffUsed = dTokens - usedSum;
-    if (diffUsed !== 0) usedList[maxIdx] += diffUsed;
-
-    var savedList = [];
-    if (turnSaved !== null && turnSaved !== undefined && !isNaN(turnSaved)) {
-      var savedSum = 0;
-      for (var i = 0; i < n; i++) {
-        var s = Math.round(turnSaved * weights[i]);
-        savedList.push(s);
-        savedSum += s;
-      }
-      var diffSaved = turnSaved - savedSum;
-      if (diffSaved !== 0) savedList[maxIdx] += diffSaved;
-    } else {
-      for (var i = 0; i < n; i++) {
-        savedList.push(null);
-      }
-    }
-    var res = [];
-    for (var i = 0; i < n; i++) {
-      res.push({ used: usedList[i], saved: savedList[i], weight: weights[i] });
-    }
-    return res;
-  }
-
-  function setStatsLoading() {
-    if (els.statsHeroSaved && !statsData) {
-      els.statsHeroSaved.textContent = "불러오는 중…";
-      els.statsHeroSaved.className = "stats-hero-number stats-loading";
-    }
-    if (els.statsHeroDesc && !statsData) {
-      els.statsHeroDesc.textContent = "최근 " + statsDays + "일 · 불러오는 중…";
-    }
-  }
-
-  var statsRecentSeq = 0;
-  var statsRecentLoading = false;
-
-  function setRecentLoading(isLoading, customEls, customData) {
-    var targetEls = customEls || els;
-    var targetData = (customData !== undefined) ? customData : statsData;
-    statsRecentLoading = Boolean(isLoading);
-    if (targetEls && targetEls.statsRecentLoading) {
-      targetEls.statsRecentLoading.style.display = statsRecentLoading ? "flex" : "none";
-    }
-    if (targetEls && targetEls.statsRecentTableWrap) {
-      if (statsRecentLoading) {
-        if (targetEls.statsRecentTableWrap.classList) {
-          targetEls.statsRecentTableWrap.classList.add("is-loading");
-        } else {
-          targetEls.statsRecentTableWrap.className += " is-loading";
-        }
-      } else {
-        if (targetEls.statsRecentTableWrap.classList) {
-          targetEls.statsRecentTableWrap.classList.remove("is-loading");
-        } else {
-          targetEls.statsRecentTableWrap.className = (targetEls.statsRecentTableWrap.className || "").replace(/\bis-loading\b/g, "").trim();
-        }
-      }
-    }
-    if (statsRecentLoading) {
-      if (targetEls && targetEls.statsRecentPrev) targetEls.statsRecentPrev.disabled = true;
-      if (targetEls && targetEls.statsRecentNext) targetEls.statsRecentNext.disabled = true;
-    } else if (targetData) {
-      renderRecentPager(targetData);
-    }
-    return statsRecentLoading;
-  }
-
-  function isLatestRecentSeq(seq) {
-    return seq === statsRecentSeq;
-  }
-
-  var statsAutoRefetchTimer = null;
-  function loadStats(days, isPageMove) {
-    var d = (days === 7 || days === 30 || days === 60) ? days : 30;
-    setStatsLoading();
-    setRecentLoading(true);
-    var seq = ++statsRecentSeq;
-    var url = "/api/token-stats?days=" + d + "&page=" + recentPage + "&page_size=20" + (recentPath ? "&path=" + encodeURIComponent(recentPath) : "") + (isPageMove ? "&page_move=1" : "");
-    return fetchJson(url).then(function (data) {
-      if (!isLatestRecentSeq(seq)) {
-        return null;
-      }
-      setRecentLoading(false);
-      statsData = data;
-      lastStatsFetchAt = Date.now();
-      // 서버가 오래된 통계를 백그라운드로 다시 수집하기 시작했으면 끝날 즈음 한 번만 다시 불러온다(수집은 3분에 한 번까지만이라 되풀이되지 않는다)
-      if (data && data.auto_collect === true && !statsAutoRefetchTimer) {
-        statsAutoRefetchTimer = setTimeout(function () {
-          statsAutoRefetchTimer = null;
-          if (location.hash.indexOf("stats") >= 0) { fetchAndRenderStats(true); } else { statsData = null; }
-        }, 6000);
-      }
-      return data;
-    }).catch(function (err) {
-      if (isLatestRecentSeq(seq)) {
-        setRecentLoading(false);
-      }
-      console.warn("Failed to load token stats:", err);
-      return null;
-    });
-  }
-
-  function fetchAndRenderStats(force, isPageMove) {
-    var nowTs = Date.now();
-    if (!force && statsData && (nowTs - lastStatsFetchAt < 30000)) {
-      renderStats(statsData);
-      return;
-    }
-    loadStats(statsDays, isPageMove).then(function (data) {
-      if (data) {
-        renderStats(data);
-      }
-    });
-  }
-
-  function applyStatsTableToggle() {
-    var showTable = Boolean(statsTableView);
-    if (els.statsTableToggle) {
-      els.statsTableToggle.checked = showTable;
-    }
-    var chartViews = [els.chartTasksView, els.chartSavingsView, els.chartAccuracyView, els.chartScatterView, els.chartTimeAccuracyView];
-    var tableViews = [els.tableTasksView, els.tableSavingsView, els.tableAccuracyView, els.tableScatterView, els.tableTimeAccuracyView];
-    for (var i = 0; i < chartViews.length; i++) {
-      if (chartViews[i]) chartViews[i].style.display = showTable ? "none" : "block";
-    }
-    for (var j = 0; j < tableViews.length; j++) {
-      if (tableViews[j]) tableViews[j].style.display = showTable ? "block" : "none";
-    }
-  }
-
-  function showStatsTooltip(e, title, items) {
-    if (!els.statsTooltip) return;
-    var html = '<div class="stats-tooltip-title">' + escapeHtml(title) + '</div>';
-    for (var i = 0; i < items.length; i++) {
-      var it = items[i];
-      var swatch = it.color ? '<span style="display:inline-block;width:8px;height:8px;border-radius:2px;background:' + it.color + ';margin-right:4px;"></span>' : '';
-      html += '<div class="stats-tooltip-row">' +
-              '<span class="stats-tooltip-key">' + swatch + escapeHtml(it.label) + '</span>' +
-              '<span class="stats-tooltip-val">' + escapeHtml(it.value) + '</span>' +
-              '</div>';
-    }
-    els.statsTooltip.innerHTML = html;
-    els.statsTooltip.style.display = "flex";
-
-    moveStatsTooltip(e);
-  }
-
-  // 화면(viewport) 기준 좌표로 커서 옆에 둔다. 스크롤·조상 위치와 무관하고, 화면 가장자리에서는 반대쪽으로 넘긴다.
-  function moveStatsTooltip(e) {
-    var tip = els.statsTooltip;
-    if (!tip) return;
-    var w = tip.offsetWidth, h = tip.offsetHeight;
-    var x = e.clientX + 14, y = e.clientY + 14;
-    if (x + w > window.innerWidth - 8) x = e.clientX - w - 14;
-    if (y + h > window.innerHeight - 8) y = e.clientY - h - 14;
-    tip.style.left = Math.max(8, x) + "px";
-    tip.style.top = Math.max(8, y) + "px";
-  }
-
-  function hideStatsTooltip() {
-    if (els.statsTooltip) {
-      els.statsTooltip.style.display = "none";
-    }
-  }
-
-  function renderChartTasks(daily) {
-    if (!els.chartTasksView || !els.tableTasksView) return;
-    daily = daily || [];
-    var n = daily.length;
-    if (!n) {
-      els.chartTasksView.innerHTML = '<div class="empty-hint" style="padding:40px;text-align:center;">데이터가 없습니다.</div>';
-      els.tableTasksView.innerHTML = '';
-      return;
-    }
-
-    var maxVal = 0;
-    for (var i = 0; i < n; i++) {
-      var tot = (daily[i].ok || 0) + (daily[i].fail || 0);
-      if (tot > maxVal) maxVal = tot;
-    }
-    if (maxVal === 0) maxVal = 5;
-
-    var ticksObj = computeNiceTicks(0, maxVal, 4);
-    var tickMax = ticksObj.max;
-
-    var svgW = 600, svgH = 220;
-    var padLeft = 40, padRight = 20, padTop = 20, padBottom = 32;
-    var plotW = svgW - padLeft - padRight;
-    var plotH = svgH - padTop - padBottom;
-    var baseY = padTop + plotH;
-
-    function scaleY(v) {
-      return baseY - (v / tickMax) * plotH;
-    }
-
-    var svg = '<svg viewBox="0 0 ' + svgW + ' ' + svgH + '" class="stats-chart-svg" preserveAspectRatio="xMidYMid meet" role="img" aria-label="위임 성공 실패 막대 차트">';
-
-    for (var t = 0; t < ticksObj.ticks.length; t++) {
-      var tick = ticksObj.ticks[t];
-      var ty = Math.round(scaleY(tick));
-      svg += '<line x1="' + padLeft + '" y1="' + ty + '" x2="' + (padLeft + plotW) + '" y2="' + ty + '" stroke="var(--line)" stroke-width="1"/>';
-      svg += '<text x="' + (padLeft - 8) + '" y="' + (ty + 4) + '" text-anchor="end" font-size="11" fill="var(--ink-3)">' + tick + '</text>';
-    }
-
-    svg += '<line x1="' + padLeft + '" y1="' + baseY + '" x2="' + (padLeft + plotW) + '" y2="' + baseY + '" stroke="var(--line-strong)" stroke-width="1"/>';
-
-    var slotW = plotW / n;
-    var barW = Math.min(24, Math.max(4, Math.round(slotW * 0.6)));
-
-    for (var i = 0; i < n; i++) {
-      var d = daily[i];
-      var cx = padLeft + (i + 0.5) * slotW;
-      var bx = Math.round(cx - barW / 2);
-      var ok = d.ok || 0;
-      var fail = d.fail || 0;
-
-      if (ok > 0 && fail > 0) {
-        var hOk = Math.max(1, Math.round((ok / tickMax) * plotH));
-        var hFail = Math.max(1, Math.round((fail / tickMax) * plotH));
-        var yOk = baseY - hOk;
-        var yFail = yOk - hFail - 2;
-        svg += '<rect x="' + bx + '" y="' + yOk + '" width="' + barW + '" height="' + hOk + '" fill="var(--ok)"/>';
-        svg += '<rect x="' + bx + '" y="' + yFail + '" width="' + barW + '" height="' + hFail + '" rx="4" ry="4" fill="var(--err)"/>';
-      } else if (ok > 0) {
-        var hOk = Math.max(1, Math.round((ok / tickMax) * plotH));
-        var yOk = baseY - hOk;
-        svg += '<rect x="' + bx + '" y="' + yOk + '" width="' + barW + '" height="' + hOk + '" rx="4" ry="4" fill="var(--ok)"/>';
-      } else if (fail > 0) {
-        var hFail = Math.max(1, Math.round((fail / tickMax) * plotH));
-        var yFail = baseY - hFail;
-        svg += '<rect x="' + bx + '" y="' + yFail + '" width="' + barW + '" height="' + hFail + '" rx="4" ry="4" fill="var(--err)"/>';
-      }
-
-      var ariaLabel = d.date + " 성공 " + ok + "건, 실패 " + fail + "건";
-      svg += '<rect class="chart-hit-slot" data-chart="tasks" data-idx="' + i + '" x="' + (cx - slotW / 2) + '" y="' + padTop + '" width="' + slotW + '" height="' + plotH + '" fill="transparent" tabindex="0" role="graphics-symbol" aria-label="' + escapeHtml(ariaLabel) + '" style="cursor:pointer;outline:none;"/>';
-    }
-
-    var stepLabels = Math.max(1, Math.floor(n / 5));
-    for (var i = 0; i < n; i += stepLabels) {
-      var cx = padLeft + (i + 0.5) * slotW;
-      var dStr = daily[i].date;
-      var shortDate = dStr ? dStr.slice(5) : "";
-      svg += '<text x="' + cx + '" y="' + (baseY + 18) + '" text-anchor="middle" font-size="11" fill="var(--ink-3)">' + escapeHtml(shortDate) + '</text>';
-    }
-    if ((n - 1) % stepLabels !== 0) {
-      var cx = padLeft + (n - 0.5) * slotW;
-      var dStr = daily[n - 1].date;
-      var shortDate = dStr ? dStr.slice(5) : "";
-      svg += '<text x="' + cx + '" y="' + (baseY + 18) + '" text-anchor="middle" font-size="11" fill="var(--ink-3)">' + escapeHtml(shortDate) + '</text>';
-    }
-
-    svg += '</svg>';
-    els.chartTasksView.innerHTML = svg;
-
-    var tHtml = '<table class="stats-data-table"><thead><tr><th>날짜</th><th class="num">성공</th><th class="num">실패</th><th class="num">전체</th></tr></thead><tbody>';
-    for (var i = 0; i < n; i++) {
-      var d = daily[i];
-      var tot = (d.ok || 0) + (d.fail || 0);
-      tHtml += '<tr><td>' + escapeHtml(d.date) + '</td><td class="num">' + (d.ok || 0) + '</td><td class="num">' + (d.fail || 0) + '</td><td class="num">' + tot + '</td></tr>';
-    }
-    tHtml += '</tbody></table>';
-    els.tableTasksView.innerHTML = tHtml;
-  }
-
-  function renderChartSavings(daily) {
-    if (!els.chartSavingsView || !els.tableSavingsView) return;
-    // 서버의 saved(절약, + 가 좋음)를 증감(delta: + 증가·더 소모, - 감소·절약)으로 뒤집어 쓴다. cum 은 누적 증감.
-    daily = (daily || []).map(function (x) { return { date: x.date, delta: -(x.saved || 0), cum: -(x.cum_saved || 0) }; });
-    var n = daily.length;
-    if (!n) {
-      els.chartSavingsView.innerHTML = '<div class="empty-hint" style="padding:40px;text-align:center;">데이터가 없습니다.</div>';
-      els.tableSavingsView.innerHTML = '';
-      return;
-    }
-
-    var minVal = 0, maxVal = 0;
-    for (var i = 0; i < n; i++) {
-      var s = daily[i].delta || 0;
-      var c = daily[i].cum || 0;
-      if (s < minVal) minVal = s;
-      if (c < minVal) minVal = c;
-      if (s > maxVal) maxVal = s;
-      if (c > maxVal) maxVal = c;
-    }
-    if (minVal === 0 && maxVal === 0) {
-      maxVal = 10000;
-      minVal = -2000;
-    }
-
-    var ticksObj = computeNiceTicks(minVal, maxVal, 5);
-    var tMin = ticksObj.min, tMax = ticksObj.max;
-    var span = tMax - tMin;
-    if (span === 0) span = 1;
-
-    var svgW = 600, svgH = 220;
-    var padLeft = 48, padRight = 44, padTop = 20, padBottom = 32;
-    var plotW = svgW - padLeft - padRight;
-    var plotH = svgH - padTop - padBottom;
-    var baseY = padTop + plotH;
-
-    function scaleY(v) {
-      return baseY - ((v - tMin) / span) * plotH;
-    }
-
-    var y0 = Math.round(scaleY(0));
-
-    var svg = '<svg viewBox="0 0 ' + svgW + ' ' + svgH + '" class="stats-chart-svg" preserveAspectRatio="xMidYMid meet" role="img" aria-label="토큰 증감 차트">';
-
-    for (var t = 0; t < ticksObj.ticks.length; t++) {
-      var tick = ticksObj.ticks[t];
-      var ty = Math.round(scaleY(tick));
-      svg += '<line x1="' + padLeft + '" y1="' + ty + '" x2="' + (padLeft + plotW) + '" y2="' + ty + '" stroke="var(--line)" stroke-width="1"/>';
-      svg += '<text x="' + (padLeft - 8) + '" y="' + (ty + 4) + '" text-anchor="end" font-size="11" fill="var(--ink-3)">' + formatTokenK(tick, false) + '</text>';
-    }
-
-    svg += '<line x1="' + padLeft + '" y1="' + y0 + '" x2="' + (padLeft + plotW) + '" y2="' + y0 + '" stroke="var(--line-strong)" stroke-width="1.5"/>';
-
-    var slotW = plotW / n;
-    var barW = Math.min(24, Math.max(4, Math.round(slotW * 0.6)));
-
-    for (var i = 0; i < n; i++) {
-      var d = daily[i];
-      var s = d.delta || 0;
-      var cx = padLeft + (i + 0.5) * slotW;
-      var bx = Math.round(cx - barW / 2);
-      if (s > 0) {
-        var yVal = Math.round(scaleY(s));
-        var h = Math.max(1, y0 - yVal);
-        svg += '<rect x="' + bx + '" y="' + yVal + '" width="' + barW + '" height="' + h + '" rx="4" ry="4" fill="var(--loss)"/>';
-      } else if (s < 0) {
-        var yVal = Math.round(scaleY(s));
-        var h = Math.max(1, yVal - y0);
-        svg += '<rect x="' + bx + '" y="' + y0 + '" width="' + barW + '" height="' + h + '" rx="4" ry="4" fill="var(--gain)"/>';
-      }
-    }
-
-    var linePts = [];
-    for (var i = 0; i < n; i++) {
-      var cx = padLeft + (i + 0.5) * slotW;
-      var cy = Math.round(scaleY(daily[i].cum || 0));
-      linePts.push({ x: cx, y: cy });
-    }
-
-    if (linePts.length > 0) {
-      var dPath = "M " + linePts[0].x + " " + linePts[0].y;
-      for (var i = 1; i < linePts.length; i++) {
-        dPath += " L " + linePts[i].x + " " + linePts[i].y;
-      }
-      svg += '<path d="' + dPath + '" fill="none" stroke="var(--ink)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>';
-
-      for (var i = 0; i < linePts.length; i++) {
-        svg += '<circle cx="' + linePts[i].x + '" cy="' + linePts[i].y + '" r="4" fill="var(--ink)" stroke="var(--surface)" stroke-width="2"/>';
-      }
-
-      var lastPt = linePts[linePts.length - 1];
-      var lastCum = daily[n - 1].cum || 0;
-      svg += '<text x="' + (lastPt.x + 6) + '" y="' + (lastPt.y + 4) + '" font-size="11" font-weight="600" fill="var(--ink)">' + formatTokenK(lastCum, true) + '</text>';
-    }
-
-    for (var i = 0; i < n; i++) {
-      var d = daily[i];
-      var cx = padLeft + (i + 0.5) * slotW;
-      var ariaLabel = d.date + " 증감 (추정) " + formatTokenK(d.delta || 0, true) + ", 누적 (추정) " + formatTokenK(d.cum || 0, true);
-      svg += '<rect class="chart-hit-slot" data-chart="savings" data-idx="' + i + '" x="' + (cx - slotW / 2) + '" y="' + padTop + '" width="' + slotW + '" height="' + plotH + '" fill="transparent" tabindex="0" role="graphics-symbol" aria-label="' + escapeHtml(ariaLabel) + '" style="cursor:pointer;outline:none;"/>';
-    }
-
-    var stepLabels = Math.max(1, Math.floor(n / 5));
-    for (var i = 0; i < n; i += stepLabels) {
-      var cx = padLeft + (i + 0.5) * slotW;
-      var dStr = daily[i].date;
-      var shortDate = dStr ? dStr.slice(5) : "";
-      svg += '<text x="' + cx + '" y="' + (baseY + 18) + '" text-anchor="middle" font-size="11" fill="var(--ink-3)">' + escapeHtml(shortDate) + '</text>';
-    }
-    if ((n - 1) % stepLabels !== 0) {
-      var cx = padLeft + (n - 0.5) * slotW;
-      var dStr = daily[n - 1].date;
-      var shortDate = dStr ? dStr.slice(5) : "";
-      svg += '<text x="' + cx + '" y="' + (baseY + 18) + '" text-anchor="middle" font-size="11" fill="var(--ink-3)">' + escapeHtml(shortDate) + '</text>';
-    }
-
-    svg += '</svg>';
-    els.chartSavingsView.innerHTML = svg;
-
-    var tHtml = '<table class="stats-data-table"><thead><tr><th>날짜</th><th class="num">증감</th><th class="num">누적 증감</th></tr></thead><tbody>';
-    for (var i = 0; i < n; i++) {
-      var d = daily[i];
-      var sStr = formatTokenK(d.delta || 0, true);
-      var cStr = formatTokenK(d.cum || 0, true);
-      var sCls = (d.delta || 0) <= 0 ? "val-ok" : "val-err";
-      tHtml += '<tr><td>' + escapeHtml(d.date) + '</td><td class="num ' + sCls + '">' + sStr + '</td><td class="num">' + cStr + '</td></tr>';
-    }
-    tHtml += '</tbody></table>';
-    els.tableSavingsView.innerHTML = tHtml;
-  }
-
-  // 서버는 예상 ÷ 실제(1.0 이 정확)를 주고, 화면은 표의 비율과 같은 실제 ÷ 예상을 보인다(1.00 이 정확, 넘으면 실제가 예상보다 컸음).
-  function accRatio(ratio) {
-    if (ratio === null || ratio === undefined || isNaN(ratio) || Number(ratio) <= 0) return null;
-    return Math.round(100 / Number(ratio)) / 100;
-  }
-  function accRatioText(ratio) {
-    var r = accRatio(ratio);
-    return r === null ? "-" : r.toFixed(2);
-  }
-  // 다음 예상에 곱할 보정 계수(calibration.json 의 correction.direct / delegate)
-  function corrFactorText(c) {
-    return (c && c.factor !== null && c.factor !== undefined && !isNaN(c.factor)) ? Number(c.factor).toFixed(2) : "1.00";
-  }
-
-  // 주별 비율 꺾은선(토큰 · 시간 공용): keyDir / keyDel 은 주별 항목에서 직접 · 위임 값(예상 ÷ 실제)이 든 이름이다.
-  function renderRatioChart(weekly, keyDir, keyDel, chartView, tableView, chartType, ariaTitle, emptyText) {
-    if (!chartView || !tableView) return;
-    weekly = weekly || [];
-    var n = weekly.length;
-    if (!n) {
-      chartView.innerHTML = '<div class="empty-hint" style="padding:40px;text-align:center;">' + emptyText + '</div>';
-      tableView.innerHTML = '<div class="empty-hint" style="padding:40px;text-align:center;">' + emptyText + '</div>';
-      return;
-    }
-
-    var maxR = 2.0;
-    for (var i = 0; i < n; i++) {
-      var rd = accRatio(weekly[i][keyDir]);
-      var rl = accRatio(weekly[i][keyDel]);
-      if (rd !== null && rd > maxR) maxR = rd;
-      if (rl !== null && rl > maxR) maxR = rl;
-    }
-    maxR = Math.ceil(maxR * 1.2 * 10) / 10;
-
-    var ticksObj = computeNiceTicks(0, maxR, 4);
-    var tickMax = ticksObj.max;
-
-    var svgW = 600, svgH = 220;
-    var padLeft = 40, padRight = 82, padTop = 20, padBottom = 32;
-    var plotW = svgW - padLeft - padRight;
-    var plotH = svgH - padTop - padBottom;
-    var baseY = padTop + plotH;
-
-    function scaleY(v) {
-      return baseY - (v / tickMax) * plotH;
-    }
-
-    var svg = '<svg viewBox="0 0 ' + svgW + ' ' + svgH + '" class="stats-chart-svg" preserveAspectRatio="xMidYMid meet" role="img" aria-label="' + ariaTitle + '">';
-
-    for (var t = 0; t < ticksObj.ticks.length; t++) {
-      var tick = ticksObj.ticks[t];
-      var ty = Math.round(scaleY(tick));
-      svg += '<line x1="' + padLeft + '" y1="' + ty + '" x2="' + (padLeft + plotW) + '" y2="' + ty + '" stroke="var(--line)" stroke-width="1"/>';
-      svg += '<text x="' + (padLeft - 8) + '" y="' + (ty + 4) + '" text-anchor="end" font-size="11" fill="var(--ink-3)">' + tick.toFixed(1) + '</text>';
-    }
-
-    var y1 = Math.round(scaleY(1.0));
-    svg += '<line x1="' + padLeft + '" y1="' + y1 + '" x2="' + (padLeft + plotW) + '" y2="' + y1 + '" stroke="var(--ink-2)" stroke-width="1" stroke-dasharray="4,4"/>';
-    svg += '<text x="' + (padLeft + plotW + 6) + '" y="' + (y1 + 4) + '" font-size="10" fill="var(--ink-2)">정확 (1.00)</text>';
-
-    var slotW = n > 1 ? plotW / (n - 1) : plotW;
-
-    var dirPts = [], delPts = [];
-    for (var i = 0; i < n; i++) {
-      var cx = n > 1 ? (padLeft + i * slotW) : (padLeft + plotW / 2);
-      var vDir = accRatio(weekly[i][keyDir]);
-      var vDel = accRatio(weekly[i][keyDel]);
-      if (vDir !== null) { dirPts.push({ x: cx, y: Math.round(scaleY(vDir)), val: vDir, idx: i }); }
-      if (vDel !== null) { delPts.push({ x: cx, y: Math.round(scaleY(vDel)), val: vDel, idx: i }); }
-    }
-
-    if (dirPts.length > 1) {
-      var pD = "M " + dirPts[0].x + " " + dirPts[0].y;
-      for (var i = 1; i < dirPts.length; i++) { pD += " L " + dirPts[i].x + " " + dirPts[i].y; }
-      svg += '<path d="' + pD + '" fill="none" stroke="var(--claude)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>';
-    }
-    for (var i = 0; i < dirPts.length; i++) {
-      svg += '<circle cx="' + dirPts[i].x + '" cy="' + dirPts[i].y + '" r="4" fill="var(--claude)" stroke="var(--surface)" stroke-width="2"/>';
-    }
-    if (dirPts.length > 0) {
-      var lastD = dirPts[dirPts.length - 1];
-      svg += '<text x="' + (lastD.x + 6) + '" y="' + (lastD.y + 4) + '" font-size="11" font-weight="600" fill="var(--claude)">직접 ' + lastD.val.toFixed(2) + '</text>';
-    }
-
-    if (delPts.length > 1) {
-      var pDel = "M " + delPts[0].x + " " + delPts[0].y;
-      for (var i = 1; i < delPts.length; i++) { pDel += " L " + delPts[i].x + " " + delPts[i].y; }
-      svg += '<path d="' + pDel + '" fill="none" stroke="var(--agy)" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>';
-    }
-    for (var i = 0; i < delPts.length; i++) {
-      svg += '<circle cx="' + delPts[i].x + '" cy="' + delPts[i].y + '" r="4" fill="var(--agy)" stroke="var(--surface)" stroke-width="2"/>';
-    }
-    if (delPts.length > 0) {
-      var lastDel = delPts[delPts.length - 1];
-      svg += '<text x="' + (lastDel.x + 6) + '" y="' + (lastDel.y + 4) + '" font-size="11" font-weight="600" fill="var(--agy)">위임 ' + lastDel.val.toFixed(2) + '</text>';
-    }
-
-    for (var i = 0; i < n; i++) {
-      var cx = n > 1 ? (padLeft + i * slotW) : (padLeft + plotW / 2);
-      var hW = n > 1 ? slotW : plotW;
-      var ariaLabel = weekly[i].week + " 직접: " + accRatioText(weekly[i][keyDir]) + ", 위임: " + accRatioText(weekly[i][keyDel]);
-      svg += '<rect class="chart-hit-slot" data-chart="' + chartType + '" data-idx="' + i + '" x="' + (cx - hW / 2) + '" y="' + padTop + '" width="' + hW + '" height="' + plotH + '" fill="transparent" tabindex="0" role="graphics-symbol" aria-label="' + escapeHtml(ariaLabel) + '" style="cursor:pointer;outline:none;"/>';
-      svg += '<text x="' + cx + '" y="' + (baseY + 18) + '" text-anchor="middle" font-size="11" fill="var(--ink-3)">' + escapeHtml(weekly[i].week) + '</text>';
-    }
-
-    svg += '</svg>';
-    chartView.innerHTML = svg;
-
-    var tHtml = '<table class="stats-data-table"><thead><tr><th>주차</th><th class="num">직접 (실제÷예상)</th><th class="num">위임 (실제÷예상)</th></tr></thead><tbody>';
-    for (var i = 0; i < n; i++) {
-      var w = weekly[i];
-      tHtml += '<tr><td>' + escapeHtml(w.week) + '</td><td class="num">' + accRatioText(w[keyDir]) + '</td><td class="num">' + accRatioText(w[keyDel]) + '</td></tr>';
-    }
-    tHtml += '</tbody></table>';
-    tableView.innerHTML = tHtml;
-  }
-
-  function renderChartAccuracy(weekly) {
-    renderRatioChart(weekly, "direct", "delegate", els.chartAccuracyView, els.tableAccuracyView, "accuracy", "주별 비율 차트(실제÷예상)", "주별 예상 정확도 표본이 아직 없습니다.");
-  }
-
-  function renderChartTimeAccuracy(weekly) {
-    renderRatioChart(weekly, "time_direct", "time_delegate", els.chartTimeAccuracyView, els.tableTimeAccuracyView, "time-accuracy", "주별 처리 시간 비율 차트(실제÷예상)", "주별 처리 시간 정확도 표본이 아직 없습니다.");
-  }
-  function renderChartScatter(points, cal) {
-    if (!els.chartScatterView || !els.tableScatterView) return;
-    points = points || [];
-    var n = points.length;
-
-    var maxCalls = 0, maxActual = 0;
-    for (var i = 0; i < n; i++) {
-      var c = points[i].calls || 0;
-      var a = points[i].actual || 0;
-      if (c > maxCalls) maxCalls = c;
-      if (a > maxActual) maxActual = a;
-    }
-    if (maxCalls < 10) maxCalls = 10;
-    if (maxActual < 5000) maxActual = 5000;
-    maxCalls = Math.ceil(maxCalls * 1.15);
-    maxActual = Math.ceil(maxActual * 1.15);
-
-    var ticksX = computeNiceTicks(0, maxCalls, 5);
-    var ticksY = computeNiceTicks(0, maxActual, 5);
-    var xMax = ticksX.max;
-    var yMax = ticksY.max;
-
-    var svgW = 600, svgH = 240;
-    var padLeft = 48, padRight = 24, padTop = 20, padBottom = 34;
-    var plotW = svgW - padLeft - padRight;
-    var plotH = svgH - padTop - padBottom;
-    var baseY = padTop + plotH;
-
-    function scaleX(v) { return padLeft + (v / xMax) * plotW; }
-    function scaleY(v) { return baseY - (v / yMax) * plotH; }
-
-    var dirA = (cal && cal.direct && typeof cal.direct.a === "number") ? cal.direct.a : 800;
-    var dirB = (cal && cal.direct && typeof cal.direct.b === "number") ? cal.direct.b : 1300;
-    var delA = (cal && cal.delegate && typeof cal.delegate.a === "number") ? cal.delegate.a : 2500;
-    var delB = (cal && cal.delegate && typeof cal.delegate.b === "number") ? cal.delegate.b : 1000;
-
-    var crossX = computeLinearIntersection(dirA, dirB, delA, delB);
-    if (els.statsScatterCrossover) {
-      if (crossX !== null && crossX > 0) {
-        els.statsScatterCrossover.textContent = "약 " + crossX + "번부터 위임이 쌈";
-      } else {
-        els.statsScatterCrossover.textContent = "";
-      }
-    }
-
-    var svg = '<svg viewBox="0 0 ' + svgW + ' ' + svgH + '" class="stats-chart-svg" preserveAspectRatio="xMidYMid meet" role="img" aria-label="호출 수와 실제 토큰 산점도">';
-
-    for (var t = 0; t < ticksY.ticks.length; t++) {
-      var tick = ticksY.ticks[t];
-      var ty = Math.round(scaleY(tick));
-      svg += '<line x1="' + padLeft + '" y1="' + ty + '" x2="' + (padLeft + plotW) + '" y2="' + ty + '" stroke="var(--line)" stroke-width="1"/>';
-      svg += '<text x="' + (padLeft - 8) + '" y="' + (ty + 4) + '" text-anchor="end" font-size="11" fill="var(--ink-3)">' + formatTokenK(tick, false) + '</text>';
-    }
-
-    for (var t = 0; t < ticksX.ticks.length; t++) {
-      var tick = ticksX.ticks[t];
-      var tx = Math.round(scaleX(tick));
-      svg += '<line x1="' + tx + '" y1="' + padTop + '" x2="' + tx + '" y2="' + baseY + '" stroke="var(--line)" stroke-width="1"/>';
-      svg += '<text x="' + tx + '" y="' + (baseY + 18) + '" text-anchor="middle" font-size="11" fill="var(--ink-3)">' + tick + '회</text>';
-    }
-
-    var dirY0 = scaleY(dirA), dirYEnd = scaleY(dirA + dirB * xMax);
-    svg += '<line x1="' + padLeft + '" y1="' + dirY0 + '" x2="' + (padLeft + plotW) + '" y2="' + dirYEnd + '" stroke="var(--claude)" stroke-width="2" stroke-linecap="round"/>';
-
-    var delY0 = scaleY(delA), delYEnd = scaleY(delA + delB * xMax);
-    svg += '<line x1="' + padLeft + '" y1="' + delY0 + '" x2="' + (padLeft + plotW) + '" y2="' + delYEnd + '" stroke="var(--agy)" stroke-width="2" stroke-linecap="round"/>';
-
-    if (crossX !== null && crossX > 0 && crossX <= xMax) {
-      var crossYVal = dirA + dirB * crossX;
-      var cxPos = Math.round(scaleX(crossX));
-      var cyPos = Math.round(scaleY(crossYVal));
-      svg += '<line x1="' + cxPos + '" y1="' + cyPos + '" x2="' + cxPos + '" y2="' + baseY + '" stroke="var(--ink-2)" stroke-width="1" stroke-dasharray="3,3"/>';
-      svg += '<rect x="' + (cxPos - 60) + '" y="' + (cyPos - 22) + '" width="120" height="18" rx="3" fill="var(--raised)" stroke="var(--line-strong)" stroke-width="1"/>';
-      svg += '<text x="' + cxPos + '" y="' + (cyPos - 10) + '" font-size="10" font-weight="600" fill="var(--ink)" text-anchor="middle">약 ' + crossX + '번부터 위임이 쌈</text>';
-    }
-
-    for (var i = 0; i < n; i++) {
-      var pt = points[i];
-      var cx = Math.round(scaleX(pt.calls || 0));
-      var cy = Math.round(scaleY(pt.actual || 0));
-      var isDirect = (pt.path === "direct");
-      if (isDirect) {
-        svg += '<circle cx="' + cx + '" cy="' + cy + '" r="4.5" fill="var(--claude)" stroke="var(--surface)" stroke-width="2"/>';
-      } else {
-        svg += '<rect x="' + (cx - 4.5) + '" y="' + (cy - 4.5) + '" width="9" height="9" rx="1" fill="var(--agy)" stroke="var(--surface)" stroke-width="2"/>';
-      }
-
-      var ariaLabel = (isDirect ? "직접 처리" : "위임") + " 호출 " + (pt.calls || 0) + "회, 실제 " + formatTokenK(pt.actual || 0, false);
-      svg += '<circle class="chart-hit-scatter" data-chart="scatter" data-idx="' + i + '" cx="' + cx + '" cy="' + cy + '" r="12" fill="transparent" tabindex="0" role="graphics-symbol" aria-label="' + escapeHtml(ariaLabel) + '" style="cursor:pointer;outline:none;"/>';
-    }
-
-    svg += '</svg>';
-    els.chartScatterView.innerHTML = svg;
-
-    var tHtml = '<table class="stats-data-table"><thead><tr><th>길</th><th class="num">도구 호출 수</th><th class="num">실제 사용 토큰</th></tr></thead><tbody>';
-    for (var i = 0; i < n; i++) {
-      var pt = points[i];
-      var pathLabel = pt.path === "direct" ? "직접" : "위임";
-      tHtml += '<tr><td>' + pathLabel + '</td><td class="num">' + (pt.calls || 0) + '회</td><td class="num">' + formatTokenK(pt.actual || 0, false) + '</td></tr>';
-    }
-    tHtml += '</tbody></table>';
-    els.tableScatterView.innerHTML = tHtml;
-  }
-
-  function formatTimeDeltaKo(sec) {
-    if (sec === null || sec === undefined || isNaN(sec)) return "-";
-    var n = Math.round(Number(sec));
-    if (n === 0) return "0초";
-    return (n > 0 ? "+" : "-") + formatTimeKo(Math.abs(n));
-  }
-
-  // 시간을 시간·분·초 칸으로 나눠 그린다. 칸 폭이 같아서 '분'과 '초'가 행마다 같은 세로선에 선다. hasHours 가 false 면 시간 칸을 만들지 않는다.
-  // signed 면 부호(+/-)를 처음 값이 나오는 칸의 숫자 바로 앞에 붙인다(증감). 값이 없으면 dash(기본 "—")를 초 칸에 둔다.
-  function timeSlotsHtml(sec, hasHours, signed, dash) {
-    var signLeft = "";   // 아직 붙이지 않은 부호
-    function slot(cls, num, unit) {
-      var sg = "";
-      if (num !== null && signLeft) { sg = '<span class="tsign">' + signLeft + '</span>'; signLeft = ""; }
-      return '<span class="tslot ' + cls + '">' + (num === null ? "" : sg + '<span class="tn">' + num + '</span><span class="tu">' + unit + '</span>') + '</span>';
-    }
-    var empty = (sec === null || sec === undefined || isNaN(sec));
-    var h = null, m = null, s = null, sign = "";
-    if (!empty) {
-      var v = Number(sec);
-      var n = Math.round(Math.abs(v));
-      if (signed) { sign = n === 0 ? "" : (v > 0 ? "+" : "-"); signLeft = sign; }
-      if (n < 60) {
-        s = n;
-      } else {
-        var hh = Math.floor(n / 3600);
-        var rem = n % 3600;
-        var mm = Math.floor(rem / 60);
-        var ss = rem % 60;
-        if (hh > 0) {
-          h = hh;
-          if (mm > 0) { m = mm; }
-        } else {
-          m = mm;
-          if (ss > 0) { s = ss; }
-        }
-      }
-    }
-    var out = '<span class="tm">';
-    if (hasHours) { out += slot("h", h, "시간"); }
-    out += slot("m", m, "분");
-    out += empty ? '<span class="tslot s"><span class="tn">' + (dash || "—") + '</span></span>' : slot("s", s, "초");
-    return out + '</span>';
-  }
-
-  // 최근 20턴 표(8열). 값끼리 비교하는 열은 한 칸 안에 두 줄로 묶고, 이름은 왼쪽 · 값은 오른쪽에 두어 행이 달라도 같은 세로선에 서게 한다.
-  // 시각·프로젝트 / 처리·호출 / 예상 토큰(직접·위임) / 실제 토큰·증감 / 정확도 / 예상 시간(직접·위임) / 시간(직접·위임) / 시간 증감(직접·위임).
-  // 위임 턴은 직접 처리했어도 생겼을 공통분을 뺀 값끼리 비교한다. 증감은 모두 "표에 보이는 두 값의 차이"다.
-  function renderRecentTable(recent) {
-    if (!els.statsRecentTbody) return;
-    recent = recent || [];
-    if (!recent.length) {
-      var emptyMsg = (typeof recentPath !== "undefined" && recentPath) ? "조건에 맞는 질문이 없습니다." : "최근 질문 기록이 없습니다.";
-      els.statsRecentTbody.innerHTML = '<tr><td colspan="9" style="text-align:center;padding:24px;color:var(--ink-3);">' + emptyMsg + '</td></tr>';
-      return;
-    }
-    function has(v) { return v !== null && v !== undefined; }
-    function titleAttr(text) { return text ? ' title="' + escapeHtml(text) + '"' : ""; }
-    // 이름(label, 글자) · 값(valueHtml) 한 줄. 이름이 없으면 값만 오른쪽에 둔다. labelHtml 은 배지처럼 이미 HTML 인 이름.
-    function row(label, valueHtml, cls, title, labelHtml) {
-      var lbl = labelHtml ? '<span class="est-lbl raw">' + labelHtml + '</span>' : (label ? '<span class="est-lbl">' + label + '</span>' : "");
-      return '<span class="est-line' + (cls ? " " + cls : "") + (lbl ? "" : " solo") + '"' + titleAttr(title) + '>' + lbl + '<span class="est-val">' + valueHtml + '</span></span>';
-    }
-    function stack(inner, mod) { return '<span class="est-pair' + (mod ? " " + mod : "") + '">' + inner + '</span>'; }
-    function bigTime(v) { return has(v) && !isNaN(v) && Math.abs(Number(v)) >= 3600; }
-    var hasHours = false;
-    for (var k = 0; k < recent.length; k++) {
-      var q = recent[k];
-      if (bigTime(q.est_time_direct) || bigTime(q.est_time_delegate) || bigTime(q.est_time_direct_net) || bigTime(q.est_time_delegate_net) || bigTime(q.actual_time) || bigTime(q.claude_wall) || bigTime(q.time_delta_direct) || bigTime(q.time_delta_delegate)) { hasHours = true; break; }
-    }
-    var hh = hasHours ? " hh" : "";
-    // 시간 증감 한 줄의 값: + 는 예상보다 더 걸림(주황), - 는 덜 걸림(초록)
-    function timeDeltaVal(v) {
-      if (!has(v)) { return '<span class="tm">' + (hasHours ? '<span class="tslot h"></span>' : '') + '<span class="tslot m"></span><span class="tslot s"><span class="tn">-</span></span></span>'; }
-      return '<span class="' + (v <= 0 ? "val-ok" : "val-err") + '">' + timeSlotsHtml(v, hasHours, true) + '</span>';
-    }
-    var html = '';
-    for (var i = 0; i < recent.length; i++) {
-      var it = recent[i];
-      var isDir = it.path === "direct";
-      var isDel = it.path === "delegate";
-      // 수집기는 시각을 UTC("…Z")로 저장한다. 이 PC의 시간대로 바꿔서 보인다(문자열을 잘라 쓰면 9시간 어긋난다).
-      var tsDate = it.ts ? new Date(it.ts) : null;
-      var tsOk = tsDate && !isNaN(tsDate.getTime());
-      var tsFull = tsOk ? tsDate.getFullYear() + "-" + pad2(tsDate.getMonth() + 1) + "-" + pad2(tsDate.getDate()) + " " + pad2(tsDate.getHours()) + ":" + pad2(tsDate.getMinutes()) + ":" + pad2(tsDate.getSeconds()) : "-";
-      var tsStr = tsOk ? tsFull.slice(5, 16) : "-";   // 11-06 11:37 (전체 시각은 마우스를 올리면)
-      // 보이는 시각은 사용자가 질문(프롬프트)을 입력한 시각 하나다. 작업이 끝난 시각과 걸린 시간은 마우스를 올리면 보인다.
-      var endDate = it.end_ts ? new Date(it.end_ts) : null;
-      tsFull = tsOk ? "질문 입력 " + tsFull : tsFull;
-      if (tsOk && endDate && !isNaN(endDate.getTime()) && endDate.getTime() >= tsDate.getTime()) {
-        var endFull = endDate.getFullYear() + "-" + pad2(endDate.getMonth() + 1) + "-" + pad2(endDate.getDate()) + " " + pad2(endDate.getHours()) + ":" + pad2(endDate.getMinutes()) + ":" + pad2(endDate.getSeconds());
-        var sameDayEnd = endFull.slice(0, 10) === tsFull.slice(-19, -9);
-        tsFull = tsFull + " · 작업 끝 " + (sameDayEnd ? endFull.slice(11) : endFull);
-      }
-      var pStr = it.project || "-";
-      var pShort = pStr.length > 18 ? "…" + pStr.slice(-17) : pStr;   // 앞을 줄여 뒤 이름(폴더 이름)을 다 보인다
-      var badgeBase = isDir ? "직접 처리" : (isDel ? "위임" : (it.path === "chat" ? "대화" : (it.path || "-")));
-      var badgeLevel = "";
-      if (it.level === "low" || it.level === "낮음") badgeLevel = " · 수준 낮음";
-      else if (it.level === "medium" || it.level === "보통") badgeLevel = " · 수준 보통";
-      else if (it.level === "high" || it.level === "높음") badgeLevel = " · 수준 높음";
-      else if (it.level) badgeLevel = " · 수준 " + it.level;
-      var badgeLine1 = badgeBase + badgeLevel;
-      var badgeLine2 = it.choice_reason ? ("사유: " + it.choice_reason) : "사유: 기록 없음";
-      var badgeTitle = badgeLine1 + "\n" + badgeLine2;
-      var pathBadge = '';
-      var tIds = [];
-      if (typeof it.task_ids === "string" && it.task_ids) {
-        tIds = [it.task_ids];
-      } else if (Array.isArray(it.task_ids)) {
-        tIds = it.task_ids.filter(Boolean);
-      }
-      if (isDel && tIds.length > 0) {
-        badgeTitle += "\n에이전트 위임 카드로 이동(작업 " + tIds.length + "건)";
-        var badgeSpan = '<span class="path-badge delegate"' + titleAttr(badgeTitle) + '>위임</span>';
-        var badgeLink = '<a class="path-badge-link" href="#/qa?task=' + encodeURIComponent(tIds[0]) + '">' + badgeSpan + '</a>';
-        var moreLinks = '';
-        for (var ti = 1; ti < Math.min(tIds.length, 5); ti++) {
-          moreLinks += '<a class="task-more" href="#/qa?task=' + encodeURIComponent(tIds[ti]) + '" title="' + escapeHtml(tIds[ti]) + '">' + (ti + 1) + '</a>';
-        }
-        if (tIds.length >= 6) {
-          moreLinks += '<span class="task-more">…</span>';
-        }
-        pathBadge = badgeLink + moreLinks;
-      } else if (isDir) {
-        pathBadge = '<span class="path-badge direct"' + titleAttr(badgeTitle) + '>직접</span>';
-      } else if (isDel) {
-        pathBadge = '<span class="path-badge delegate"' + titleAttr(badgeTitle) + '>위임</span>';
-      } else if (it.path === "chat") {
-        pathBadge = '<span class="path-badge chat"' + titleAttr(badgeTitle) + '>대화</span>';
-      } else {
-        pathBadge = '<span class="path-badge"' + titleAttr(badgeTitle) + '>' + escapeHtml(it.path || "-") + '</span>';
-      }
-
-      // 처리 · 호출
-      var callsCount = (isDel && has(it.calls_related)) ? it.calls_related : it.calls;
-      var callsStr = has(callsCount) ? callsCount + "회" : "-";
-      var callsTitle = (isDel && has(it.calls_related) && has(it.calls_total) && it.calls_related !== it.calls_total) ? "질문 전체 도구 호출 " + it.calls_total + "회 중 위임과 관련된 호출입니다" : "";
-
-      // 예상 토큰(직접·위임): 위임 턴은 직접 처리했어도 생겼을 공통분을 뺀 값
-      var estDirTok = has(it.est_direct_net) ? it.est_direct_net : it.est_direct;
-      var estDelTok = has(it.est_delegate_net) ? it.est_delegate_net : it.est_delegate;
-      var estTokTitle = (isDel && has(it.common_tokens) && it.common_tokens > 0) ? "기록한 예상: 직접 " + formatTokenK(it.est_direct, false) + " · 위임 " + formatTokenK(it.est_delegate, false) + ". 직접 처리했어도 생겼을 공통분 " + formatTokenK(it.common_tokens, false) + "(실측)을 빼서 위임 관련 실제와 비교합니다." : "";
-      var v1Tag = it.est_ver === "v1" ? ' <span class="tag-v1">옛 형식</span>' : "";
-      // 질문을 받을 때가 아니라 나중에 질문 원문만 보고 채운 예상(est_kind=backfill)은 흐리게 · 기울여 보이고 마우스를 올리면 알린다(칸 폭은 그대로)
-      var bfCls = it.est_kind === "backfill" ? " est-bf" : "";
-      var bfNote = bfCls ? "\n질문 원문만 보고 나중에 채운 예상입니다(질문을 받을 때 낸 예상이 아닙니다)." : "";
-
-      // 실제 토큰 · 증감(토큰): 증감 = 실제 - 예상 직접(표에 보이는 값끼리). + 는 늘어난 것(더 소모, 주황), - 는 줄어든 것(절약, 초록)
-      var actTokStr = has(it.actual) ? formatTokenK(it.actual, false) : "-";
-      var actTitle = (isDel && has(it.actual_total) && has(it.actual) && it.actual_total !== it.actual) ? "질문 전체 " + formatTokenK(it.actual_total, false) + " 중 위임 관련 " + formatTokenK(it.actual, false) + ". 나머지 " + formatTokenK(it.common_tokens, false) + "는 직접 처리했어도 생겼을 공통분이라 뺐습니다." : "";
-      // 위임 턴은 실제 - 예상 위임, 직접 턴은 실제 - 예상 직접. 어느 쪽 예상으로 뺐는지 값 앞의 이름(위임/직접)으로 구분한다.
-      var tokDeltaHtml = "-";
-      var tokDeltaTitle = "";
-      var tokDeltaLbl = "";
-      if (has(it.saved)) {
-        var itDelta = -it.saved;
-        var deltaBasisName = isDel ? "위임" : "직접";
-        var deltaBasisEst = estDirTok;   // 위임 질문도 직접 했을 때의 예상과 비교한다(위임 손익)
-        // 값 자체를 처리 · 호출 칸의 배지와 같은 바탕색(위임 청록 / 직접 갈색)으로 칠해 어느 쪽 예상으로 뺐는지 구분한다. 글자색은 부호(초록 줄어듦 / 주황 늘어남).
-        tokDeltaHtml = '<span class="delta-chip ' + (isDel ? "delegate" : "direct") + ' ' + (itDelta <= 0 ? "val-ok" : "val-err") + '">' + formatTokenK(itDelta, true) + '</span>';
-        tokDeltaTitle = isDel
-          ? "증감(위임 손익) = 위임으로 쓴 실제 " + actTokStr + " - 직접 했을 때의 예상 " + formatTokenK(deltaBasisEst, false) + ". - 는 위임해서 아낀 토큰, + 는 더 쓴 토큰"
-          : "증감 = 실제 " + actTokStr + " - 예상 직접 " + formatTokenK(deltaBasisEst, false) + "(직접 처리한 질문은 예상이 얼마나 빗나갔는지. 손익에는 넣지 않는다)";
-      }
-
-      // 비율 = 실제 ÷ 예상(굵게 표시된 쪽 예상). 1.00 이 정확하고, 1 보다 크면 실제가 예상보다 컸습니다. 이 값의 최근 중앙값이 다음 예상의 보정 계수가 된다
-      var ratioStr = (has(it.actual) && has(it.estimate) && it.estimate > 0) ? (it.actual / it.estimate).toFixed(2) : "-";
-
-      // 예상 시간(직접·위임): 위임 턴은 위임과 무관한 Claude 시간을 뺀 값
-      var estTDir = has(it.est_time_direct_net) ? it.est_time_direct_net : it.est_time_direct;
-      var estTDel = has(it.est_time_delegate_net) ? it.est_time_delegate_net : it.est_time_delegate;
-      var estTimeTitle = (isDel && has(it.est_time_direct) && has(it.est_time_delegate) && (it.est_time_direct !== estTDir || it.est_time_delegate !== estTDel)) ? "기록한 예상: 직접 " + formatTimeKo(it.est_time_direct) + " · 위임 " + formatTimeKo(it.est_time_delegate) + ". 위임과 무관한 Claude 시간을 빼서 위임 시간과 비교합니다." : "";
-
-      html += '<tr>' +
-              '<td class="left" title="' + escapeHtml(tsFull) + '">' + stack(row("", escapeHtml(tsStr), "") + row("", escapeHtml(pShort), "muted", pStr), "left") + '</td>' +
-              '<td class="left"' + titleAttr(callsTitle) + '>' + stack(row("", escapeHtml(callsStr), "", "", pathBadge), "w-proc") + '</td>' +
-              '<td class="num' + bfCls + '"' + titleAttr((estTokTitle || "") + bfNote) + '>' + stack(row("직접", escapeHtml(formatTokenK(estDirTok, false)), isDir ? "chosen" : "") + row("위임", escapeHtml(formatTokenK(estDelTok, false)), isDel ? "chosen" : ""), "w-tok") + v1Tag + '</td>' +
-              '<td class="num"' + titleAttr(actTitle) + '>' + stack(row("직접", isDir ? escapeHtml(actTokStr) : "-", isDir ? "chosen" : "") + row("위임", isDel ? escapeHtml(actTokStr) : "-", isDel ? "chosen" : ""), "w-act") + '</td>' +
-              '<td class="num"' + titleAttr(tokDeltaTitle) + '>' + stack(row("직접", isDir ? tokDeltaHtml : "-", "") + row("위임", isDel ? tokDeltaHtml : "-", ""), "w-tokdelta") + '</td>' +
-              '<td class="num">' + stack(row("", escapeHtml(ratioStr), ""), "w-acc") + '</td>' +
-              '<td class="num' + bfCls + '"' + titleAttr((estTimeTitle || "") + bfNote) + '>' + stack(row("직접", timeSlotsHtml(estTDir, hasHours, false), isDir ? "chosen" : "") + row("위임", timeSlotsHtml(estTDel, hasHours, false), isDel ? "chosen" : ""), "w-time" + hh) + '</td>' +
-              '<td class="num">' + stack(row("직접", timeSlotsHtml(isDel ? null : it.claude_wall, hasHours, false, isDel ? "-" : "—"), isDir ? "chosen" : "") + row("위임", timeSlotsHtml(isDel ? it.actual_time : null, hasHours, false, isDel ? "—" : "-"), isDel ? "chosen" : ""), "w-work" + hh) + '</td>' +
-              '<td class="num">' + stack(row("직접", timeDeltaVal(it.time_delta_direct), "", "직접 시간 - 예상 직접 시간") + row("위임", timeDeltaVal(it.time_delta_delegate), "", "위임 시간 - 예상 위임 시간"), "w-tdelta" + hh) + '</td>' +
-              '</tr>';
-      if (recentShowReason) {
-        var reasonContent = it.choice_reason ? escapeHtml(it.choice_reason) : '<span class="reason-none">기록 없음</span>';
-        html += '<tr class="reason-row"><td colspan="9"><span class="reason-label">사유</span> ' + reasonContent + '</td></tr>';
-      }
-    }
-    els.statsRecentTbody.innerHTML = html;
-  }
-
-  function renderRecentPager(data) {
-    var hasPager = Boolean(data && data.recent_pages != null);
-    if (!hasPager) {
-      if (els.statsRecentPath) els.statsRecentPath.style.display = "none";
-      if (els.statsRecentPrev) els.statsRecentPrev.style.display = "none";
-      if (els.statsRecentNext) els.statsRecentNext.style.display = "none";
-      if (els.statsRecentPageInfo) els.statsRecentPageInfo.style.display = "none";
-      return;
-    }
-    if (els.statsRecentPath) {
-      els.statsRecentPath.style.display = "";
-      if (data.recent_path !== undefined) els.statsRecentPath.value = data.recent_path || "";
-    }
-    if (els.statsRecentPrev) els.statsRecentPrev.style.display = "";
-    if (els.statsRecentNext) els.statsRecentNext.style.display = "";
-    if (els.statsRecentPageInfo) els.statsRecentPageInfo.style.display = "";
-
-    var page = (data.recent_page != null) ? data.recent_page : 1;
-    var pages = (data.recent_pages != null) ? data.recent_pages : 1;
-    var total = (data.recent_total != null) ? data.recent_total : 0;
-    var isLoading = (typeof statsRecentLoading !== "undefined") ? Boolean(statsRecentLoading) : false;
-
-    if (els.statsRecentPageInfo) {
-      els.statsRecentPageInfo.textContent = page + " / " + pages + " · 전체 " + total + "건";
-    }
-    if (els.statsRecentPrev) {
-      els.statsRecentPrev.disabled = (isLoading || page <= 1);
-    }
-    if (els.statsRecentNext) {
-      els.statsRecentNext.disabled = (isLoading || page >= pages);
-    }
-  }
-
-  function renderStats(data) {
-    if (!statsRecentEventsBound) {
-      statsRecentEventsBound = true;
-      if (els.statsRecentReason) {
-        els.statsRecentReason.addEventListener("change", function () {
-          recentShowReason = Boolean(this.checked);
-          try {
-            if (typeof localStorage !== "undefined" && localStorage) {
-              localStorage.setItem("stats.showReason", recentShowReason ? "1" : "0");
-            }
-          } catch (e) {}
-          fetchAndRenderStats(false);
-        });
-      }
-      if (els.statsRecentPath) {
-        els.statsRecentPath.addEventListener("change", function () {
-          if (statsRecentLoading) return;
-          recentPath = this.value || "";
-          recentPage = 1;
-          fetchAndRenderStats(true, true);
-        });
-      }
-      if (els.statsRecentPrev) {
-        els.statsRecentPrev.addEventListener("click", function () {
-          if (statsRecentLoading) return;
-          if (recentPage > 1) {
-            recentPage--;
-            fetchAndRenderStats(true, true);
-          }
-        });
-      }
-      if (els.statsRecentNext) {
-        els.statsRecentNext.addEventListener("click", function () {
-          if (statsRecentLoading) return;
-          var maxPages = (statsData && statsData.recent_pages != null) ? statsData.recent_pages : 1;
-          if (recentPage < maxPages) {
-            recentPage++;
-            fetchAndRenderStats(true, true);
-          }
-        });
-      }
-    }
-    if (els.statsRecentReason) {
-      els.statsRecentReason.checked = recentShowReason;
-    }
-    if (data && data.recent_page != null) {
-      recentPage = data.recent_page;
-    }
-    if (data && data.recent_path !== undefined) {
-      recentPath = data.recent_path || "";
-    }
-    var collectData = (data && data.summary && data.summary.collect) || (data && data.calibration && data.calibration.collect) || null;
-    var bannerState = getCollectBannerState(collectData);
-    if (els.statsCollectBanner) {
-      if (bannerState.show) {
-        els.statsCollectBanner.style.display = "flex";
-        if (els.statsCollectTitle) els.statsCollectTitle.textContent = bannerState.title;
-        if (els.statsCollectDesc) els.statsCollectDesc.textContent = bannerState.desc;
-        if (els.statsCollectFill) {
-          els.statsCollectFill.style.width = bannerState.pct + "%";
-          var pBar = els.statsCollectFill.parentElement;
-          if (pBar) {
-            pBar.setAttribute("aria-valuenow", String(bannerState.pct));
-            pBar.setAttribute("aria-valuetext", bannerState.title);
-          }
-        }
-      } else {
-        els.statsCollectBanner.style.display = "none";
-      }
-    }
-
-    if (!data) {
-      if (els.statsHeroSaved) {
-        els.statsHeroSaved.textContent = "통계를 불러오지 못했습니다. 지금 갱신을 눌러 다시 시도해 주세요.";
-        els.statsHeroSaved.className = "stats-hero-number stats-error";
-      }
-      if (els.statsHeroDesc) {
-        els.statsHeroDesc.textContent = "";
-      }
-      if (els.statsEmptyState) {
-        var emptyMsg = els.statsEmptyState.querySelector(".stats-empty-msg");
-        if (emptyMsg) {
-          emptyMsg.textContent = "통계를 불러오지 못했습니다. 지금 갱신을 눌러 다시 시도해 주세요.";
-        }
-        els.statsEmptyState.style.display = "flex";
-      }
-      if (els.statsContentWrap) els.statsContentWrap.style.display = "none";
-      return;
-    }
-
-    if (!data.summary && (!data.daily || !data.daily.length)) {
-      if (els.statsEmptyState) {
-        var emptyMsg1 = els.statsEmptyState.querySelector(".stats-empty-msg");
-        if (emptyMsg1) {
-          emptyMsg1.innerHTML = "아직 모인 통계가 없습니다. 위임이나 직접 처리 답변 끝에 '예상 토큰'이 적히면 다음 갱신 때 여기에 쌓입니다.<br>위임을 20건 하면 보정식이 이 PC 에 맞춰집니다.";
-        }
-        els.statsEmptyState.style.display = "flex";
-      }
-      if (els.statsContentWrap) els.statsContentWrap.style.display = "none";
-      return;
-    }
-
-    var sum = data.summary || {};
-    var samples = sum.samples || 0;
-    var hasDailyActivity = false;
-    if (data.daily) {
-      for (var i = 0; i < data.daily.length; i++) {
-        var d = data.daily[i];
-        if (d.ok > 0 || d.fail > 0 || d.saved !== 0 || d.direct_turns > 0 || d.delegate_turns > 0) {
-          hasDailyActivity = true;
-          break;
-        }
-      }
-    }
-
-    if (samples === 0 && !hasDailyActivity && (!data.recent || !data.recent.length)) {
-      if (els.statsEmptyState) {
-        var emptyMsg2 = els.statsEmptyState.querySelector(".stats-empty-msg");
-        if (emptyMsg2) {
-          emptyMsg2.innerHTML = "아직 모인 통계가 없습니다. 위임이나 직접 처리 답변 끝에 '예상 토큰'이 적히면 다음 갱신 때 여기에 쌓입니다.<br>위임을 20건 하면 보정식이 이 PC 에 맞춰집니다.";
-        }
-        els.statsEmptyState.style.display = "flex";
-      }
-      if (els.statsContentWrap) els.statsContentWrap.style.display = "none";
-      return;
-    }
-
-    if (els.statsEmptyState) els.statsEmptyState.style.display = "none";
-    if (els.statsContentWrap) els.statsContentWrap.style.display = "block";
-
-    // 1) 헤더 메타
-    if (els.statsUpdatedTime) {
-      els.statsUpdatedTime.textContent = "갱신: " + (data.updated || "-");
-    }
-    var segmentBtns = document.querySelectorAll(".stats-days-segment .segment-btn");
-    for (var b = 0; b < segmentBtns.length; b++) {
-      var dVal = parseInt(segmentBtns[b].getAttribute("data-days"), 10);
-      segmentBtns[b].classList.toggle("active", dVal === (data.days || statsDays));
-    }
-
-    // 2) 헤드라인
-    // 부호의 뜻: + 는 직접 했을 때(또는 다른 쪽으로 처리했을 때)보다 토큰이 늘어난 것(더 소모, 주황), - 는 줄어든 것(절약, 초록)
-    var netDelta = -(sum.net_saved || 0);
-    if (els.statsHeroSaved) {
-      els.statsHeroSaved.textContent = formatTokenK(netDelta, true) + " 토큰";
-      els.statsHeroSaved.className = "stats-hero-number " + (netDelta <= 0 ? "ok" : "err");
-    }
-    if (els.statsHeroDesc) {
-      els.statsHeroDesc.textContent = "최근 " + (data.days || 30) + "일 · 위임 " + (sum.delegate_turns || 0) + "건 기준(위임으로만 쓴 실제 - 직접 했을 때의 예상, 직접 처리한 질문은 넣지 않음)";
-    }
-
-    var totTasks = (sum.delegate_ok || 0) + (sum.delegate_fail || 0);
-    if (els.statsSumSuccess) {
-      var sRate = totTasks > 0 ? "위임 성공률 " + Math.round((sum.delegate_ok / totTasks) * 100) + "% (" + sum.delegate_ok + "/" + totTasks + ")" : "위임 성공률 -";
-      els.statsSumSuccess.textContent = sRate;
-    }
-
-    if (els.statsSumAccuracy) {
-      var rDir = accRatioText(sum.ratio_direct);
-      var rDel = accRatioText(sum.ratio_delegate);
-      var corr = data && data.calibration && data.calibration.correction;
-      var corrTxt = corr ? " · 다음 예상 보정 직접 ×" + corrFactorText(corr.direct) + " · 위임 ×" + corrFactorText(corr.delegate) : "";
-      els.statsSumAccuracy.textContent = "비율 직접 " + rDir + " · 위임 " + rDel + " (실제÷예상, 1.00에 가까울수록 정확)" + corrTxt;
-    }
-
-    if (els.statsSumFormula) {
-      var cal = data.calibration;
-      var formulaStr = "";
-      if (cal && cal.direct && cal.delegate) {
-        formulaStr = "보정식 직접 ≈ " + formatTokenK(cal.direct.a, false) + " + " + formatTokenK(cal.direct.b, false) + "×호출, 위임 ≈ " + formatTokenK(cal.delegate.a, false) + " + " + formatTokenK(cal.delegate.b, false) + "×호출";
-      } else {
-        formulaStr = "보정식 직접 ≈ 0.8k + 1.3k×호출, 위임 ≈ 2.5k + 1.0k×호출";
-      }
-      els.statsSumFormula.textContent = "표본 " + (sum.samples || 0) + "건 · " + formulaStr;
-    }
-
-    if (els.statsSumTime) {
-      var tSum = sum.time;
-      var tDirAvg = (tSum && tSum.direct_avg_s != null) ? formatTimeKo(tSum.direct_avg_s) : "—";
-      var tDelAgyAvg = (tSum && tSum.delegate_agy_avg_s != null) ? formatTimeKo(tSum.delegate_agy_avg_s) : "—";
-      var tDelTurnAvg = (tSum && tSum.delegate_turn_avg_s != null) ? formatTimeKo(tSum.delegate_turn_avg_s) : "—";
-      var tRatDir = tSum ? accRatioText(tSum.ratio_time_direct) : "-";
-      var tRatDel = tSum ? accRatioText(tSum.ratio_time_delegate) : "-";
-      els.statsSumTime.textContent = "처리 시간 · 직접 평균 " + tDirAvg + " · 위임(agy 처리) 평균 " + tDelAgyAvg + " · 위임한 질문 Claude 활동 평균 " + tDelTurnAvg + " · 비율 직접 " + tRatDir + " · 위임 " + tRatDel + " (실제÷예상)";
-      els.statsSumTime.style.display = "block";
-    }
-
-    // 3) 차트 렌더링
-    renderChartTasks(data.daily);
-    renderChartSavings(data.daily);
-    renderChartAccuracy(data.weekly_accuracy);
-    renderChartScatter(data.points, data.calibration);
-    renderChartTimeAccuracy(data.weekly_accuracy);
-    renderRecentTable(data.recent);
-    renderRecentPager(data);
-    applyStatsTableToggle();
   }
 
   // ==========================================================================
@@ -9342,15 +7697,6 @@
 
       if (currentNav === "dashboard") {
         renderDashboard();
-      } else if (currentNav === "stats") {
-        var nowTs = Date.now();
-        if (force || (nowTs - lastStatsFetchAt >= 30000)) {
-          if (!isStatsHovering) {
-            loadStats(statsDays).then(function (data) {
-              renderStats(data);
-            });
-          }
-        }
       } else if (currentNav === "qa") {
         if (qaNeedsRender) {
           applyQaFilters();
@@ -9535,9 +7881,21 @@
 
     // 1차 네비게이션 버튼
     if (els.navBtnDashboard) els.navBtnDashboard.addEventListener("click", function () { switchNav("dashboard"); });
-    if (els.navBtnStats) els.navBtnStats.addEventListener("click", function () { switchNav("stats"); });
     if (els.navBtnQa) els.navBtnQa.addEventListener("click", function () { switchNav("qa"); });
     if (els.navBtnHandoff) els.navBtnHandoff.addEventListener("click", function () { switchNav("handoff"); });
+    if (els.navBtnStats) els.navBtnStats.addEventListener("click", function () { switchNav("stats"); });
+    if (els.usageRefresh) els.usageRefresh.addEventListener("click", function () { loadUsageStats(true); });
+    Array.prototype.forEach.call(document.querySelectorAll(".usage-day-btn"), function (btn) {
+      btn.addEventListener("click", function () {
+        var d = parseInt(btn.dataset.days, 10);
+        if (d === usageDays) return;
+        usageDays = d;
+        usageData = null;
+        renderUsageStats();
+        updateBreadcrumbs();
+        loadUsageStats(false);
+      });
+    });
 
     // 사이드바 토글 버튼 (데스크톱 접기 / 모바일 햄버거)
     if (els.sidebarCollapseBtn) {
@@ -9629,122 +7987,13 @@
       }
     });
 
-    // 통계 기간 버튼 이벤트
-    var dayBtns = document.querySelectorAll(".stats-days-segment .segment-btn");
-    for (var db = 0; db < dayBtns.length; db++) {
-      dayBtns[db].addEventListener("click", function () {
-        var d = parseInt(this.getAttribute("data-days"), 10);
-        if (d === 7 || d === 30 || d === 60) {
-          statsDays = d;
-          updateHash();
-          fetchAndRenderStats(true);
-        }
-      });
-    }
-
-    // 통계 지금 갱신 버튼 이벤트
-    function handleStatsRefresh() {
-      if (els.statsRefreshBtn) els.statsRefreshBtn.textContent = "갱신 요청 중...";
-      fetchJson("/api/token-stats/refresh", { method: "POST" }).then(function () {
-        setTimeout(function () {
-          if (els.statsRefreshBtn) els.statsRefreshBtn.textContent = "지금 갱신";
-          fetchAndRenderStats(true);
-        }, 2500);
-      }).catch(function () {
-        if (els.statsRefreshBtn) els.statsRefreshBtn.textContent = "지금 갱신";
-      });
-    }
-    if (els.statsRefreshBtn) els.statsRefreshBtn.addEventListener("click", handleStatsRefresh);
-    if (els.statsEmptyRefreshBtn) els.statsEmptyRefreshBtn.addEventListener("click", handleStatsRefresh);
-
-    // 통계 표로 보기 토글 이벤트
-    if (els.statsTableToggle) {
-      els.statsTableToggle.addEventListener("change", function () {
-        statsTableView = Boolean(this.checked);
-        applyStatsTableToggle();
-      });
-    }
-
-    // 통계 차트 툴팁 및 호버 감지 (호버 중 자동 갱신 방지)
-    var statsCont = document.querySelector(".stats-page-container");
-    if (statsCont) {
-      statsCont.addEventListener("pointerenter", function () {
-        isStatsHovering = true;
-      });
-      statsCont.addEventListener("pointerleave", function () {
-        isStatsHovering = false;
-        hideStatsTooltip();
-      });
-
-      statsCont.addEventListener("pointerover", function (e) {
-        var target = e.target;
-        if (!target) return;
-        var chartType = target.getAttribute("data-chart");
-        var idxStr = target.getAttribute("data-idx");
-        if (!chartType || idxStr === null) return;
-        var idx = parseInt(idxStr, 10);
-        if (isNaN(idx)) return;
-
-        if (chartType === "tasks" && statsData && statsData.daily && statsData.daily[idx]) {
-          var d = statsData.daily[idx];
-          showStatsTooltip(e, d.date, [
-            { label: "성공", value: (d.ok || 0) + "건", color: "var(--ok)" },
-            { label: "실패", value: (d.fail || 0) + "건", color: "var(--err)" },
-            { label: "전체", value: ((d.ok || 0) + (d.fail || 0)) + "건" }
-          ]);
-        } else if (chartType === "savings" && statsData && statsData.daily && statsData.daily[idx]) {
-          var d = statsData.daily[idx];
-          showStatsTooltip(e, d.date, [
-            { label: "그날 증감 (추정)", value: formatTokenK(-(d.saved || 0), true), color: (d.saved || 0) >= 0 ? "var(--gain)" : "var(--loss)" },
-            { label: "누적 증감 (추정)", value: formatTokenK(-(d.cum_saved || 0), true), color: "var(--ink)" }
-          ]);
-        } else if (chartType === "accuracy" && statsData && statsData.weekly_accuracy && statsData.weekly_accuracy[idx]) {
-          var w = statsData.weekly_accuracy[idx];
-          showStatsTooltip(e, w.week, [
-            { label: "직접", value: accRatioText(w.direct), color: "var(--claude)" },
-            { label: "위임", value: accRatioText(w.delegate), color: "var(--agy)" }
-          ]);
-        } else if (chartType === "time-accuracy" && statsData && statsData.weekly_accuracy && statsData.weekly_accuracy[idx]) {
-          var w = statsData.weekly_accuracy[idx];
-          showStatsTooltip(e, w.week, [
-            { label: "직접", value: accRatioText(w.time_direct), color: "var(--claude)" },
-            { label: "위임", value: accRatioText(w.time_delegate), color: "var(--agy)" }
-          ]);
-        } else if (chartType === "scatter" && statsData && statsData.points && statsData.points[idx]) {
-          var pt = statsData.points[idx];
-          var isDir = (pt.path === "direct");
-          showStatsTooltip(e, isDir ? "직접 처리" : "에이전트 위임", [
-            { label: "도구 호출", value: (pt.calls || 0) + "회" },
-            { label: "실제 토큰", value: formatTokenK(pt.actual || 0, false), color: isDir ? "var(--claude)" : "var(--agy)" }
-          ]);
-        }
-      });
-
-      statsCont.addEventListener("pointermove", function (e) {
-        if (els.statsTooltip && els.statsTooltip.style.display !== "none") moveStatsTooltip(e);
-      });
-
-      statsCont.addEventListener("pointerout", function (e) {
-        var target = e.target;
-        if (target && target.hasAttribute("data-chart")) {
-          hideStatsTooltip();
-        }
-      });
-    }
-
     // 브라우저 해시 변경 감지 (뒤로가기/앞으로가기)
     function applyHashRoute() {
       var parsed = parseHash();
       if (parsed.nav !== currentNav) {
         switchNav(parsed.nav, false);
       }
-      if (parsed.nav === "stats") {
-        var daysChanged = (parsed.days !== statsDays);
-        if (daysChanged) {
-          statsDays = parsed.days || 30;
-          fetchAndRenderStats(true);
-        }
-      } else if (parsed.nav === "qa") {
+      if (parsed.nav === "qa") {
         if (parsed.task) {
           focusQaTask(parsed.task);
         } else {
@@ -9804,9 +8053,7 @@
 
   // 초기 라우트 파싱
   var initialRoute = parseHash();
-  if (initialRoute.nav === "stats") {
-    statsDays = initialRoute.days || 30;
-  } else if (initialRoute.nav === "qa") {
+  if (initialRoute.nav === "qa") {
     if (initialRoute.session) { currentQaSession = initialRoute.session; }
     if (initialRoute.project) { currentQaProject = initialRoute.project; }
     if (initialRoute.agy) { currentQaAgy = initialRoute.agy; }

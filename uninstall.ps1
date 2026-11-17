@@ -116,11 +116,11 @@ if (Test-Path $regSessionScript) {
     }
 }
 
-# 2-3. 질문마다 예상 기록을 강제하는 훅 셋(UserPromptSubmit · PreToolUse HTTP · Stop) 제거
-$regGuardScript = Join-Path $env:USERPROFILE ".samjil\delegate-agy\scripts\sub\register-estimate-guard.ps1"
+# 2-3. 옛 버전이 넣어 둔 예상 기록 강제 훅 셋(UserPromptSubmit · PreToolUse HTTP · Stop)이 남아 있으면 제거
+$regGuardScript = Join-Path $env:USERPROFILE ".samjil\delegate-agy\scripts\sub\remove-estimate-guard.ps1"
 if (Test-Path $regGuardScript) {
     try {
-        $guardRes = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $regGuardScript -Remove 2>&1 | Out-String).Trim()
+        $guardRes = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $regGuardScript 2>&1 | Out-String).Trim()
         if ($guardRes -eq "REMOVED") { Write-Host "[+] 예상 기록 강제 훅 제거 (~/.claude/settings.json, 백업: settings.json.bak-*)" -ForegroundColor Green }
     } catch {
         Write-Warning "예상 기록 강제 훅 제거 중 오류: $_"
