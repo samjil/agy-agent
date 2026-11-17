@@ -136,6 +136,7 @@ EOF
   | `deep` | 논리가 까다로운 구현(알고리즘 · 동시성 · 파서 · 수치 · 성능 목표), build-hard 실패의 다시 보내기 | gemini-4-hydrogen-xhigh (Extra) | 20분 |
 
 - **모델 단계 자동 선택 · 상향**: `@model`·`@session` 을 지정하지 않으면 요청 내용으로 `quick`(짧은 읽기 전용) 또는 `build`(파일 변경·분석·긴 요청)만 자동 선택합니다. 이유는 `watcher.log` 의 `모델 자동 선택:` 줄에 남고, `AGY_AUTO_MODEL=off` 로 끕니다(끄면 `build`). 실패 시 상향은 `build` → `build-hard` → `deep` 순으로 한 단계씩, 한 번만 올립니다.
+- **한도 균형**: Claude 와 agy(Gemini) 구독 한도를 남은 시간 대비 비슷한 속도로 쓰도록 위임 정도를 조절합니다. `sub\quota-balance.ps1` 이 창(5시간 · 주간)마다 `남은 % - 남은 시간 %` 를 비교해 `agy-more` · `agy-max` · `balanced` · `claude-more` · `no-agy` 를 정하고, 질문을 보낼 때마다 훅(UserPromptSubmit)이 `[한도 균형] ...` 줄과 할 일 한 줄을 넣습니다. agy 한도는 `agy -p "/usage"`(모델 호출 없음)로 워처가 켜질 때와 위임 뒤에 읽고, Claude 한도는 Claude 가 데스크톱 앱의 사용량 도구로 읽어 `quota-balance.ps1 -Claude5hUsed …` 로 남깁니다(`runtime\agy-quota.json` · `claude-quota.json` · `quota-balance.json`).
 - **위임 기록**: 사용량·질문·답·과정(도구 호출 목록)·agy 세션은 `~/.samjil/delegate-agy/data/delegate.db` 하나에 쌓입니다(Windows 의 `winsqlite3.dll` 을 쓰므로 설치할 것이 없고, 여러 프로세스가 동시에 써도 됩니다). 로그(`watcher.log` 등 진짜 런타임 로그만)는 `runtime/logs/` 에 있습니다. 하트비트·잠금·정지 표시는 `runtime/` 바로 아래에 있습니다.
 
 ## 핸드오프 (Claude ↔ agy 대화)
@@ -170,7 +171,7 @@ EOF
 - **대시보드**: agy 의 현재 상태(작업 중·대기·워처 꺼짐), 최근 위임 결과 띠, **확인 필요**(처리 대기 중인 메시지·최근 24시간의 실패), 위임과 협의를 합친 최근 활동, 누적 건수·성공률·평균 소요·모델 분포.
 - **에이전트 위임**: 질문·답변 카드(모델·상태 필터, 검색). 진행 중인 카드는 지금 하는 일, 최근 생각, 실시간 토큰, 상태(진행 중·조용함·멈춤)를 보입니다. 긴 질문·답변은 일반적인 길이까지만 보이고 **전체 보기**(렌더링/Raw)로 원본을 엽니다.
 - **에이전트 협의**: 채널별 메시지 타임라인, 방향·상태 필터(보냄→읽음→처리됨→확인함 진행 표시), `BRIEF.md` 열람, 채널 상단의 자동 이어가기 상태와 켜기/끄기/한도 초기화. 방향은 메시지 머리말의 모델로 `Claude Sonnet 5.5 (Medium) → Gemini 4 Argon (High)` 처럼 보입니다.
-- **실측 통계**(`#/stats`): Claude 에게 한 질문마다 직접 처리인지 위임인지, 모델 조합(`opus-5-5 → hydrogen-medium` 등 짧은 모델명: `hydrogen-medium` · `hydrogen-extra` · `argon-high` · `orchestrator` · `flash-medium`), 소요 시간, 총 토큰(입력 + 캐시 쓰기 + 출력, 캐시 읽기는 따로), 사유를 보이고 기간(7 · 30 · 90일)별로 요약합니다. 대화 기록(`~/.claude/projects`)과 위임 기록에서 측정된 값만 모으며 예상치는 없습니다. 화면을 열 때 수집하고(`sub\usage-stats.ps1`), 질문 원문은 앞 60자만 저장하며 90일 지나면 지웁니다. 사유는 Claude 가 `note-choice.ps1`(직접) · `@reason`(위임)으로 남긴 것만 보이고, 없으면 "기록 없음"입니다.
+- **실측 통계**(`#/stats`): Claude 에게 한 질문마다 직접 처리인지 위임인지, 모델 조합(`opus-5-5 (high) → hydrogen-medium` 처럼 Claude 는 노력 단계까지, agy 는 짧은 모델명: `hydrogen-medium` · `hydrogen-extra` · `argon-high` · `orchestrator` · `flash-medium`), 소요 시간, 총 토큰(입력 + 캐시 쓰기 + 출력, 캐시 읽기는 따로), 사유를 보이고 기간(7 · 30 · 90일)별로 요약합니다. 대화 기록(`~/.claude/projects`)과 위임 기록에서 측정된 값만 모으며 예상치는 없습니다. 화면을 열 때 수집하고(`sub\usage-stats.ps1`), 질문 원문은 앞 60자만 저장하며 90일 지나면 지웁니다. 사유는 Claude 가 `note-choice.ps1`(직접) · `@reason`(위임)으로 남긴 것만 보이고, 없으면 "기록 없음"입니다.
 - 사이드바는 **Claude Desktop 의 프로젝트 그룹 → 대화 세션** 트리이고(정렬 선택·펼침 상태 기억), 라이트/다크/시스템 테마를 고를 수 있습니다. 색은 보낸 쪽을 뜻합니다: Claude 는 황토, agy 는 청록, 초록/빨강은 성공/실패에만 씁니다.
 
 **과정 창**: 카드의 **과정 N** 버튼을 누르면 agy 가 질문과 답변 사이에 한 일(도구 호출 목록: 번호·시각·한글 설명·대상·생각·진행 설명)이 열립니다. 진행 중에는 새 단계가 이어 붙습니다. 영어로 나온 생각·설명은 **agy 로 번역**(서버가 agy 에게 읽기 전용으로 시켜 캐시, 사용량을 씀)과 **브라우저로 번역**(Chrome 계열의 내장 번역, 무료·품질 낮을 수 있음)으로 한글로 볼 수 있습니다. 과정은 워처가 작업을 마칠 때 `agy.db` 에 저장하고, 예전 기록은 창을 열 때만 agy 대화 기록에서 읽어 옵니다.

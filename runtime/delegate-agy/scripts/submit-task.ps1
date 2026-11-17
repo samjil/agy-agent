@@ -397,6 +397,17 @@ if ($ids.Count -eq 0) {
                 . $transcriptLib
                 $lastUsage = Get-ClaudeTranscriptLastUsage -SessionId $sessId
                 $ctxThreshold = 200000
+                # 한도 균형 모드(quota-balance.json, 6시간 안의 값)를 따른다: agy-more 80k, agy-max 30k. 환경변수가 있으면 그 값이 이긴다.
+                try {
+                    $qbFile = Join-Path $script:RuntimeDirResolved "quota-balance.json"
+                    if (Test-Path -LiteralPath $qbFile -PathType Leaf) {
+                        $qb = Read-TextFile $qbFile | ConvertFrom-Json
+                        $qbAt = [datetime]::MinValue
+                        if ([datetime]::TryParse([string]$qb.computed_at, [ref]$qbAt) -and ((Get-Date).ToUniversalTime() - $qbAt.ToUniversalTime()).TotalHours -lt 6) {
+                            if ([string]$qb.mode -eq "agy-more") { $ctxThreshold = 80000 } elseif ([string]$qb.mode -eq "agy-max") { $ctxThreshold = 30000 }
+                        }
+                    }
+                } catch {}
                 if ($env:AGY_CTX_SUBAGENT_THRESHOLD -match '^\d+$') { $ctxThreshold = [int]$env:AGY_CTX_SUBAGENT_THRESHOLD }
                 if ($lastUsage -and $lastUsage.ctx -and [long]$lastUsage.ctx -gt $ctxThreshold) {
                     [Console]::Error.WriteLine(("[컨텍스트 {0}k] 컨텍스트가 큽니다. 위임 절차는 서브에이전트에 맡기세요(호출마다 대화 전체를 다시 읽습니다)." -f [int][math]::Round([long]$lastUsage.ctx / 1000.0)))

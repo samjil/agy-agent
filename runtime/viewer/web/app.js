@@ -221,7 +221,7 @@
       agyStr += ' <span class="badge model-fallback" title="앞 모델이 한도 · 과부하로 막혀 맨 마지막 대안(3.8 Flash)으로 처리했습니다. 결과를 더 꼼꼼히 확인하세요.">3.8 대체</span>';
     }
     if (!claudeModel) return agyStr;
-    var cShort = escapeHtml(shortClaudeModel(claudeModel));
+    var cShort = escapeHtml(shortClaudeModel(claudeModel) + (claudeEffort ? " (" + String(claudeEffort).toLowerCase() + ")" : ""));
     var cTitle = "이 위임을 보낸 Claude 모델: " + claudeModel + (claudeEffort ? " (effort " + claudeEffort + ")" : "");
     return '<span class="dim" title="' + escapeHtml(cTitle) + '">' + cShort + ' → </span>' + agyStr;
   }
@@ -3922,8 +3922,17 @@
     return shortAgyModel(String(name || "").trim());
   }
   // 모델 칸: 직접은 Claude 모델, 위임은 "Claude → agy 모델들"(짧은 이름, 셋 이상이면 "외 N")
+  // 질문 기록 표의 모델 칸: 위임은 "Claude (노력)" 과 "→ agy 모델" 을 두 줄로 나눠 좁은 칸에서도 잘리지 않게 한다.
+  function usageComboHtml(r) {
+    var text = usageComboText(r);
+    var cut = text.indexOf(" → ");
+    if (cut < 0) return escapeHtml(text);
+    return '<span class="usage-model-line">' + escapeHtml(text.slice(0, cut)) + '</span>' +
+      '<span class="usage-model-line usage-model-agy">→ ' + escapeHtml(text.slice(cut + 3)) + '</span>';
+  }
   function usageComboText(r) {
-    var claude = r.claude_model || String(r.combo || "").split(" → ")[0] || "?";
+    // Claude 모델은 노력 단계까지("opus-5-5 (high)"). 예전 기록처럼 노력을 모르면 모델만.
+    var claude = r.claude_label || r.claude_model || String(r.combo || "").split(" → ")[0] || "?";
     if (r.mode !== "delegate") return claude;
     var agy = String(r.agy_models || "").split(",").map(function (m) { return usageAgyShort(m); }).filter(Boolean);
     if (!agy.length) return claude + " → ?";
@@ -3994,7 +4003,7 @@
       '<td class="usage-when">' + usageWhen(r.q_ts) + '</td>' +
       '<td class="usage-mode-cell"><span class="badge usage-' + escapeHtml(r.mode) + '">' + usageModeLabel(r.mode) + '</span>' +
         (r.auto ? ' <span class="badge" title="자동 진행: /loop · 예약 실행으로 이어진 구간이라 한 건으로 묶였습니다">자동</span>' : '') + tasks + '</td>' +
-      '<td class="usage-model" title="' + escapeHtml(r.combo) + '">' + escapeHtml(usageComboText(r)) + '</td>' +
+      '<td class="usage-model" title="' + escapeHtml(r.combo) + '">' + usageComboHtml(r) + '</td>' +
       '<td class="num" data-label="소요">' + usageDur(r.dur_sec) + '</td>' +
       '<td class="num" data-label="토큰" title="' + escapeHtml(usageTokenTitle(r)) + '">' + usageTokenText(r) + '</td>' +
       '<td class="num" data-label="캐시 읽기">' + usageNum(r.cr_tokens) + '</td>' +

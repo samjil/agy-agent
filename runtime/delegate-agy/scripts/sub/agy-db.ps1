@@ -213,7 +213,8 @@ function Initialize-AgySqlite {
 #   1: tasks · agy_sessions · meta   3: + cum_* · usage_basis(이어 보낸 세션 토큰 분리)
 #   15: 토큰 통계 표(token_files · token_turns · token_task_links · token_estimates)는 더 만들지 않는다. 이미 있는 DB 의 표는 지우지 않고 그냥 안 쓴다.
 #   16: 실측 통계 표(usage_files · usage_notes · usage_questions). 수집은 sub\usage-stats.ps1, 사유 기록은 note-choice.ps1 · submit-task.ps1(@reason).
-$script:AgyDbSchemaVersion = 16
+#   17: usage_questions 에 Claude 노력 단계(claude_effort). 열을 새로 더할 때는 usage_files 를 비워 대화 기록을 처음부터 다시 읽게 한다(예전 질문의 노력도 채운다).
+$script:AgyDbSchemaVersion = 17
 $script:AgyDbSchemaSql = @(
     "CREATE TABLE IF NOT EXISTS tasks (
         task_id TEXT PRIMARY KEY NOT NULL,
@@ -235,7 +236,7 @@ $script:AgyDbSchemaSql = @(
     "CREATE INDEX IF NOT EXISTS idx_usage_notes_session ON usage_notes(session, noted_at)",
     "CREATE TABLE IF NOT EXISTS usage_questions (
         session TEXT NOT NULL, q_ts TEXT NOT NULL, project TEXT, mode TEXT,
-        claude_model TEXT, agy_models TEXT,
+        claude_model TEXT, claude_effort TEXT, agy_models TEXT,
         dur_sec INTEGER, calls INTEGER,
         in_tokens INTEGER, cc_tokens INTEGER, cr_tokens INTEGER, out_tokens INTEGER,
         agy_tokens INTEGER, agy_sec INTEGER, task_ids TEXT, task_ok INTEGER, task_fail INTEGER, task_cancel INTEGER,
@@ -269,6 +270,16 @@ function Initialize-AgyDbSchema($Db, [string]$Path = "") {
             try { [void]$Db.Execute("ALTER TABLE tasks ADD COLUMN $cName TEXT", $null) } catch {}
         }
     }
+
+    # 스키마 v17: 실측 통계 질문 표에 Claude 노력 단계 열. 예전 DB 에 열을 더하면 읽은 위치(usage_files)를 비워 다음 수집이 처음부터 다시 읽게 한다.
+    try {
+        $uqCols = @{}
+        foreach ($row in @($Db.Query("PRAGMA table_info(usage_questions)", $null))) { if ($row["name"]) { $uqCols[[string]$row["name"]] = $true } }
+        if ($uqCols.Count -gt 0 -and -not $uqCols.ContainsKey('claude_effort')) {
+            [void]$Db.Execute("ALTER TABLE usage_questions ADD COLUMN claude_effort TEXT", $null)
+            [void]$Db.Execute("DELETE FROM usage_files", $null)
+        }
+    } catch {}
 
     # 기존 기록 마이그레이션 (한 번만, 되돌릴 수 있게)
     $alreadyMigrated = $false

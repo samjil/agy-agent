@@ -57,6 +57,22 @@ Pick a tier and write it as `@model: <tier>` (details and fallbacks: `references
 
 If the user asks to delegate and the job belongs on the "keep" side, say so in one line and offer to do it directly; follow the user's choice. agy has no web search. Never trust factual claims from agy without checking.
 
+### Balance the two quotas
+
+Use the Claude and agy subscriptions at a similar pace relative to the time left in each window (not 50:50, just not far apart). A line `[한도 균형] <mode> ...` and an advice line come with each prompt (hook) and from `quota-balance.ps1`; follow the mode:
+
+| Mode | When | What changes |
+|---|---|---|
+| `agy-more` | Claude is burning faster than agy | Delegate multi-file work, tests, docs and code-exploration bundles. Hand the delegation procedure to a subagent above 80k context. One- or two-line edits stay direct (a delegation costs at least two Claude calls). |
+| `agy-max` | Claude 5-hour limit 90% or more used | Delegate everything delegable; Claude only writes briefs, reviews and talks to the user. Subagent above 30k context. |
+| `balanced` | similar pace | The rules above as they are. |
+| `claude-more` | agy is burning faster | Still delegate whatever meets the rules above; only pick the lighter tier when it gives the same result (`quick`/`build`), and use `deep`/`feature` only when really needed. Claude having more quota left is never a reason to skip a delegation. |
+| `no-agy` | agy Gemini 5-hour under 10% or weekly under 5% | Do not delegate until it resets. |
+
+If the line also says Argon is tight, keep `think`/`feature` to required consultations and split the work yourself into `build`/`build-hard`.
+
+Claude's own limits are visible only to you (the desktop app's usage tool). When the line says the Claude numbers are missing or older than 30 minutes and the request is real work, read your usage once in the same message as your first other call, then put this before your next shell command (same call, no extra round trip): `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$USERPROFILE/.samjil/delegate-agy/scripts/sub/quota-balance.ps1" -Claude5hUsed <N> -Claude5hResetsAt <ISO> -ClaudeWeekUsed <N> -ClaudeWeekResetsAt <ISO> ;`. Without that tool, the mode uses agy numbers only.
+
 ## 2. Consult Argon before very complex decisions
 
 For a design across several modules, a structural change that is hard to undo, a bug whose cause you cannot see, or a decision between two or more directions that is hard to call: consult Argon (`think`) at least once before you decide. Use the `samjil-handoff` channel (its default model is `think`).

@@ -2796,6 +2796,8 @@ span.task-more {
 .usage-table td.usage-reason .usage-clip { max-width: 12em; }
 /* 모델 칸: 위임 모델이 여럿이면 길어지므로 말줄임 + 툴팁(전체) */
 .usage-table td.usage-model { max-width: 17em; overflow: hidden; text-overflow: ellipsis; }
+.usage-model-line { display: block; overflow: hidden; text-overflow: ellipsis; }
+.usage-model-agy { color: var(--ink-3); }
 .usage-task-more { margin-left: 8px; padding: 0 7px; border: 1px solid var(--line); border-radius: 999px; background: transparent; color: var(--agy); font: inherit; font-size: var(--fs-xs); line-height: 1.5; cursor: pointer; }
 .usage-task-more[aria-expanded="true"] { background: var(--agy-soft); }
 .usage-task-more:hover { background: var(--raised); color: var(--ink); }

@@ -25,6 +25,9 @@ param(
     [int]$UsageRetentionDays = 90
 )
 
+# 이 파일이 있는 폴더(옆의 agy-models.ps1 로 agy 모델 이름을 짧게 만든다)
+$script:AgyUsageScriptDir = $PSScriptRoot
+
 $script:AgyUsageSource = @'
 using System;
 using System.Collections;
@@ -39,7 +42,7 @@ namespace AgyUsage
 {
     public class Question
     {
-        public string QTs = "", EndTs = "", Project = "", Model = "", Preview = "";
+        public string QTs = "", EndTs = "", Project = "", Model = "", Effort = "", Preview = "";
         public long Offset;
         public int Calls, DurSec;
         public long In, Cc, Cr, Out;
@@ -47,6 +50,7 @@ namespace AgyUsage
         public List<string> TaskIds = new List<string>();
         internal Dictionary<string, long[]> Usage = new Dictionary<string, long[]>();
         internal Dictionary<string, int> Models = new Dictionary<string, int>();
+        internal Dictionary<string, int> Efforts = new Dictionary<string, int>();
         internal DateTime Last;
         internal double Dur;
     }
@@ -150,6 +154,11 @@ namespace AgyUsage
             {
                 if (m.Value > best) { best = m.Value; q.Model = m.Key; }
             }
+            best = 0;
+            foreach (KeyValuePair<string, int> e in q.Efforts)
+            {
+                if (e.Value > best) { best = e.Value; q.Effort = e.Key; }
+            }
             q.Calls = q.Usage.Count;
             q.DurSec = (int)Math.Round(q.Dur);
             q.EndTs = Iso(q.Last);
@@ -219,6 +228,10 @@ namespace AgyUsage
                 {
                     cur.Usage[id] = now;
                     int c; cur.Models.TryGetValue(model, out c); cur.Models[model] = c + 1;
+                    // 노력 단계: 이번 턴만 다르게 준 perTurnEffort 가 있으면 그것, 없으면 그 줄의 effort(Claude Code 2.1.x 의 대화 기록)
+                    string effort = S(o, "perTurnEffort");
+                    if (string.IsNullOrEmpty(effort)) { effort = S(o, "effort"); }
+                    if (!string.IsNullOrEmpty(effort)) { effort = effort.Trim().ToLowerInvariant(); int ec; cur.Efforts.TryGetValue(effort, out ec); cur.Efforts[effort] = ec + 1; }
                 }
                 IEnumerable blocks = (content is string) ? null : content as IEnumerable;
                 if (blocks != null)
@@ -429,8 +442,8 @@ function Invoke-AgyUsageCollect([string]$DbPath, [string]$ProjectsDir, [string]$
                 elseif ($res.Questions.Count -gt 0) { [void]$db.Execute("DELETE FROM usage_questions WHERE session = ? AND q_ts >= ?", [object[]]@($session, [string]$res.Questions[0].QTs)) }
                 foreach ($q in $kept) {
                     $mode = if ($q.TaskIds.Count -gt 0) { 'delegate' } elseif ($q.HasTool) { 'direct' } else { 'chat' }
-                    [void]$db.Execute("INSERT OR REPLACE INTO usage_questions (session, q_ts, project, mode, claude_model, dur_sec, calls, in_tokens, cc_tokens, cr_tokens, out_tokens, task_ids, preview, auto, end_ts) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                        [object[]]@($session, [string]$q.QTs, [string]$q.Project, $mode, [string]$q.Model, [long]$q.DurSec, [long]$q.Calls, [long]$q.In, [long]$q.Cc, [long]$q.Cr, [long]$q.Out,
+                    [void]$db.Execute("INSERT OR REPLACE INTO usage_questions (session, q_ts, project, mode, claude_model, claude_effort, dur_sec, calls, in_tokens, cc_tokens, cr_tokens, out_tokens, task_ids, preview, auto, end_ts) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        [object[]]@($session, [string]$q.QTs, [string]$q.Project, $mode, [string]$q.Model, [string]$q.Effort, [long]$q.DurSec, [long]$q.Calls, [long]$q.In, [long]$q.Cc, [long]$q.Cr, [long]$q.Out,
                             (@($q.TaskIds) -join ','), [string]$q.Preview, $(if ($q.Auto) { [long]1 } else { [long]0 }), [string]$q.EndTs))
                 }
                 [void]$db.Execute("INSERT OR REPLACE INTO usage_files (path, offset, mtime) VALUES (?,?,?)", [object[]]@($filePath, [long]$res.NextOffset, $stamp))
@@ -513,6 +526,25 @@ function ConvertTo-AgyUsageShortModel([string]$Model) {
     return (([string]$Model) -replace '^claude-', '' -replace '-\d{8}$', '')
 }
 
+# Claude 모델 + 노력 단계: "opus-5-5" + "high" -> "opus-5-5 (high)". 노력을 모르면(예전 기록) 모델만.
+function ConvertTo-AgyUsageClaudeLabel([string]$ShortModel, [string]$Effort) {
+    if (-not $ShortModel) { return "" }
+    if ($Effort -and $Effort.Trim()) { return ("{0} ({1})" -f $ShortModel, $Effort.Trim().ToLowerInvariant()) }
+    return $ShortModel
+}
+
+# agy 모델 목록("gemini-4-hydrogen-medium, gemini-3.8-flash-low")을 짧은 이름으로: "hydrogen-medium, flash-low"(agy-models.ps1 의 Get-AgyModelShortName)
+function ConvertTo-AgyUsageAgyShort([string]$Models) {
+    if (-not $Models) { return "" }
+    if (-not (Get-Command Get-AgyModelShortName -ErrorAction SilentlyContinue)) {
+        $lib = Join-Path $script:AgyUsageScriptDir "agy-models.ps1"
+        if ($script:AgyUsageScriptDir -and (Test-Path -LiteralPath $lib)) { . $lib }
+    }
+    $parts = @(([string]$Models -split ',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    if (Get-Command Get-AgyModelShortName -ErrorAction SilentlyContinue) { $parts = @($parts | ForEach-Object { Get-AgyModelShortName $_ }) }
+    return ($parts -join ', ')
+}
+
 # /api/usage-stats 의 본문(JSON 글자). 기간은 UTC 기록 시각끼리 비교하고, 일별 묶음만 이 PC 의 현지 날짜로 한다.
 function Get-AgyUsageStatsJson([string]$DbPath, [int]$Days = 7, [bool]$Collecting = $false, [int]$RowLimit = 200) {
     if (@(7, 30, 90) -notcontains $Days) { $Days = 7 }
@@ -540,13 +572,16 @@ function Get-AgyUsageStatsJson([string]$DbPath, [int]$Days = 7, [bool]$Collectin
     $items = New-Object System.Collections.ArrayList
     foreach ($r in $rows) {
         $claude = ConvertTo-AgyUsageShortModel ([string]$r['claude_model'])
+        $effort = if ($r.ContainsKey('claude_effort') -and $null -ne $r['claude_effort']) { [string]$r['claude_effort'] } else { "" }
+        $claudeLabel = ConvertTo-AgyUsageClaudeLabel $claude $effort
         $agy = [string]$r['agy_models']
-        $combo = if ([string]$r['mode'] -eq 'delegate') { "{0} → {1}" -f $(if ($claude) { $claude } else { '?' }), $(if ($agy) { $agy } else { '?' }) } else { $(if ($claude) { $claude } else { '?' }) }
+        $agyShort = ConvertTo-AgyUsageAgyShort $agy
+        $combo = if ([string]$r['mode'] -eq 'delegate') { "{0} → {1}" -f $(if ($claudeLabel) { $claudeLabel } else { '?' }), $(if ($agyShort) { $agyShort } else { '?' }) } else { $(if ($claudeLabel) { $claudeLabel } else { '?' }) }
         $local = $null
         try { $local = ([DateTime]::Parse([string]$r['q_ts'], [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AdjustToUniversal)).ToLocalTime() } catch { $local = Get-Date }
         [void]$items.Add([pscustomobject][ordered]@{
             q_ts = [string]$r['q_ts']; end_ts = [string]$r['end_ts']; session = [string]$r['session']; project = [string]$r['project']
-            mode = [string]$r['mode']; claude_model = $claude; agy_models = $agy; combo = $combo
+            mode = [string]$r['mode']; claude_model = $claude; claude_effort = $effort; claude_label = $claudeLabel; agy_models = $agy; combo = $combo
             dur_sec = [long]$r['dur_sec']; calls = [long]$r['calls']
             tokens = ([long]$r['in_tokens'] + [long]$r['cc_tokens'] + [long]$r['out_tokens']); cr_tokens = [long]$r['cr_tokens']
             agy_tokens = $(if ($null -eq $r['agy_tokens']) { $null } else { [long]$r['agy_tokens'] })

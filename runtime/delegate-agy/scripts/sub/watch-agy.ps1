@@ -101,6 +101,19 @@ $AvailableModelsFile = Join-Path $RuntimeDir "agy-models-available.json"
 
 function Get-WatcherModelConfig { return (Get-AgyModelConfig) }
 
+# agy 한도(agy -p "/usage", 모델 호출 없음)를 창 없는 별도 프로세스로 새로 고친다(quota-balance.ps1 -RefreshAgy). 기다리지 않는다.
+# 워처가 켜질 때와 위임 작업이 끝난 뒤에 부른다. $MinAgeMinutes 보다 최근에 고쳤으면 건너뛴다(유휴 때는 부르지 않는다).
+function Start-AgyQuotaRefresh([double]$MinAgeMinutes = 3) {
+    try {
+        $qs = Join-Path $PSScriptRoot "quota-balance.ps1"
+        if (-not (Test-Path -LiteralPath $qs)) { return }
+        $qf = Join-Path $RuntimeDir "agy-quota.json"
+        if ((Test-Path -LiteralPath $qf) -and (((Get-Date) - (Get-Item -LiteralPath $qf).LastWriteTime).TotalMinutes -lt $MinAgeMinutes)) { return }
+        Start-Process -FilePath "powershell.exe" -WindowStyle Hidden -ArgumentList @(
+            "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$qs`"", "-RuntimeDir", "`"$RuntimeDir`"", "-RefreshAgy", "-Quiet") | Out-Null
+    } catch {}
+}
+
 # 워처가 시작할 때 확인한 모델 목록(없거나 못 읽으면 빈 배열 = 확인하지 않은 것으로 보고 거르지 않는다)
 function Get-WatcherAvailableModels {
     try {
@@ -1305,6 +1318,8 @@ function Invoke-InboxTask([string]$TaskPath) {
         Invoke-InboxTaskBody $file
     } finally {
         Remove-RunningClaim $taskKey
+        # 위임이 한도를 썼으니 agy 한도를 새로 읽어 둔다(3분 안에 이미 읽었으면 건너뜀). 한도 균형(quota-balance.ps1)이 쓴다.
+        Start-AgyQuotaRefresh 3
     }
 }
 
@@ -1862,6 +1877,8 @@ try {
     Remove-Item -LiteralPath $AvailableModelsFile -Force -ErrorAction SilentlyContinue
     Log "모델 확인: agy 를 찾지 못해 확인 없이 시작합니다 ($($_.Exception.Message))."
 }
+# 한도 균형용 agy 한도를 한 번 읽어 둔다(창 없는 별도 프로세스, 기다리지 않음)
+Start-AgyQuotaRefresh 0
 
 New-Item -ItemType Directory -Force -Path $RunningDir -ErrorAction SilentlyContinue | Out-Null
 Remove-StaleSessions -MaxAgeDays $SessionMaxAgeDays

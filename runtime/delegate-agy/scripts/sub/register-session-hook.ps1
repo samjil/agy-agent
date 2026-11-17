@@ -1,5 +1,5 @@
 ﻿# register-session-hook.ps1
-# Claude Code 의 ~/.claude/settings.json 에 agy 워처 SessionStart 훅(session-start-hook.ps1)을 넣거나 뺍니다.
+# Claude Code 의 ~/.claude/settings.json 에 agy 워처 훅(session-start-hook.ps1)을 넣거나 뺍니다: SessionStart 와 UserPromptSubmit(한도 균형 한 줄).
 #   .\register-session-hook.ps1            # 넣기(이미 있으면 경로만 바꿈)
 #   .\register-session-hook.ps1 -Check     # 지금 상태만 보기
 #   .\register-session-hook.ps1 -Remove    # 빼기(다른 훅과 설정은 그대로)
@@ -32,10 +32,16 @@ if ($existed) {
 }
 if (-not $settings) { $settings = [pscustomobject]@{} }
 
-function Get-SessionHookEntries($s) {
+# 넣는 훅 둘: SessionStart(워처 켜기 + 규칙 한 줄 + 한도 균형) · UserPromptSubmit(질문마다 한도 균형 한 줄, agy 를 부르지 않는다)
+$events = [ordered]@{
+    "SessionStart"     = $command
+    "UserPromptSubmit" = $command + ' -Event UserPromptSubmit'
+}
+
+function Get-SessionHookEntries($s, [string]$Event = "SessionStart") {
     $found = @()
-    if ($s.PSObject.Properties["hooks"] -and $s.hooks.PSObject.Properties["SessionStart"]) {
-        foreach ($g in @($s.hooks.SessionStart)) {
+    if ($s.PSObject.Properties["hooks"] -and $s.hooks.PSObject.Properties[$Event]) {
+        foreach ($g in @($s.hooks.$Event)) {
             if (-not $g) { continue }
             foreach ($h in @($g.hooks)) {
                 if ($h -and ([string]$h.command).Contains($marker)) { $found += $h }
@@ -45,41 +51,47 @@ function Get-SessionHookEntries($s) {
     return @($found)
 }
 
-$ours = @(Get-SessionHookEntries $settings)
+$ours = @(Get-SessionHookEntries $settings "SessionStart")
 if ($Check) { if ($ours.Count -gt 0) { "PRESENT" } else { "ABSENT" }; exit 0 }
 
 $result = ""
 if ($Remove) {
-    if ($ours.Count -eq 0) { "NOTFOUND"; exit 0 }
-    $newGroups = @()
-    foreach ($g in @($settings.hooks.SessionStart)) {
-        if (-not $g) { continue }
-        $keep = @(@($g.hooks) | Where-Object { $_ -and -not ([string]$_.command).Contains($marker) })
-        if ($keep.Count -gt 0) { $g.hooks = $keep; $newGroups += $g }
+    $removedAny = $false
+    foreach ($ev in $events.Keys) {
+        if (@(Get-SessionHookEntries $settings $ev).Count -eq 0) { continue }
+        $removedAny = $true
+        $newGroups = @()
+        foreach ($g in @($settings.hooks.$ev)) {
+            if (-not $g) { continue }
+            $keep = @(@($g.hooks) | Where-Object { $_ -and -not ([string]$_.command).Contains($marker) })
+            if ($keep.Count -gt 0) { $g.hooks = $keep; $newGroups += $g }
+        }
+        if ($newGroups.Count -gt 0) { $settings.hooks.$ev = $newGroups }
+        else { $settings.hooks.PSObject.Properties.Remove($ev) }
     }
-    if ($newGroups.Count -gt 0) { $settings.hooks.SessionStart = $newGroups }
-    else {
-        $settings.hooks.PSObject.Properties.Remove("SessionStart")
-        if (@($settings.hooks.PSObject.Properties).Count -eq 0) { $settings.PSObject.Properties.Remove("hooks") }
-    }
+    if (-not $removedAny) { "NOTFOUND"; exit 0 }
+    if (@($settings.hooks.PSObject.Properties).Count -eq 0) { $settings.PSObject.Properties.Remove("hooks") }
     $result = "REMOVED"
 } else {
-    if ($ours.Count -gt 0) {
-        $changed = $false
-        foreach ($h in $ours) {
-            if ([string]$h.command -ne $command) { $h.command = $command; $changed = $true }
-            if ($h.PSObject.Properties["timeout"]) { if ([int]$h.timeout -ne $TimeoutSeconds) { $h.timeout = $TimeoutSeconds; $changed = $true } }
-            else { $h | Add-Member -NotePropertyName timeout -NotePropertyValue $TimeoutSeconds; $changed = $true }
+    $added = $false; $changed = $false
+    foreach ($ev in $events.Keys) {
+        $cmd = $events[$ev]
+        $mine = @(Get-SessionHookEntries $settings $ev)
+        if ($mine.Count -gt 0) {
+            foreach ($h in $mine) {
+                if ([string]$h.command -ne $cmd) { $h.command = $cmd; $changed = $true }
+                if ($h.PSObject.Properties["timeout"]) { if ([int]$h.timeout -ne $TimeoutSeconds) { $h.timeout = $TimeoutSeconds; $changed = $true } }
+                else { $h | Add-Member -NotePropertyName timeout -NotePropertyValue $TimeoutSeconds; $changed = $true }
+            }
+        } else {
+            if (-not $settings.PSObject.Properties["hooks"]) { $settings | Add-Member -NotePropertyName hooks -NotePropertyValue ([pscustomobject]@{}) }
+            if (-not $settings.hooks.PSObject.Properties[$ev]) { $settings.hooks | Add-Member -NotePropertyName $ev -NotePropertyValue @() }
+            $entry = [pscustomobject]@{ hooks = @([pscustomobject]@{ type = "command"; command = $cmd; timeout = $TimeoutSeconds }) }
+            $settings.hooks.$ev = @(@($settings.hooks.$ev) + @($entry))
+            if ($ev -eq "SessionStart") { $added = $true } else { $changed = $true }
         }
-        if (-not $changed) { "UNCHANGED"; exit 0 }
-        $result = "UPDATED"
-    } else {
-        if (-not $settings.PSObject.Properties["hooks"]) { $settings | Add-Member -NotePropertyName hooks -NotePropertyValue ([pscustomobject]@{}) }
-        if (-not $settings.hooks.PSObject.Properties["SessionStart"]) { $settings.hooks | Add-Member -NotePropertyName SessionStart -NotePropertyValue @() }
-        $entry = [pscustomobject]@{ hooks = @([pscustomobject]@{ type = "command"; command = $command; timeout = $TimeoutSeconds }) }
-        $settings.hooks.SessionStart = @(@($settings.hooks.SessionStart) + @($entry))
-        $result = "ADDED"
     }
+    if ($added) { $result = "ADDED" } elseif ($changed) { $result = "UPDATED" } else { "UNCHANGED"; exit 0 }
 }
 
 $dir = Split-Path -Parent $SettingsPath
