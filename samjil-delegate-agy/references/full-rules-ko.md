@@ -3,7 +3,7 @@
 The full working rules for this skill, in Korean (the delegation rules were rewritten in 2026-11: default is to do the work directly). Optional reading; the English SKILL.md and the other reference files are enough for normal use. Where this text mentions `install.ps1` or the GitHub repository, that is the installer described in the English SKILL.md.
 
 
-# samjil-delegate-agy: Antigravity CLI 위임 (명세를 정할 수 있는 일은 Gemini 4 Hydrogen 단계로 위임 + 매우 복잡한 결정은 Argon 과 상의 + 필수 검토)
+# samjil-delegate-agy: Antigravity CLI 위임 (명세를 정할 수 있는 일은 Gemini 4 Hydrogen/Neon/Argon 단계 + 슬래시 명령 최적화로 위임 + 매우 복잡한 결정은 Neon/Argon 과 상의 + 필수 검토)
 
 ## 먼저 설치해야 하는 것 (Requirements)
 
@@ -17,83 +17,89 @@ The full working rules for this skill, in Korean (the delegation rules were rewr
   3. `agy -p "ok라고만 답해"` — 응답이 한 줄 돌아온다. 이게 되면 위임을 쓸 수 있다.
 - 저장소 <https://github.com/samjil/agy-agent> 를 받아 `install.ps1` 을 실행한다. 스킬 · 워처 런타임(`~/.samjil/delegate-agy/`) · 세션 시작 훅 · 대시보드 뷰어가 설치된다.
 
-*English summary:* delegates specifiable implementation, fixes, refactors, tests and UI work plus bulky simple jobs to the Antigravity CLI (`agy`) on Gemini 4 tiers through a local watcher, consults Argon before very complex decisions, keeps context-heavy work and final calls on risky changes for Claude, and requires reviewing every result. It needs Windows with PowerShell 5.1, the `agy` CLI, and the runtime installed by `install.ps1` from <https://github.com/samjil/agy-agent>; the skill alone will not delegate.
+*English summary:* delegates specifiable implementation, fixes, refactors, tests and UI work plus bulky simple jobs to the Antigravity CLI (`agy`) on Gemini 4 Hydrogen/Neon/Argon tiers with slash-command optimization (`@cmd`/`@mode`) through a local watcher, consults Neon (`think`) or Argon (`think-argon`) before very complex decisions, keeps context-heavy work and final calls on risky changes for Claude, and requires reviewing every result. It needs Windows with PowerShell 5.1, the `agy` CLI, and the runtime installed by `install.ps1` from <https://github.com/samjil/agy-agent>; the skill alone will not delegate.
 
 ## 위임 범위와 단계 (발동 규칙)
 
-이 스킬은 **작업 요청을 받을 때 위임이 맞는 일인지, 맞으면 어느 단계인지 먼저 정하는 규칙**이다. 새 세션에서도 같다 — 세션 시작 훅(`session-start-hook.ps1`)이 agy 워처를 창 없이 켜고
+이 스킬은 **작업 요청을 받으면 먼저 위임할 수 있는지 보고, 할 수 있으면 위임하는 규칙**이다. 기본은 위임이고, 직접 하는 것은 아래 "직접 한다" 칸의 이유가 있을 때뿐이다(2026-11-20 사용자 결정: 한도 비교 없이 되도록 위임). 새 세션에서도 같다 — 세션 시작 훅(`session-start-hook.ps1`)이 agy 워처를 창 없이 켜고
 규칙 한 줄과 워처 상태만 문맥에 넣는다.
 
-### 왜 바꿨나 (2026-11-17 측정)
+### 왜 이렇게 배치했나 (2026-11-17 실측 + 2026-11-18 Neon/Argon 벤치마크)
 
-- 2026-11-13 에는 3.8 Flash 가 느려서(high 중앙값 29분) "양 많고 단순한 일만 low · medium, 5분 넘으면 취소"로 좁혔다.
-- Gemini Pro 구독으로 Gemini 4 모델을 쓸 수 있게 돼 다시 쟀다(시험용 과제, 숨긴 시험으로 채점, 모델당 1회):
-  파일 4개 기능 추가는 Hydrogen medium 93초 · 17/17(agy 토큰 41k), 3.8 Flash medium 562초 · 17/17(200k). 함수 4개는 Hydrogen medium 61초, 3.8 Flash medium 248초.
-- Argon · Orchestrator · Hydrogen Extra(xhigh) 도 점수는 같았지만 명세가 분명한 일에서는 2~4배 느렸다. 깊은 추론이 필요한 일에서만 쓴다.
-- 토큰을 미리 예상하는 방식은 실제의 1.6~3.2배로 빗나가서 의미가 없었다. 예상 기록 · 통계 · 보정은 없다.
+- 2026-11-17 PC 실측: 파일 4개 기능 추가에서 Hydrogen medium 93초 · 17/17(41k 토큰), 3.8 Flash medium 562초 · 17/17(200k). 함수 4개는 Hydrogen medium 61초, 3.8 Flash medium 248초. 명세가 분명한 일상 작업에서는 Hydrogen 이 가장 빠르고 저렴하다.
+- 2026-11-18 벤치마크(Artificial Analysis v5 / Google DeepMind):
+  - **Neon**: AA 지능 지수(`low` 44 · `medium` 55 · `high` 60 · `xhigh` 61.4), Terminal-Bench 4.1 **65.2%**, AA Coding Agent Index 1위(**58.6**). 단가 $3/$15 per 1M(Argon 대비 25% 저렴). `Orchestrator (Neon)` 은 단독 모델 대비 한도 ~24% 절감, 완료 속도 ~19% 향상.
+  - **Argon**: AA 지능 지수 ~50–53, Deep SWE v1.1 **77.9%**, 단가 $4/$20. 긴 문서 탐색, 도메인·구조 검토, 교차 세컨드 오피니언에 강하다.
+- 따라서 빠른 일반 작업(`quick` · `build`)은 Hydrogen 을 유지하고, 어려운 경계 조건(`build-hard` = `neon-medium`) · 극한 논리(`deep` = `neon-xhigh`)에는 Neon 을, 작업 분할(`feature` vs `feature-argon`) · 설계 검토/상의(`think` vs `think-argon`)에는 **Neon 과 Argon 을 모두 일급 단계**로 둔다. 한쪽 계열이 막히면 단계의 폴백이 다른 계열로 넘어간다.
+- 토큰을 미리 예상하는 방식은 실제와 어긋나 의미가 없어 예상 기록 · 통계 · 보정은 없다.
 - Claude 호출 하나의 비용은 대화 컨텍스트 크기에 비례한다. 위임 한 건의 호출 수를 줄이는 것이 핵심이다.
 
 ### 1. 위임하는 일과 직접 하는 일
 
-| 위임한다 | 직접 한다 |
+| 위임한다(기본) | 직접 한다 — 이것만 |
 |---|---|
-| Claude 가 명세(경로 · AS-IS → TO-BE · 이름 · 확인 방법)를 정할 수 있는 구현 · 수정 · 리팩터링 · 시험 작성 · 화면 구현 | 이 대화의 맥락이 필요한 일 |
-| 양이 많고 단순한 일: 긴 로그 · 문서 요약, 번역, 여러 파일에 같은 수정, 형식 변환, 시험 데이터, 1차 검색 | 한두 줄 수정(브리프를 쓰는 비용이 더 크다) |
-| | 보안 · 인증 · 결제 · 마이그레이션처럼 틀리면 되돌리기 어려운 일의 **최종 판단**(초안은 맡겨도 판단과 줄 단위 검토는 Claude) |
+| Claude 가 명세(경로 · AS-IS → TO-BE · 이름 · 확인 방법)를 정할 수 있는 구현 · 수정 · 리팩터링 · 시험 작성 · 화면 구현 | 이 대화의 맥락이 필요하고 브리프에 담을 수 없는 일 |
+| 양이 많고 단순한 일: 긴 로그 · 문서 요약, 번역, 여러 파일에 같은 수정, 형식 변환, 시험 데이터, 1차 검색 · 코드 탐색 | 한두 줄 수정(브리프를 쓰는 비용이 더 크다) |
+| 무엇을 정하기 전에 큰 파일 · 여러 파일을 읽고 요약하는 일 | 보안 · 인증 · 결제 · 마이그레이션처럼 틀리면 되돌리기 어려운 일의 **최종 판단**(초안은 맡겨도 판단과 줄 단위 검토는 Claude) |
+| 방금 바꾼 코드의 시험 · 문서 작성과 갱신 | 사용자와의 대화, agy 결과 검토 |
+
+- **헷갈리면 위임한다.** "맥락이 조금 필요한" 일은 대개 사실 몇 가지만 필요하다: 그 사실을 브리프에 적어 위임한다.
+- 큰 일은 여러 브리프로 나눠 병렬로(`-NoWait`, 최대 5개) 보낸다. 일부만 직접 하고 나머지를 미루지 않는다.
+- 같은 요청 안에서도 꼭 직접 해야 하는 부분만 남기고 나머지는 위임한다.
 
 그 밖에 Claude 전용 도구(웹 검색 · 브라우저 · MCP · 문서 스킬)가 필요한 일은 직접 한다.
 사용자가 "agy 에게 시켜 줘"라고 했는데 직접 할 일이면 한 줄로 알리고 직접 할지 묻는다. 사용자가 그래도 원하면 따른다. **agy 를 지목한 사용자 말은 허락이므로 워처가 꺼져 있으면 묻지 않고 켠다**(아래 "워처가 꺼져 있을 때"의 확인 · 기동 · 재확인 단계를 따르되 질문은 건너뛴다).
 
 ### 2. 단계 고르기 (`@model: <단계>`)
 
-기본은 **Hydrogen**. 3.8 Flash 는 **맨 마지막 대안**(Gemini 4 모델이 한도 · 과부하로 막혔을 때만). Claude 계열 · GPT-OSS 는 쓰지 않는다.
+빠른 실행 기본은 **Hydrogen**, 코딩·추론 중심 고난도는 **Neon**, 별도 주간 풀 활용·교차 검토·장문 분석은 **Argon**, 3.8 Flash 는 **맨 마지막 대안**(Gemini 4 모델이 한도 · 과부하로 막혔을 때만). Claude 계열 · GPT-OSS 는 쓰지 않는다.
 
 | 단계 | 쓰는 때 | 모델 | 대기 한도 |
 |---|---|---|---|
 | `quick` | 조회 · 요약 · 번역 · 형식 변환 · 짧은 질문 | Hydrogen low | 3분 |
 | `build` | 명세가 분명한 구현 · 몇 개 파일 수정 · 시험 작성 · 반복 수정 (**코드 작업 기본**) | Hydrogen medium | 8분 |
-| `build-hard` | build 인데 경계 조건이 많거나 한 번 실패한 일 | Hydrogen high | 12분 |
-| `feature` | 여러 파일 새 기능에서 작업 나누기 · 하위 계획까지 agy 에 맡길 때 | Orchestrator (Argon) | 20분 |
-| `think` | 파일 수정은 적고 깊은 추론: 설계 검토 · 난해한 버그 원인 분석 · 상의 | Argon high | 20분 |
-| `deep` | 파일 수는 적어도 논리가 까다로운 구현: 알고리즘 · 동시성/경쟁 조건 · 파서/상태 기계 · 수치 정밀도 · 측정 목표가 있는 성능 개선 · Argon 이 원인을 짚은 버그의 수정 · build-hard 실패의 다시 보내기 | Hydrogen Extra (xhigh) | 20분 |
+| `build-hard` | build 인데 경계 조건이 많거나 복잡한 다중 파일 수정, 한 번 실패한 일 | Neon medium | 12분 |
+| `feature` | 여러 파일 새 기능에서 작업 나누기 · 하위 계획까지 agy 에 맡길 때 (공용 풀 · 코딩 우선) | Orchestrator (Neon) | 20분 |
+| `feature-argon` | 같은 다중 파일 분할 · 실행을 Argon 관점으로 진행할 때 | Orchestrator (Argon) | 20분 |
+| `think` | 파일 수정은 적고 깊은 추론: 설계 검토 · 난해한 버그 원인 분석 · 상의 (코딩/추론 우선) | Neon high | 20분 |
+| `think-argon` | Argon 관점의 설계 검토 · 교차 검토(세컨드 오피니언) · 장문/도메인 분석 | Argon high | 20분 |
+| `deep` | 파일 수는 적어도 논리가 극도로 까다로운 구현: 알고리즘 · 동시성/경쟁 조건 · 파서/상태 기계 · 수치 정밀도 · 측정 목표가 있는 성능 개선 · think/think-argon 이 원인을 짚은 버그의 수정 · build-hard 실패의 다시 보내기 | Neon Extra (xhigh) | 20분 |
 
-- **`deep` 은 Claude 가 스스로 고른다.** 사용자가 말하지 않아도 위 조건이면 쓴다. 명세가 분명하고 논리가 평범한 일에는 쓰지 않는다(느리고 토큰이 2~3배).
-- **`build` 와 `feature` 의 구분:** 파일이 여럿이어도 Claude 가 파일별 명세를 써서 넘기면 `build` · `build-hard` 다. 작업 나누기까지 맡길 때만 `feature`.
+- **`deep` 은 Claude 가 스스로 고른다.** 사용자가 말하지 않아도 위 조건이면 쓴다. 명세가 분명하고 논리가 평범한 일에는 쓰지 않는다(느리고 토큰 소모가 크다).
+- **`build` vs `build-hard` vs `feature`/`feature-argon` 의 구분:** 파일이 여럿이어도 명세가 분명하면 `build`, 경계 조건이 많거나 복잡하거나 실패 재시도면 `build-hard`(Neon medium), 작업 나누기·하위 계획까지 맡길 때만 `feature`(Orchestrator Neon) 또는 `feature-argon`(Orchestrator Argon).
+- **Neon vs Argon 선택 (`feature`·`think` vs `feature-argon`·`think-argon`):** 코딩 벤치마크·정밀 추론·단가/속도가 중요하면 `feature`/`think`(Neon)를 기본으로 두고, 장문·도메인 검토나 교차 세컨드 오피니언이 필요하면 `feature-argon`/`think-argon`(Argon)을 고른다.
 - `@model` 을 빼면 워처가 `quick`(읽기만 하는 짧은 일) 또는 `build`(파일을 바꾸는 일)만 고른다. 더 높은 단계는 자동으로 고르지 않는다.
 - 폴백(한도 · 과부하 오류일 때만)과 모델 이름은 `references/models.md`, 설정 파일은 `~/.samjil/delegate-agy/config/models.json`(바꿀 값은 같은 폴더 `models.local.json`).
 - 3.8 Flash 로 처리된 결과는 맨 위에 `[알림]` 줄이 붙고 뷰어에 `3.8 대체` 배지가 보인다. 더 꼼꼼히 검토한다.
 
-### 2-1. 두 한도를 비슷한 속도로 쓴다 (한도 균형)
+### 2-1. 실행 슬래시 명령어·모드 최적화 (`@cmd` / `@mode`)
 
-작업할수록 Claude 한도가 먼저 닳고 agy 한도는 남는 일이 많아(2026-11-17 사용자 요청), 남은 시간 대비 남은 양을 비교해 위임 정도를 조절한다. 5:5 일 필요는 없고 너무 벌어지지 않게 한다.
+지시문 머리에 `@model:` 과 함께 선택적으로 `@cmd: <명령>` 또는 `@mode: <모드>` 를 적으면 작업 성격에 맞는 `agy` 실행 방식을 활용할 수 있다(세부: `references/brief-and-commands.md`).
 
-- **계산(`sub\quota-balance.ps1`):** 창(5시간 · 주간)마다 `여유 = 남은 % - 남은 시간 %`. 리셋이 15% 안으로 남았으면 `남은 % - 15` 를 넘지 않게 깎고, 막 리셋된 창(경과 15% 미만)의 음수 여유는 절반만 본다. 쪽마다 점수 = 주간이 30% 넘게 남았으면 `0.7 × 5시간 여유 + 0.3 × 주간 여유`, 아니면 둘 중 작은 값. `차이 = agy 점수 - Claude 점수`.
-- **모드:** 차이 +25 이상이면 `agy-more`(+15 아래로 떨어질 때까지 유지), -25 이하면 `claude-more`(-15 위로 오를 때까지 유지), 그 사이는 `balanced`. 먼저 보는 것: agy Gemini 5시간 10% 미만 · 주간 5% 미만이면 `no-agy`, Claude 5시간 90% 이상 사용이면 `agy-max`. Claude 수치를 모르면 agy 5시간이 70% 이상 남고 주간 여유가 -5 이상일 때 `agy-more`, 아니면 `balanced`.
-- **모드별로 바뀌는 것:**
-  - `agy-more`: 파일 2개 이상 작업 · 시험 · 문서 · 코드 탐색 묶음은 위임한다. 컨텍스트가 80k 를 넘으면 위임 절차를 서브에이전트에 맡긴다. 한두 줄 수정은 그대로 직접(위임 한 건이 Claude 호출 2회 이상이라 오히려 비싸다).
-  - `agy-max`: 위임할 수 있는 일은 모두 위임하고 Claude 는 브리프 · 검토 · 사용자 응답만 한다. 컨텍스트 30k 를 넘으면 서브에이전트.
-  - `balanced`: 위 규칙 그대로.
-  - `claude-more`: 위임 조건이 맞는 일은 평소대로 위임한다(Claude 한도가 더 남았다는 이유로 위임을 줄이지 않는다, 2026-11-17 사용자 결정). 같은 결과면 더 가벼운 단계(`quick` · `build`)를 고르고, `deep` · `feature` 는 꼭 필요할 때만 쓴다.
-  - `no-agy`: 리셋 전까지 위임하지 않는다.
-  - Argon 주간 한도가 따로 있다. 20% 미만이거나 여유 -10 아래면 "Argon 빠듯" 으로 알리고, 그때는 `think` · `feature` 를 꼭 필요한 상의에만 쓰고 작업 분할은 Claude 가 해 `build` · `build-hard` 로 보낸다.
-  - `submit-task.ps1` 의 서브에이전트 알림 기준도 모드를 따른다(`agy-more` 80k, `agy-max` 30k, 그 밖 200k. `AGY_CTX_SUBAGENT_THRESHOLD` 를 주면 그 값).
-- **숫자를 얻는 곳:**
-  - agy: `agy -p "/usage"`(모델 호출 없이 표만 나온다)를 워처가 켜질 때와 위임 작업이 끝난 뒤(3분이 지났으면) 창 없이 따로 불러 `runtime\agy-quota.json` 에 둔다. Git Bash 에서 직접 부르면 `/usage` 가 경로로 바뀌어 모델 호출이 되므로 PowerShell 로 부른다.
-  - Claude: 스크립트로는 못 읽는다. 데스크톱 앱의 사용량 도구로 Claude 만 읽을 수 있다. 질문마다 붙는 `[한도 균형]` 줄이 "Claude 수치 없음" 이거나 30분이 넘었으면, 일이 있는 요청일 때 첫 메시지에서 다른 호출과 함께 사용량을 한 번 읽고, 다음 셸 명령 앞에 `quota-balance.ps1 -Claude5hUsed <N> -Claude5hResetsAt <ISO> -ClaudeWeekUsed <N> -ClaudeWeekResetsAt <ISO> ;` 를 붙여 기록한다(따로 부르지 않는다). 기록은 `runtime\claude-quota.json` 에 남아 다른 세션도 2시간 동안 쓴다.
-- **보이는 곳:** 질문을 보낼 때마다 훅이 계산해 둔 값으로 `[한도 균형] <모드> · Claude ... · agy ...` 줄과 할 일 한 줄을 문맥에 넣는다(agy 를 부르지 않는다. 오래됐으면 창 없이 새로 고침만 시작한다).
-- 2026-11-17 Argon(think)과 상의해 정했다. 반영: 5시간 여유를 살리는 가중 점수, 리셋 직전 · 직후 보정, 모드 전환 히스테리시스, Argon 별도 게이트, 작은 수정은 위임 대신 서브에이전트 기준 낮추기, 워처의 주기 호출 대신 작업 뒤 갱신, Claude 수치 파일 공유. 반영하지 않음: `quick` 위임의 브리프 점검 면제(경고일 뿐이라 효과가 작다).
+| 지시어 | 적합한 위임 작업 | 워처 처리 · 한도 규칙 |
+|---|---|---|
+| `@cmd: goal` | 명세가 명확해 끝까지(100% 완료·전체 테스트 통과) 자율 실행할 작업 | 완료 시 agy 가 붙이는 `<!-- GOAL_COMPLETE -->` 마커를 워처가 정리. |
+| `@cmd: swarm` | **파일 소유권이 겹치지 않게** 넓게 나뉘는 작업 + 독립 검증자(Verifier) 교차 검증 | 워처가 `workspace:"inherit"` · 커밋 금지 규칙을 자동 주입하고 대기 한도를 20분 이상으로 높이며, 하위 워커 대화 활동까지 추적해 조기 멈춤 오판을 막음. **agy 사용량이 커서 작업 모양이 맞을 때만 쓴다.** |
+| `@cmd: run-workflow` | 다수 파일 정형 팬아웃 또는 엄격한 JSON 스키마 단계별 Python 오케스트레이션 | `parallel()` / `pipeline()` 실행, `workspace:"inherit"` 주입 · 20분 이상 대기 · 하위 대화 추적. **agy 사용량이 커서 작업 모양이 맞을 때만 쓴다.** |
+| `@cmd: boost` | 단일 난이도가 극도로 높은 버그·레이스 컨디션·알고리즘 (구현→반박→수정→재검증) | 대기 한도 20분 이상 · 하위 대화 추적. **agy 사용량이 커서 작업 모양이 맞을 때만 쓴다.** |
+| `@cmd: browser` | 로컬 화면 UI 회귀 확인·스크린샷·콘솔/네트워크 점검 (`chrome-devtools-mcp`) | 브라우저 서브에이전트 하위 대화를 추적. 보고서/스크린샷 경로를 [4. 검증]에 명시. |
+| `@cmd: plan` · `@mode: plan` | 수정 전 읽기 전용 설계/계획 점검 | `@mode: plan` 은 내부적으로 `/plan` 을 붙이므로 둘을 동시에 적지 않는다. |
 
-### 3. 매우 복잡한 일은 Argon 과 최소 한 번 상의한 뒤 결정
+- **`Orchestrator` vs `/swarm` vs `/run-workflow`:** 단일 흐름 다중 파일 기능은 `feature`/`feature-argon` (선형 비용), 파일이 깔끔히 분리되고 상호 검증이 필요할 때만 `@cmd: swarm`, N개 파일 기계적 반복·단계 파이프라인은 `@cmd: run-workflow`. 이미 파일별 명세를 다 쪼갠 작업은 `-NoWait` 로 여러 개의 `build` 작업을 병렬 제출하는 편이 더 가볍고 저렴하다.
+- **대형 지시문(`> 8000자`)·`@upgrade` 호환:** 본문 첫머리에 `/swarm` 을 쓰는 대신 `@cmd: swarm` 으로 적으면, 워처가 파일 참조로 넘길 때도 `"/swarm @prompt_xxx.txt"` 처럼 명령줄 앞에 붙여 슬래시 명령이 정상 확장된다.
+- **대화형 TUI 전용 명령과 소비자 플랜 안내:** `/teamwork`, `/grill-me`, `/rewind`, `/fork`, `/btw`, `/tasks`, `/agents`, `/diff`, `/context`, `/compact`, `/learn`, `/permissions`, `/resume` 은 대화형 TUI 전용이라 헤드리스 워처에서 실행할 수 없다(`@cmd` 와 `agy-brief-lint` 가 거부/경고). 또한 Google Antigravity 공식 FAQ 는 소비자 플랜(Google AI Pro/Ultra)에서 `agy -p` 를 직접 스크립팅·CI 용으로 안내하고 외부 에이전트 내부 자동 래핑은 공식 지원하지 않는다고 명시한다. 따라서 `/teamwork` 같은 장기 마일스톤이나 `/grill-me` 정렬, 직접 실행이 나은 경우에는 명세를 `docs/spec-<주제>.md` 파일로 저장하고 사용자가 대화형 `agy` 터미널에서 `@파일명` 과 함께 실행하도록 안내한다.
+
+### 3. 매우 복잡한 일은 Neon(`think`) 또는 Argon(`think-argon`)과 최소 한 번 상의한 뒤 결정
 
 기준: 여러 모듈에 걸친 설계, 되돌리기 어려운 구조 변경, 원인이 안 보이는 버그, 방향이 둘 이상이라 고르기 어려운 결정.
 
-- 상의는 `samjil-handoff` 채널(협의)로 한다. 협의 기본 단계는 `think`(Argon high)다.
-- 보내는 것: 문제, 선택지, Claude 의 추천과 이유, **관련 파일 경로와 지켜야 할 제약**(Argon 은 이 대화를 모른다). 그리고 항상 "단순 동의 금지 — 반론 · 놓친 경계 조건 · 대안 위주로, 바꾸기를 권하는 것은 번호 목록으로"를 넣는다.
-- 횟수: 원칙 1회 왕복, 최대 2회. 상의 호출은 위임 한 건의 "Claude 호출 3회" 한도와 따로 센다.
+- 상의는 `samjil-handoff` 채널(협의)로 한다. 협의 기본 단계는 `think`(Neon high, 폴백 Argon high)이며, 교차 세컨드 오피니언 · 장문/도메인 검토가 필요하면 메시지 머리말에 `위임모델: think-argon` 을 적는다.
+- 보내는 것: 문제, 선택지, Claude 의 추천과 이유, **관련 파일 경로와 지켜야 할 제약**(상대 모델은 이 대화를 모른다). 그리고 항상 "단순 동의 금지 — 반론 · 놓친 경계 조건 · 대안 위주로, 바꾸기를 권하는 것은 번호 목록으로"를 넣는다.
+- 횟수: 원칙 1회 왕복, 최대 2회(핵심 아키텍처 결정 시 Neon/Argon 양쪽 의견을 교차로 물을 때 등). 상의 호출은 위임 한 건의 "Claude 호출 3회" 한도와 따로 센다.
 - 상의가 대기 한도(20분)를 넘기거나 실패하면 다시 묻지 않고 혼자 결정하고, 상의하지 못했다는 사실을 사용자에게 알린다.
-- Argon 의 의견을 반영해 결정한 뒤 사용자에게 "Argon 과 상의해 바꾼 점"을 한두 줄로 알린다. 받아들이지 않은 의견은 이유와 함께 한 줄로.
+- 상의 의견을 반영해 결정한 뒤 사용자에게 "상의해 바꾼 점"을 한두 줄로 알린다. 받아들이지 않은 의견은 이유와 함께 한 줄로.
 - 상의는 판단을 돕는 것이지 넘기는 것이 아니다. 최종 결정과 책임은 Claude 에게 있다.
-- 난해한 버그는 `think` 로 원인 · 고칠 방향을 받고, 고치는 일은 `deep` 으로 보낸다(Argon 은 진단, Extra 는 실행).
+- 난해한 버그는 `think`/`think-argon` 으로 원인 · 고칠 방향을 받고, 고치는 일은 `deep`(Neon Extra, 여유 한도 시 `@cmd: boost`)으로 보낸다(원인 진단 ↔ 실행).
 
 ### 4. 기다리는 한도는 단계의 대기 한도 (취소)
 
@@ -117,11 +123,14 @@ The full working rules for this skill, in Korean (the delegation rules were rewr
 
 ### 7. 컨텍스트가 크면 서브에이전트에 맡긴다
 
-세션 컨텍스트가 약 20만 토큰을 넘으면(긴 세션, 압축이 일어남) 위임 절차(제출 · 대기 · diff 검토 · 시험)를 **빈 컨텍스트의 서브에이전트 하나**에 넘기고, 본 세션은 브리프 작성과
-보고 확인(`git diff --stat` 한 번)만 한다. 서브에이전트는 저렴한 모델로 쓰고 보고는 5줄 이내(통과 여부, 바뀐 파일, 걱정)로 받는다.
+세션 컨텍스트가 기준(기본 20만, 환경 변수 `AGY_CTX_SUBAGENT_THRESHOLD` 가 있으면 그 값)을 넘으면 위임 절차(제출 · 대기 · diff 검토 · 시험)를
+**빈 컨텍스트의 서브에이전트 하나**에 넘기고, 본 세션은 브리프 작성과 보고 확인(`git diff --stat` 한 번)만 한다. 서브에이전트는 저렴한 모델로 쓰고 보고는 5줄 이내(통과 여부, 바뀐 파일, 걱정)로 받는다.
 
-`submit-task.ps1` 이 제출할 때 대화 기록 끝에서 컨텍스트 크기를 읽어(`sub\claude-transcript.ps1` 의 `Get-ClaudeTranscriptLastUsage`), 기준(기본 200000, 환경 변수 `AGY_CTX_SUBAGENT_THRESHOLD`)을 넘으면
-stderr 로 한 줄 알린다: `[컨텍스트 <N>k] 컨텍스트가 큽니다. 위임 절차는 서브에이전트에 맡기세요(호출마다 대화 전체를 다시 읽습니다).` 제출은 그대로 진행된다.
+- **질문 시점에 알린다:** 질문을 보낼 때마다 훅(UserPromptSubmit)이 Claude Code 가 넘기는 대화 기록 경로로 컨텍스트 크기를 읽어(`sub\claude-transcript.ps1` 의 `Get-ClaudeTranscriptLastUsage`),
+  기준을 넘었으면 `[컨텍스트 <N>k] 기준 <M>k 를 넘었다: 이번 질문에서 위임하게 되면 처음부터 서브에이전트 하나(...)에 ...` 한 줄을 넣는다. 이 줄을 보면 위임을 정할 때 처음부터 서브에이전트에 맡긴다.
+- **제출한 뒤에 알게 됐으면:** `submit-task.ps1` 도 제출할 때 같은 기준으로 stderr 에 `[컨텍스트 <N>k] 컨텍스트가 큽니다(기준 <M>k). 제출은 됐으니 이 작업의 대기 · diff 검토 · 시험은 본 세션에서 하지 말고 ...` 를 알린다.
+  이미 제출된 작업이므로 다시 제출하지 말고, 본 세션에서 대기(`-Poll`)를 시작하지도 말고, 작업 ID 와 확인할 시험 명령을 서브에이전트에 넘겨 대기 · 검토를 맡긴다.
+- 2026-11-18: 예전에는 제출한 뒤에만 알려서, 알림을 보고도 본 세션이 그대로 기다리고 검토하는 일이 있었다(쿠폰 프로젝트 세션). 그래서 질문 시점 알림을 더하고, 제출 뒤 알림은 그 시점에 할 일을 말하게 바꿨다.
 
 ### 8. 닫는 줄은 없다, 사유만 남긴다
 
@@ -383,6 +392,8 @@ Claude 를 어떤 모델·Effort 로 돌리든 같은 수준의 명세가 나오
 powershell.exe -NoProfile -File "$USERPROFILE\.samjil\delegate-agy\scripts\submit-task.ps1" <<'CLAUDE_TASK_EOF'
 @cwd: C:\path\to\project
 @model: build
+# @cmd: goal | swarm | run-workflow | boost | browser | plan   (선택)
+# @mode: plan | accept-edits | auto                            (선택)
 [1. 목표 및 작업 모드]
 - 작업 목적: <1~2줄 요약 (읽기 전용 분석인지 파일 수정인지 명시)>
 
@@ -456,14 +467,18 @@ $S -Poll <ID1>,<ID2>
 
 | 단계 | 주 모델 → 폴백(한도 · 과부하 오류일 때만) | 대기 한도 |
 |---|---|---|
-| `quick` | hydrogen-low → hydrogen-medium → 3.8-flash-low | 3분 |
-| `build` | hydrogen-medium → hydrogen-high → 3.8-flash-medium | 8분 |
-| `build-hard` | hydrogen-high → argon-medium → 3.8-flash-medium | 12분 |
-| `feature` | orchestrator → hydrogen-high → argon-medium → 3.8-flash-medium | 20분 |
-| `think` | argon-high → argon-medium → hydrogen-high | 20분 |
-| `deep` | hydrogen-xhigh(Extra) → argon-high → hydrogen-high → 3.8-flash-medium | 20분 |
+| `quick` | hydrogen-low → hydrogen-medium → neon-low → 3.8-flash-low | 3분 |
+| `build` | hydrogen-medium → hydrogen-high → neon-low → 3.8-flash-medium | 8분 |
+| `build-hard` | neon-medium → hydrogen-high → neon-high → argon-medium → 3.8-flash-medium | 12분 |
+| `feature` | orchestrator-neon → neon-high → orchestrator → hydrogen-high → 3.8-flash-medium | 20분 |
+| `feature-argon` | orchestrator → argon-high → orchestrator-neon → hydrogen-high → 3.8-flash-medium | 20분 |
+| `think` | neon-high → argon-high → neon-medium → argon-medium → hydrogen-high | 20분 |
+| `think-argon` | argon-high → argon-medium → neon-high → hydrogen-high | 20분 |
+| `deep` | neon-xhigh(Extra) → neon-high → hydrogen-xhigh → argon-high → 3.8-flash-medium | 20분 |
 
-- 정식 모델 이름: `gemini-4-hydrogen-low|medium|high|xhigh`, `gemini-4-argon-low|medium|high`, `gemini-pro-orchestrator-g1-pro`, `gemini-3.8-flash-low|medium`. 같은 계열이 함께 막힐 수 있어 폴백 중간에 다른 계열을 하나 넣었다. xhigh 는 `deep` 에서만 쓰고, 너무 느린 3.8 Flash high 는 어디에도 없다.
+- 필요 시 `@cmd: goal | swarm | run-workflow | boost | browser | plan` 과 `@mode: plan | accept-edits | auto` 를 지시어 줄에 함께 적을 수 있다(2-2절 및 `references/brief-and-commands.md` 참고).
+
+- 정식 모델 이름: `gemini-4-hydrogen-low|medium|high|xhigh`, `gemini-4-neon-low|medium|high|xhigh`, `gemini-4-argon-low|medium|high`, `gemini-pro-orchestrator-neon`, `gemini-pro-orchestrator-g1-pro`, `gemini-3.8-flash-low|medium`. 같은 계열이 함께 막힐 수 있어 폴백 중간에 다른 계열을 하나 넣었다. xhigh 는 `deep` 에서만 쓰고, 너무 느린 3.8 Flash high 는 어디에도 없다.
 - **모델 이름으로 지정하면** 그 모델 **하나**만 쓰고 폴백하지 않는다. 막히면 실패로 돌려준다(`... [@model 로 지정한 모델이라 다른 모델로 자동 전환하지 않았습니다]`). 다른 모델로 몰래 다시 보내지 말고 단계 이름으로 보내거나 직접 처리한다.
 - 옛 별칭도 받는다: `low` = `quick`, `medium` = `build`, `high` = `build-hard`.
 - **자동 선택은 `quick` · `build` 만 고른다.** `@model:` 을 생략하면 워처가 요청 내용으로 고른다(`agy-autotier.ps1`, 규칙 기반이라 틀릴 수 있다).
@@ -475,7 +490,7 @@ $S -Poll <ID1>,<ID2>
 - **이어가는 세션(`@session`)은 시작할 때의 모델을 유지한다.** 이어가는 호출에서 다른 모델을 쓰면 워처가 오류로 돌려준다(단계를 적었으면 그 단계의 순서 안의 모델은 같은 것으로 본다). 원래 대화(`conversation_id`)를 지키려는 것이다.
   모델을 바꿔 새 대화로 옮기려면 `@upgrade: true`(이전 질문·답 2쌍을 글로 붙인다).
 - `지정한 @model 을 쓸 수 없습니다` 오류는 값이 단계 이름도 허용 모델도 아니라는 뜻이다(워처는 agy를 부르지 않는다). 오류에 적힌 목록으로 고쳐 다시 보낸다.
-- **측정한 소요**(2026-11-17, 시험 과제 · 모델당 1회): 파일 4개 기능 추가 — Hydrogen medium 93초, high 142초, Argon medium 190초, Orchestrator 247초, Extra 299초, Argon high 412초, 3.8 Flash medium 562초(모두 만점). 쉬운 요약 — Hydrogen low 29초(Argon low 는 2/4 로 틀려 어느 단계에도 넣지 않았다).
+- **측정한 소요**(2026-11-17 시험 + 2026-11-18 Neon 벤치마크): 파일 4개 기능 추가 — Hydrogen medium 93초, high 142초, Argon medium 190초, Orchestrator 247초, Hydrogen Extra 299초, Argon high 412초, 3.8 Flash medium 562초(모두 만점). 2026-11-18 출시된 Neon 은 AA 지능 지수(medium 55 · high 60 · xhigh 61)와 Terminal-Bench 4.1(65.2%) · AA Coding Agent Index(58.6, 1위)에서 Argon(~50–53) 대비 큰 폭으로 앞서며 단가도 25% 낮고 Gemini Models 공용 풀을 쓴다. 쉬운 요약은 Hydrogen low 29초.
 - **"멈춤 판정" 오류가 나도 결과가 남아 있을 수 있다.** agy 가 최종 응답을 대화 기록에 남겼는데 프로세스만 끝나지 않으면, 워처는 끊기 직전에
   그 응답을 **자동으로 회수해 성공(OK)으로 기록한다**(`data/tasks/outbox/<id>.error.log` 에 회수했다는 안내가 남는다). 그래도 "멈춤 판정" 오류로 끝났다면
   최종 응답이 없던 것이니, 직접 처리로 넘기기 전에 `logs/watcher.log` 의 마지막 단계 줄과 `~/.gemini/antigravity-cli/brain/<대화 ID>/.system_generated/logs/transcript_full.jsonl`

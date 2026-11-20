@@ -103,6 +103,35 @@ function Get-AgyConversationActivity($AgyHome, $Id) {
     return $latest
 }
 
+# /swarm · /boost · /browser · /run-workflow 실행 중 부모 대화가 쉬는 동안 하위 에이전트(워커/서브에이전트) 대화가 진행 중일 수 있다.
+# 부모 대화 기록에서 참조한 하위 대화 UUID 들의 마지막 활동 시각 중 가장 늦은 시각을 돌려준다(없으면 $null).
+function Get-AgyChildConversationActivity($AgyHome, $Id) {
+    $tp = Get-AgyTranscriptPath $AgyHome $Id
+    if (-not $tp -or -not (Test-Path -LiteralPath $tp)) { return $null }
+    $childIds = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    $fs = $null; $sr = $null
+    try {
+        $fs = New-Object System.IO.FileStream($tp, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $sr = New-Object System.IO.StreamReader($fs, [System.Text.Encoding]::UTF8)
+        while ($null -ne ($line = $sr.ReadLine())) {
+            if ($line.IndexOf('conversation', [System.StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
+            foreach ($m in [regex]::Matches($line, '(?i)conversation_?id\\?["'']?\s*[:=]\s*\\?["'']?([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})')) {
+                $cid = $m.Groups[1].Value
+                if ($cid -and ($cid -ine [string]$Id)) { [void]$childIds.Add($cid) }
+            }
+        }
+    } catch { return $null } finally {
+        if ($sr) { try { $sr.Dispose() } catch {} }
+        if ($fs) { try { $fs.Dispose() } catch {} }
+    }
+    $latest = $null
+    foreach ($cid in $childIds) {
+        $act = Get-AgyConversationActivity $AgyHome $cid
+        if ($act -and (($null -eq $latest) -or ($act -gt $latest))) { $latest = $act }
+    }
+    return $latest
+}
+
 # agy 가 "백그라운드 작업"으로 돌려 둔 도구 중 아직 끝났다는 알림이 없는 것의 목록(작업 ID 들). 없으면 빈 배열.
 # 오래 걸리는 명령(빌드·시험·긴 대기 등)은 agy 가 10초쯤 기다리다 백그라운드로 넘기고, 그 명령이 끝날 때까지 새 단계를 하나도 쓰지 않고 기다린다.
 # 이때는 멈춘 것이 아니므로 멈춤 판정에서 빼야 한다. 실제로 7분 걸리는 명령을 돌리던 정상 작업이 5분 시점에 "멈춤"으로 끊긴 것을 재현했다.
@@ -283,6 +312,10 @@ function Test-AgyAliveAtCap($AgyHome, $ConvId, [datetime]$Now, [int]$WindowSecon
         if ($tl -and (($Now - $tl).TotalSeconds -lt $WindowSeconds)) {
             return @{ Alive = $true; Reason = ("{0}초 전에 백그라운드 도구가 출력을 냄" -f [int]($Now - $tl).TotalSeconds); Note = "" }
         }
+        $childAct = Get-AgyChildConversationActivity $AgyHome $ConvId
+        if ($childAct -and (($Now - $childAct).TotalSeconds -lt $WindowSeconds)) {
+            return @{ Alive = $true; Reason = ("{0}초 전에 하위 에이전트 대화에 새 단계가 기록됨" -f [int]($Now - $childAct).TotalSeconds); Note = "" }
+        }
     }
     $samples = @($CpuSamples)
     if ($samples.Count -lt 2) { return @{ Alive = $true; Reason = "활동 이력이 아직 모자라 확인을 더 모음"; Note = "" } }
@@ -364,7 +397,40 @@ function Get-AgyToolDetail($call) {
         }
         'write_to_file'        { $d = & $get 'TargetFile'; if (-not $d) { $d = & $get 'Path' } }
         'write_file'           { $d = & $get 'Path'; if (-not $d) { $d = & $get 'TargetFile' } }
+        'edit_file'            { $d = & $get 'Path'; if (-not $d) { $d = & $get 'TargetFile' } }
         'replace_file_content' { $d = & $get 'TargetFile'; if (-not $d) { $d = & $get 'Path' } }
+        'swarm' {
+            $act = & $get 'action'; $nm = & $get 'name'; $tl = & $get 'title'
+            $d = (@($act, $nm, $tl) | Where-Object { $_ }) -join ' '
+        }
+        'post_message' {
+            $ch = & $get 'channel'; $tx = & $get 'text'
+            $d = if ($ch) { "#$ch $tx".Trim() } else { $tx }
+        }
+        'read_board' {
+            $ch = & $get 'channel'; $s = & $get 'since'
+            $parts = @()
+            if ($ch) { $parts += "#$ch" }
+            if ($s -ne "") { $parts += "since=$s" }
+            $d = $parts -join ' '
+        }
+        'swarm_wait' {
+            $s = & $get 'since'
+            $d = if ($s -ne "") { "since=$s" } else { "대기" }
+        }
+        'run_workflow' {
+            $d = & $get 'Description'
+            if (-not $d) { $d = & $get 'ScriptPath' }
+        }
+        'invoke_subagent' {
+            $role = & $get 'Role'; $tn = & $get 'TypeName'
+            $d = if ($role -and $tn) { "$role ($tn)" } elseif ($role) { $role } else { $tn }
+        }
+        'manage_subagents'     { $d = & $get 'Action' }
+        'send_message' {
+            $rec = & $get 'Recipient'; $msg = & $get 'Message'
+            $d = if ($rec -and $msg) { "$rec · $msg" } elseif ($msg) { $msg } else { $rec }
+        }
         'list_dir'             { $d = & $get 'DirectoryPath' }
         'find_by_name' {
             $d = & $get 'Pattern'
@@ -706,4 +772,52 @@ function Get-AgyUsageSummary($State, [int]$MaxStep = 0, $Since = $null) {
         }
     }
     return @{ Input = $in; Cache = $cache; Output = $out; Thinking = $think; Total = ($in + $out); Context = $ctx; Turns = $turns }
+}
+
+# 대화 기록(transcript.jsonl / transcript_full.jsonl)에서 Gemini 가 첫 응답에 남긴 [ETA: <초>s] 값을 읽는다.
+# Since 를 주면 그 시각(로컬) 이후의 PLANNER_RESPONSE 에서만 찾는다(이어가는 세션 구분). 없으면 $null.
+function Get-AgyEstimatedSecFromTranscript([string]$Path, $Since = $null) {
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
+    $sinceDt = $null
+    if ($Since) {
+        try {
+            if ($Since -is [datetime]) { $sinceDt = $Since }
+            elseif ($Since -is [DateTimeOffset]) { $sinceDt = $Since.LocalDateTime }
+            else { $sinceDt = [datetime]::Parse([string]$Since, [System.Globalization.CultureInfo]::InvariantCulture) }
+        } catch {}
+    }
+    $fs = $null; $sr = $null
+    try {
+        $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $sr = New-Object System.IO.StreamReader($fs, [System.Text.Encoding]::UTF8)
+        while (-not $sr.EndOfStream) {
+            $line = $sr.ReadLine()
+            if (-not $line -or $line.IndexOf('PLANNER_RESPONSE') -lt 0) { continue }
+            if ($line.IndexOf('ETA') -lt 0 -and $line.IndexOf('eta') -lt 0) { continue }
+            $o = $null
+            try { $o = $line.TrimStart([char]0xFEFF) | ConvertFrom-Json } catch { continue }
+            if ($o.type -ne 'PLANNER_RESPONSE') { continue }
+            if ($sinceDt -and $o.created_at) {
+                try {
+                    $parsed = [datetime]::Parse([string]$o.created_at, [System.Globalization.CultureInfo]::InvariantCulture,
+                        [System.Globalization.DateTimeStyles]::RoundtripKind)
+                    if ($parsed.ToLocalTime() -lt $sinceDt) { continue }
+                } catch {}
+            }
+            foreach ($candText in @([string]$o.content, [string]$o.thinking)) {
+                if (-not $candText) { continue }
+                $m = [regex]::Match($candText, '(?i)\[\s*ETA\s*:\s*(\d+)\s*(?:s|sec|seconds|초)?\s*\]')
+                if ($m.Success) {
+                    $v = 0
+                    if ([int]::TryParse($m.Groups[1].Value, [ref]$v) -and $v -ge 1 -and $v -le 86400) {
+                        return $v
+                    }
+                }
+            }
+        }
+    } catch {} finally {
+        if ($sr) { $sr.Dispose() }
+        if ($fs) { $fs.Dispose() }
+    }
+    return $null
 }

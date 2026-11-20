@@ -58,12 +58,87 @@ function ConvertTo-AgyDirectiveFlag([string]$Value) {
     return [bool]([string]$Value -match '^\s*(?i:true|yes|1|on|예)\s*$')
 }
 
+# 실행 슬래시 명령어(@cmd) · 실행 모드(@mode) 허용 목록
+#   워처(헤드리스 `agy -p`)에서 자동 확장되는 명령과 대화형 TUI 전용 명령을 구분한다.
+$script:AgyAllowedSlashCommands  = @('goal', 'swarm', 'run-workflow', 'boost', 'browser', 'plan')
+$script:AgyQuotaHeavyCommands    = @('swarm', 'run-workflow', 'boost')
+$script:AgyInteractiveOnlyCommands = @('teamwork', 'grill-me', 'rewind', 'fork', 'btw', 'compact', 'resume', 'learn', 'permissions', 'tasks', 'agents', 'diff', 'context')
+$script:AgyAllowedExecutionModes = @('plan', 'accept-edits', 'auto')
+
+# @cmd 값을 검증·정규화한다. 비어 있으면 $null.
+function Resolve-AgySlashCommand([string]$Value) {
+    $v = ([string]$Value).Trim()
+    if (-not $v) { return $null }
+    $name = $v.TrimStart('/').Trim().ToLowerInvariant()
+    if ($script:AgyAllowedSlashCommands -contains $name) {
+        return @{
+            Valid      = $true
+            Name       = $name
+            Command    = "/$name"
+            QuotaHeavy = ($script:AgyQuotaHeavyCommands -contains $name)
+            Error      = $null
+        }
+    }
+    if ($script:AgyInteractiveOnlyCommands -contains $name) {
+        return @{
+            Valid      = $false
+            Name       = $name
+            Command    = ""
+            QuotaHeavy = $false
+            Error      = "지정한 @cmd 는 대화형 TUI 전용이라 헤드리스 워처에서 쓸 수 없습니다: /$name (명세를 파일로 저장한 뒤 별도 터미널의 agy 세션에서 @파일명 과 함께 실행하세요. 워처 지원 명령: $($script:AgyAllowedSlashCommands -join ', '))"
+        }
+    }
+    return @{
+        Valid      = $false
+        Name       = $name
+        Command    = ""
+        QuotaHeavy = $false
+        Error      = "지정한 @cmd 를 쓸 수 없습니다: $Value (지원 명령: $($script:AgyAllowedSlashCommands -join ', '))"
+    }
+}
+
+# @mode 값을 검증·정규화한다(plan · accept-edits · auto). 비어 있으면 $null.
+function Resolve-AgyExecutionMode([string]$Value) {
+    $v = ([string]$Value).Trim()
+    if (-not $v) { return $null }
+    $m = $v.ToLowerInvariant()
+    if ($script:AgyAllowedExecutionModes -contains $m) {
+        return @{ Valid = $true; Mode = $m; Error = $null }
+    }
+    return @{ Valid = $false; Mode = ""; Error = "지정한 @mode 를 쓸 수 없습니다: $Value (지원 모드: $($script:AgyAllowedExecutionModes -join ', '))" }
+}
+
+# 본문 맨 앞에 지원 슬래시 명령(/swarm · /goal 등)이 있으면 떼어 낸다.
+#   파일 참조(@prompt_xxx.txt)로 넘길 때도 `"/swarm @prompt_xxx.txt"` 형태로 명령이 확장되게 하려는 것이다.
+function Split-AgyLeadingSlashCommand([string]$Prompt) {
+    $s = [string]$Prompt
+    $m = [regex]::Match($s, '^\s*/([A-Za-z][A-Za-z0-9-]*)(?:\s+([\s\S]*)|$)$')
+    if ($m.Success) {
+        $name = $m.Groups[1].Value.ToLowerInvariant()
+        if ($script:AgyAllowedSlashCommands -contains $name) {
+            $body = if ($m.Groups[2].Success) { $m.Groups[2].Value.TrimStart() } else { "" }
+            return @{ Name = $name; Command = "/$name"; Body = $body }
+        }
+    }
+    return @{ Name = ""; Command = ""; Body = $s }
+}
+
+# /goal 완료 시 agy 가 출력 끝에 남기는 HTML 주석 마커(<!-- GOAL_COMPLETE --> / <!-- GOAL_CANCELLED -->)를 뗀다.
+function Remove-AgyGoalMarkers([string]$Text) {
+    $s = [string]$Text
+    if ($s -notmatch '(?i)<!--\s*GOAL_(?:COMPLETE|CANCELLED)\s*-->') { return $s }
+    $s = [regex]::Replace($s, '(?im)^[ \t]*<!--\s*GOAL_(?:COMPLETE|CANCELLED)\s*-->[ \t]*(?:\r?\n)?', '')
+    $s = [regex]::Replace($s, '(?i)[ \t]*<!--\s*GOAL_(?:COMPLETE|CANCELLED)\s*-->[ \t]*', '')
+    return $s.TrimEnd("`r", "`n")
+}
+
 # 표준 규칙을 붙인 프롬프트를 만든다.
-#   $Prompt     지시어 줄을 뺀 지시문 본문
-#   $HasFolder  @cwd 로 열리는 폴더가 있는가
-#   $Raw        @raw: true 인가
+#   $Prompt       지시어 줄을 뺀 지시문 본문
+#   $HasFolder    @cwd 로 열리는 폴더가 있는가
+#   $Raw          @raw: true 인가
+#   $SlashCommand 실행 슬래시 명령(/swarm · /run-workflow 등, 선택)
 # 반환: @{ Text = <agy 에 넘길 프롬프트>; Added = @(붙인 규칙 이름) }  (붙일 게 없으면 Text 는 $Prompt 그대로)
-function Add-AgyStandardRules([string]$Prompt, [bool]$HasFolder, [bool]$Raw = $false) {
+function Add-AgyStandardRules([string]$Prompt, [bool]$HasFolder, [bool]$Raw = $false, [string]$SlashCommand = "") {
     if ($Raw -or -not $HasFolder) { return @{ Text = $Prompt; Added = @() } }
     $lines = New-Object System.Collections.ArrayList
     $added = New-Object System.Collections.ArrayList
@@ -75,7 +150,41 @@ function Add-AgyStandardRules([string]$Prompt, [bool]$HasFolder, [bool]$Raw = $f
         [void]$lines.Add($ruleText)
         [void]$added.Add($r.Name)
     }
+    if ($SlashCommand -ieq "/swarm" -and ([string]$Prompt) -notmatch '(?i)workspace\s*:\s*["'']?inherit|share[^.\r\n]{0,20}쓰지') {
+        [void]$lines.Add('- For /swarm: keep all workers on workspace:"inherit" with non-overlapping file ownership (do NOT use workspace:"share"/"branch" or git commits). Post a concise final summary after workers and verifiers finish.')
+        [void]$added.Add("swarm-safe")
+    } elseif ($SlashCommand -ieq "/run-workflow" -and ([string]$Prompt) -notmatch '(?i)workspace\s*:\s*["'']?inherit') {
+        [void]$lines.Add('- For /run-workflow: keep workflow agents on workspace:"inherit" with disjoint file ownership (no git commits) and print a concise final summary.')
+        [void]$added.Add("workflow-safe")
+    }
     if ($added.Count -eq 0) { return @{ Text = $Prompt; Added = @() } }
     $text = ([string]$Prompt).TrimEnd() + "`n`nRules (added automatically by the watcher):`n" + ($lines -join "`n") + "`n"
     return @{ Text = $text; Added = @($added.ToArray()) }
+}
+
+# 직접 작업을 수행하는 Gemini(agy)가 과거 기록이 아닌 현재 프롬프트의 양·난이도·복잡도만 분석해
+# 첫 응답 맨 앞에 예상 소요 시간([ETA: <초>s])을 출력하도록 지시를 붙인다(@raw: true 면 생략).
+function Add-AgyEtaInstruction([string]$Prompt, [bool]$Raw = $false) {
+    if ($Raw) { return @{ Text = $Prompt; Added = $false } }
+    if ([regex]::IsMatch([string]$Prompt, '(?i)\[\s*ETA\s*:')) { return @{ Text = $Prompt; Added = $false } }
+    $inst = "Before calling your first tool (or at the very beginning of your response), estimate the total execution time in seconds based solely on this prompt's volume, difficulty, and complexity (do not assume any prior history), and output a single tag on its own line: [ETA: <seconds>s] (for example, [ETA: 180s])."
+    $text = ([string]$Prompt).TrimEnd() + "`n`n" + $inst + "`n"
+    return @{ Text = $text; Added = $true }
+}
+
+# 텍스트에서 Gemini 가 출력한 [ETA: <초>s] 태그를 추출하고, 본문에서는 해당 태그를 제거한다.
+function Split-AgyEtaFromText([string]$Text) {
+    $raw = [string]$Text
+    $est = $null
+    $m = [regex]::Match($raw, '(?i)\[\s*ETA\s*:\s*(\d+)\s*(?:s|sec|seconds|초)?\s*\]')
+    if ($m.Success) {
+        $v = 0
+        if ([int]::TryParse($m.Groups[1].Value, [ref]$v) -and $v -ge 1 -and $v -le 86400) {
+            $est = $v
+        }
+        $raw = [regex]::Replace($raw, '(?im)^\s*\[\s*ETA\s*:\s*\d+\s*(?:s|sec|seconds|초)?\s*\]\s*(\r?\n)?', '')
+        $raw = [regex]::Replace($raw, '(?i)\s*\[\s*ETA\s*:\s*\d+\s*(?:s|sec|seconds|초)?\s*\]', '')
+        $raw = $raw.TrimStart("`r", "`n")
+    }
+    return @{ EstimatedSec = $est; CleanText = $raw }
 }

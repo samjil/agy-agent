@@ -150,17 +150,31 @@ function Invoke-EnsureAgyRunningCheck {
 
     Write-WatchdogLog "워처가 돌고 있지 않은 것으로 판단되어(${ConfirmDelaySeconds}초 간격으로 두 번 확인) 자동으로 재시작합니다."
 
-    # 창을 아예 만들지 않고 띄웁니다.
+    # 창을 아예 만들지 않고 띄웁니다(CREATE_NO_WINDOW + 핸들 비승계 우선, 실패 시 WScript.Shell 폴백).
     $launched = $false
-    try {
-        $q   = [char]34
-        $cmd = "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $q$WatcherScript$q -RuntimeDir $q$RuntimeDir$q"
-        $sh  = New-Object -ComObject WScript.Shell
-        try { $sh.CurrentDirectory = $RuntimeDir } catch {}
-        [void]$sh.Run($cmd, 0, $false)
-        $launched = $true
-    } catch {
-        Write-WatchdogLog "숨김 실행(WScript.Shell)에 실패해 기본 방식으로 대체합니다: $($_.Exception.Message)"
+    $spawnLib = Join-Path $PSScriptRoot "agy-spawn.ps1"
+    if (Test-Path -LiteralPath $spawnLib) {
+        try {
+            . $spawnLib
+            $pid0 = Start-AgyHiddenDetachedProcess -FilePath "powershell.exe" -WorkingDirectory $RuntimeDir -ArgumentList @(
+                "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $WatcherScript, "-RuntimeDir", $RuntimeDir
+            )
+            if ($pid0 -ge 0) { $launched = $true }
+        } catch {
+            Write-WatchdogLog "숨김 실행(agy-spawn)에 실패해 WScript.Shell 로 대체합니다: $($_.Exception.Message)"
+        }
+    }
+    if (-not $launched) {
+        try {
+            $q   = [char]34
+            $cmd = "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $q$WatcherScript$q -RuntimeDir $q$RuntimeDir$q"
+            $sh  = New-Object -ComObject WScript.Shell
+            try { $sh.CurrentDirectory = $RuntimeDir } catch {}
+            [void]$sh.Run($cmd, 0, $false)
+            $launched = $true
+        } catch {
+            Write-WatchdogLog "숨김 실행(WScript.Shell)에 실패해 기본 방식으로 대체합니다: $($_.Exception.Message)"
+        }
     }
 
     if (-not $launched) {

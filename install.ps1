@@ -38,7 +38,7 @@ $Uninstall = $false
 # 핸드오프 자동 이어가기 Stop 훅을 ~/.claude/settings.json 에 등록할지(옵트인). irm | iex 로 받을 때는 인자를 줄 수 없어
 # 환경변수 SAMJIL_HANDOFF_AUTO_HOOK=1 로도 켠다.
 $HandoffAutoHook = ($env:SAMJIL_HANDOFF_AUTO_HOOK -eq "1")
-# -Full: the author's complete setup (~/.claude/skills becomes a junction to ~/.agents/skills, Antigravity skills.json,
+# -Full: the author's complete setup (~/.claude/skills and ~/.gemini/config/skills become junctions to ~/.agents/skills, Antigravity skills.json,
 #        legacy cleanup, session hook always on). Default (simple): copy the skills into ~/.claude/skills and the runtime
 #        into ~/.samjil, plus one SessionStart hook entry in ~/.claude/settings.json (backed up first). Env: SAMJIL_FULL=1 for `irm | iex`.
 # -AlwaysOff: do not register the SessionStart hook (default: registered, so Claude delegates by default in every session)
@@ -191,6 +191,7 @@ $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 #    -> 스킬 폴더에는 순수 SKILL.md 만 배치
 # -----------------------------------------------------------------------------
 $ClaudeSkillsRoot = Join-Path $env:USERPROFILE ".claude\skills"
+$GeminiSkillsRoot = Join-Path $env:USERPROFILE ".gemini\config\skills"
 $AgentsSkillsRoot = Join-Path $env:USERPROFILE ".agents\skills"
 
 if ($Full) {
@@ -199,11 +200,13 @@ New-Item -ItemType Directory -Force -Path $AgentsSkillsRoot | Out-Null
 # 구버전 스킬 정리 (agent-handoff, agent-delegate-agy)
 $legacySkills = @("agent-handoff", "agent-delegate-agy")
 foreach ($old in $legacySkills) {
-    $cOld = Join-Path $ClaudeSkillsRoot $old
-    if (Test-Path $cOld) {
-        $item = Get-Item -LiteralPath $cOld -Force
-        if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { cmd /c rmdir "$cOld" 2>&1 | Out-Null }
-        else { Remove-Item -Recurse -Force -LiteralPath $cOld -ErrorAction SilentlyContinue }
+    foreach ($rootDir in @($ClaudeSkillsRoot, $GeminiSkillsRoot)) {
+        $oldPath = Join-Path $rootDir $old
+        if (Test-Path $oldPath) {
+            $item = Get-Item -LiteralPath $oldPath -Force
+            if ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { cmd /c rmdir "$oldPath" 2>&1 | Out-Null }
+            else { Remove-Item -Recurse -Force -LiteralPath $oldPath -ErrorAction SilentlyContinue }
+        }
     }
     $aOld = Join-Path $AgentsSkillsRoot $old
     if (Test-Path $aOld) {
@@ -212,18 +215,21 @@ foreach ($old in $legacySkills) {
 }
 }   # end if ($Full): legacy skill cleanup
 
-# ~/.claude/skills 는 ~/.agents/skills 로 가는 정션 하나로 둔다. 이미 정션이면 그대로 둔다.
-# 일반 폴더면 안에 든 것을 지우지 않고 ~/.agents/skills 로 옮긴 뒤 정션으로 바꾼다 — 사용자가 직접
-# 넣은 스킬도 들어 있을 수 있고, 지우면 되살릴 곳이 없다. 이름이 겹치는 것은 보관만 한다.
-function Convert-ClaudeSkillsToJunction {
-    New-Item -ItemType Directory -Force -Path (Split-Path $ClaudeSkillsRoot -Parent) | Out-Null
+$targetSkills = @("samjil-handoff", "samjil-delegate-agy", "samjil-git-commit")
 
-    if (Test-Path -LiteralPath $ClaudeSkillsRoot) {
-        $cItem = Get-Item -LiteralPath $ClaudeSkillsRoot -Force
+# 대상 스킬 폴더를 ~/.agents/skills 로 가는 정션 하나로 둔다. 이미 정션이면 그대로 둔다.
+# 일반 폴더면 안에 든 것을 지우지 않고 ~/.agents/skills 로 옮긴 뒤 정션으로 바꾼다 — 사용자가 직접
+# 넣은 스킬도 들어 있을 수 있고, 지우면 되살릴 곳이 없다. 이 저장소가 관리하는 스킬이 겹치면
+# 아래 배포 단계에서 최신본으로 덮어쓰므로 바로 비우고, 그 외 사용자 스킬이 겹칠 때만 보관한다.
+function Convert-SkillsDirToJunction([string]$LinkRoot, [string]$Label) {
+    New-Item -ItemType Directory -Force -Path (Split-Path $LinkRoot -Parent) | Out-Null
+
+    if (Test-Path -LiteralPath $LinkRoot) {
+        $cItem = Get-Item -LiteralPath $LinkRoot -Force
         if ($cItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { return }
 
-        $backupDir = "$ClaudeSkillsRoot.bak-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
-        foreach ($child in @(Get-ChildItem -LiteralPath $ClaudeSkillsRoot -Force)) {
+        $backupDir = "$LinkRoot.bak-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+        foreach ($child in @(Get-ChildItem -LiteralPath $LinkRoot -Force)) {
             if ($child.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
                 # 예전 설치가 스킬마다 만든 정션이다. 링크만 걷고 원본(~/.agents/skills)은 둔다
                 cmd /c "rmdir `"$($child.FullName)`"" 2>&1 | Out-Null
@@ -231,32 +237,38 @@ function Convert-ClaudeSkillsToJunction {
             }
             $dest = Join-Path $AgentsSkillsRoot $child.Name
             if (Test-Path -LiteralPath $dest) {
-                New-Item -ItemType Directory -Force -Path $backupDir | Out-Null
-                Move-Item -LiteralPath $child.FullName -Destination (Join-Path $backupDir $child.Name) -Force
-                Write-Host "[!] ~/.agents/skills 에 같은 이름이 있어 보관만 했습니다: $($child.Name) -> $backupDir" -ForegroundColor Yellow
+                if ($targetSkills -contains $child.Name) {
+                    Remove-Item -LiteralPath $child.FullName -Recurse -Force
+                } else {
+                    New-Item -ItemType Directory -Force -Path $backupDir | Out-Null
+                    Move-Item -LiteralPath $child.FullName -Destination (Join-Path $backupDir $child.Name) -Force
+                    Write-Host "[!] ~/.agents/skills 에 같은 이름이 있어 보관만 했습니다: $($child.Name) -> $backupDir" -ForegroundColor Yellow
+                }
             } else {
                 Move-Item -LiteralPath $child.FullName -Destination $dest
                 Write-Host "[+] ~/.agents/skills 로 옮겼습니다: $($child.Name)" -ForegroundColor Green
             }
         }
-        if (@(Get-ChildItem -LiteralPath $ClaudeSkillsRoot -Force).Count -gt 0) {
-            throw "~/.claude/skills 를 비우지 못해 정션으로 바꾸지 않았습니다. 남은 항목을 확인해 주세요: $ClaudeSkillsRoot"
+        if (@(Get-ChildItem -LiteralPath $LinkRoot -Force).Count -gt 0) {
+            throw "$LinkRoot 를 비우지 못해 정션으로 바꾸지 않았습니다. 남은 항목을 확인해 주세요: $LinkRoot"
         }
-        Remove-Item -LiteralPath $ClaudeSkillsRoot -Force
+        Remove-Item -LiteralPath $LinkRoot -Force
     }
 
-    cmd /c mklink /J "$ClaudeSkillsRoot" "$AgentsSkillsRoot" 2>&1 | Out-Null
-    $made = Get-Item -LiteralPath $ClaudeSkillsRoot -Force -ErrorAction SilentlyContinue
+    cmd /c mklink /J "$LinkRoot" "$AgentsSkillsRoot" 2>&1 | Out-Null
+    $made = Get-Item -LiteralPath $LinkRoot -Force -ErrorAction SilentlyContinue
     if (-not $made -or -not ($made.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
-        throw "~/.claude/skills 정션을 만들지 못했습니다. 스킬은 ~/.agents/skills 에 그대로 있습니다."
+        throw "$Label 정션을 만들지 못했습니다. 스킬은 ~/.agents/skills 에 그대로 있습니다."
     }
-    Write-Host "[+] Claude Code 단일 정션(Junction) 연결 완료: ~/.claude/skills -> ~/.agents/skills" -ForegroundColor Green
+    Write-Host "[+] $Label 단일 정션(Junction) 연결 완료: $LinkRoot -> ~/.agents/skills" -ForegroundColor Green
 }
 
-if ($Full) { Convert-ClaudeSkillsToJunction }
-else { New-Item -ItemType Directory -Force -Path $ClaudeSkillsRoot | Out-Null }
-
-$targetSkills = @("samjil-handoff", "samjil-delegate-agy", "samjil-git-commit")
+if ($Full) {
+    Convert-SkillsDirToJunction $ClaudeSkillsRoot "Claude Code"
+    Convert-SkillsDirToJunction $GeminiSkillsRoot "Antigravity"
+} else {
+    New-Item -ItemType Directory -Force -Path $ClaudeSkillsRoot | Out-Null
+}
 
 foreach ($sName in $targetSkills) {
     $srcSkillDir = Join-Path $SkillsSourceDir $sName
@@ -528,7 +540,7 @@ Write-Host "==========================================================" -Foregro
 Write-Host "  설치가 성공적으로 완료되었습니다!" -ForegroundColor Green
 Write-Host "  [스킬 (순수 SKILL.md)]" -ForegroundColor White
 Write-Host "    - Claude Code        : ~/.claude/skills/ -> ~/.agents/skills/ (단일 정션)" -ForegroundColor Gray
-Write-Host "    - Antigravity Skills : ~/.agents/skills/ (skills.json 연동)" -ForegroundColor Gray
+Write-Host "    - Antigravity Skills : ~/.gemini/config/skills/ -> ~/.agents/skills/ (단일 정션, skills.json 연동)" -ForegroundColor Gray
 Write-Host "  [도구 및 웹 파일 (~/.samjil)]" -ForegroundColor White
 Write-Host "    - 통합 웹 뷰어 실행 : ~/.samjil/viewer/serve-viewer.bat (또는 .ps1)" -ForegroundColor Cyan
 Write-Host "      (브라우저에서 Delegate QA / Handoff 탭 선택 열람)" -ForegroundColor Gray

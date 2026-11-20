@@ -214,7 +214,8 @@ function Initialize-AgySqlite {
 #   15: 토큰 통계 표(token_files · token_turns · token_task_links · token_estimates)는 더 만들지 않는다. 이미 있는 DB 의 표는 지우지 않고 그냥 안 쓴다.
 #   16: 실측 통계 표(usage_files · usage_notes · usage_questions). 수집은 sub\usage-stats.ps1, 사유 기록은 note-choice.ps1 · submit-task.ps1(@reason).
 #   17: usage_questions 에 Claude 노력 단계(claude_effort). 열을 새로 더할 때는 usage_files 를 비워 대화 기록을 처음부터 다시 읽게 한다(예전 질문의 노력도 채운다).
-$script:AgyDbSchemaVersion = 17
+#   18: tasks 에 Gemini 가 프롬프트만으로 산정한 예상 시간(estimated_sec) 추가.
+$script:AgyDbSchemaVersion = 18
 $script:AgyDbSchemaSql = @(
     "CREATE TABLE IF NOT EXISTS tasks (
         task_id TEXT PRIMARY KEY NOT NULL,
@@ -222,6 +223,7 @@ $script:AgyDbSchemaSql = @(
         input_tokens TEXT, output_tokens TEXT, thinking_tokens TEXT, total_tokens TEXT, elapsed_sec TEXT,
         status TEXT, session TEXT, session_id TEXT, question TEXT, answer TEXT, process TEXT,
         cum_input_tokens TEXT, cum_output_tokens TEXT, cum_thinking_tokens TEXT, cum_total_tokens TEXT, usage_basis TEXT,
+        estimated_sec TEXT,
         updated_seq INTEGER NOT NULL DEFAULT 0)",
     "CREATE INDEX IF NOT EXISTS idx_tasks_seq ON tasks(updated_seq)",
     "CREATE INDEX IF NOT EXISTS idx_tasks_timestamp ON tasks(timestamp)",
@@ -249,7 +251,7 @@ $script:AgyDbSchemaSql = @(
 # 값은 모두 글자(예전 jsonl 기록이 숫자도 글자로 담았다). process 는 도구 목록의 JSON 글자이고 NULL = "모름", "[]" = "없음".
 $script:QaRecordFields = @('timestamp', 'computer_name', 'task_id', 'source', 'model', 'attempts', 'tried_models', 'input_tokens', 'output_tokens',
     'thinking_tokens', 'total_tokens', 'elapsed_sec', 'status', 'session', 'session_id', 'question', 'answer', 'process',
-    'cum_input_tokens', 'cum_output_tokens', 'cum_thinking_tokens', 'cum_total_tokens', 'usage_basis')
+    'cum_input_tokens', 'cum_output_tokens', 'cum_thinking_tokens', 'cum_total_tokens', 'usage_basis', 'estimated_sec')
 
 function Initialize-AgyDbSchema($Db, [string]$Path = "") {
     [void]$Db.Execute("PRAGMA journal_mode=WAL", $null)
@@ -264,7 +266,7 @@ function Initialize-AgyDbSchema($Db, [string]$Path = "") {
             }
         }
     } catch {}
-    $neededTaskCols = @('cum_input_tokens', 'cum_output_tokens', 'cum_thinking_tokens', 'cum_total_tokens', 'usage_basis')
+    $neededTaskCols = @('cum_input_tokens', 'cum_output_tokens', 'cum_thinking_tokens', 'cum_total_tokens', 'usage_basis', 'estimated_sec')
     foreach ($cName in $neededTaskCols) {
         if ($taskCols.Count -gt 0 -and -not $taskCols.ContainsKey($cName)) {
             try { [void]$Db.Execute("ALTER TABLE tasks ADD COLUMN $cName TEXT", $null) } catch {}

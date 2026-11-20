@@ -90,7 +90,7 @@ if ($MaxParallel -le 0) {
 
 # agy 응답 JSON에는 모델명이 담겨오지 않습니다 (CLI 자체 한계). 그래서 "어떤 모델을 쓸지 우리가 --model로 직접 지정"하고,
 # 성공한 모델을 기록합니다(그래서 model 컬럼은 정확합니다).
-# 모델은 단계(quick · build · build-hard · feature · think · deep)로 고르고, 단계마다 주 모델과 폴백 순서가 설정 파일에 있습니다:
+# 모델은 단계(quick · build · build-hard · feature · feature-argon · think · think-argon · deep)로 고르고, 단계마다 주 모델과 폴백 순서가 설정 파일에 있습니다:
 #   <delegate-agy>\config\models.json (기본, 동기화 · 설치가 덮어씀) + models.local.json (사용자 덮어쓰기). 읽기는 agy-models.ps1.
 # 설정은 작업마다 다시 읽습니다(바꿔도 워처를 다시 켤 필요가 없습니다).
 # 워처가 켜질 때 `agy models` 로 실제로 쓸 수 있는 모델 목록을 받아 $AvailableModelsFile 에 적고, 작업자는 그 목록에 없는 모델을 건너뜁니다.
@@ -100,19 +100,6 @@ if (-not (Test-Path $modelsLibFile)) { $modelsLibFile = Join-Path (Split-Path $P
 $AvailableModelsFile = Join-Path $RuntimeDir "agy-models-available.json"
 
 function Get-WatcherModelConfig { return (Get-AgyModelConfig) }
-
-# agy 한도(agy -p "/usage", 모델 호출 없음)를 창 없는 별도 프로세스로 새로 고친다(quota-balance.ps1 -RefreshAgy). 기다리지 않는다.
-# 워처가 켜질 때와 위임 작업이 끝난 뒤에 부른다. $MinAgeMinutes 보다 최근에 고쳤으면 건너뛴다(유휴 때는 부르지 않는다).
-function Start-AgyQuotaRefresh([double]$MinAgeMinutes = 3) {
-    try {
-        $qs = Join-Path $PSScriptRoot "quota-balance.ps1"
-        if (-not (Test-Path -LiteralPath $qs)) { return }
-        $qf = Join-Path $RuntimeDir "agy-quota.json"
-        if ((Test-Path -LiteralPath $qf) -and (((Get-Date) - (Get-Item -LiteralPath $qf).LastWriteTime).TotalMinutes -lt $MinAgeMinutes)) { return }
-        Start-Process -FilePath "powershell.exe" -WindowStyle Hidden -ArgumentList @(
-            "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$qs`"", "-RuntimeDir", "`"$RuntimeDir`"", "-RefreshAgy", "-Quiet") | Out-Null
-    } catch {}
-}
 
 # 워처가 시작할 때 확인한 모델 목록(없거나 못 읽으면 빈 배열 = 확인하지 않은 것으로 보고 거르지 않는다)
 function Get-WatcherAvailableModels {
@@ -137,7 +124,7 @@ $FallbackErrorPattern = '(?i)(quota|rate.?limit|429|resource.?exhausted|overload
 
 # --- 요청에서 고르는 모델 (@model:) ---
 # 지시파일 맨 위에 "@model: <단계 또는 모델>" 줄을 씁니다.
-#   단계 이름(quick · build · build-hard · feature · think · deep, 옛 별칭 low · medium · high): 그 단계의 주 모델부터, 한도 · 과부하 오류면 폴백 순서대로.
+#   단계 이름(quick · build · build-hard · feature · feature-argon · think · think-argon · deep, 옛 별칭 low · medium · high): 그 단계의 주 모델부터, 한도 · 과부하 오류면 폴백 순서대로.
 #   모델 이름(설정의 allowed): 그 모델 하나만 씁니다. 쿼터 초과/사용 불가여도 다른 모델로 자동 전환하지 않고 실패로 기록합니다
 #   (원하지 않은 모델의 결과를 조용히 받지 않게 하려는 것이고, 어떻게 할지는 Claude 가 정합니다).
 # 단계도 모델도 아닌 값은 agy 를 부르지 않고 바로 실패 처리합니다.
@@ -146,11 +133,13 @@ $FallbackErrorPattern = '(?i)(quota|rate.?limit|429|resource.?exhausted|overload
 #   @cwd:     agy 의 워크스페이스에 추가할 폴더 (--add-dir). 여러 줄 가능: 줄마다 폴더 하나, 폴더마다 --add-dir 를 한 번씩 넘긴다(줄 순서 유지, 같은 경로는 대소문자·끝의 \ 를 무시하고 한 번만)
 #   @session: 대화를 이어갈 세션 이름
 #   @model:   이번 호출의 모델 단계(quick · build · ...) 또는 모델 이름 하나 (위 설명)
+#   @cmd:     실행 슬래시 명령(goal · swarm · run-workflow · boost · browser · plan). 파일 참조 시에도 명령이 확장되게 넘긴다
+#   @mode:    실행 모드(plan · accept-edits · auto -> --mode 인자)
 #   @raw:     true 면 워처가 표준 규칙(DO NOT COMMIT 등, agy-rules.ps1)을 프롬프트에 자동으로 붙이지 않는다
 #   @upgrade: true 면 @session 으로 이어가는 대화에 다른 @model 을 줘도 오류 대신 "모델 승격"을 한다: 새 대화를 시작하고 이전 질문·답 글을 지시문 위에 붙인다(Resolve-RequestedModel)
-# 반환: @{ Cwd; Session; Model; Raw; Upgrade; Prompt }  (Cwd 는 폴더 배열이고 없으면 빈 배열, Session/Model 은 없으면 $null, Raw/Upgrade 는 $true/$false)
+# 반환: @{ Cwd; Session; Model; Cmd; Mode; Raw; Upgrade; Prompt }  (Cwd 는 폴더 배열이고 없으면 빈 배열, Session/Model/Cmd/Mode 는 없으면 $null, Raw/Upgrade 는 $true/$false)
 function ConvertFrom-TaskDirectives([string]$rawText) {
-    $cwdRaw = New-Object System.Collections.ArrayList; $session = $null; $model = $null; $raw = $false; $upgrade = $false
+    $cwdRaw = New-Object System.Collections.ArrayList; $session = $null; $model = $null; $cmd = $null; $mode = $null; $raw = $false; $upgrade = $false
     $prompt = $rawText
     while ($prompt.Length -gt 0) {
         $firstLine = ($prompt -split "`r?`n", 2)[0]
@@ -162,6 +151,10 @@ function ConvertFrom-TaskDirectives([string]$rawText) {
             $session = $Matches[1].Trim()
         } elseif ($firstLine -match '^\ufeff?@model:\s*(.+)$') {
             $model = $Matches[1].Trim()
+        } elseif ($firstLine -match '^\ufeff?@cmd:\s*(.+)$') {
+            $cmd = $Matches[1].Trim()
+        } elseif ($firstLine -match '^\ufeff?@mode:\s*(.+)$') {
+            $mode = $Matches[1].Trim()
         } elseif ($firstLine -match '^\ufeff?@raw:\s*(.+)$') {
             $raw = ConvertTo-AgyDirectiveFlag $Matches[1]
         } elseif ($firstLine -match '^\ufeff?@upgrade:\s*(.+)$') {
@@ -172,7 +165,7 @@ function ConvertFrom-TaskDirectives([string]$rawText) {
         $rest = ($prompt -split "`r?`n", 2)
         $prompt = if ($rest.Length -gt 1) { $rest[1] } else { "" }
     }
-    return @{ Cwd = @(ConvertTo-CwdList $cwdRaw.ToArray()); Session = $session; Model = $model; Raw = $raw; Upgrade = $upgrade; Prompt = $prompt }
+    return @{ Cwd = @(ConvertTo-CwdList $cwdRaw.ToArray()); Session = $session; Model = $model; Cmd = $cmd; Mode = $mode; Raw = $raw; Upgrade = $upgrade; Prompt = $prompt }
 }
 
 # 요청한 @model 을 확인합니다.
@@ -591,7 +584,7 @@ function Complete-TaskQaRecord([string]$TaskId, [string]$SourcePath, [string]$Do
 }
 
 # 사용량 행(tasks 표)을 쓴다: 작업이 끝났을 때 한 번.
-function Write-UsageRow($taskId, $model, $attempts, $triedModels, $inputTokens, $outputTokens, $thinkingTokens, $totalTokens, $elapsedSec, $status, [string]$session = "", [string]$sessionId = "", $cumInputTokens = $null, $cumOutputTokens = $null, $cumThinkingTokens = $null, $cumTotalTokens = $null, [string]$usageBasis = "") {
+function Write-UsageRow($taskId, $model, $attempts, $triedModels, $inputTokens, $outputTokens, $thinkingTokens, $totalTokens, $elapsedSec, $status, [string]$session = "", [string]$sessionId = "", $cumInputTokens = $null, $cumOutputTokens = $null, $cumThinkingTokens = $null, $cumTotalTokens = $null, [string]$usageBasis = "", $estimatedSec = $null) {
     try {
         $recDict = [ordered]@{
             timestamp       = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
@@ -614,6 +607,7 @@ function Write-UsageRow($taskId, $model, $attempts, $triedModels, $inputTokens, 
         if ($null -ne $cumThinkingTokens) { $recDict['cum_thinking_tokens'] = [string]$cumThinkingTokens }
         if ($null -ne $cumTotalTokens)    { $recDict['cum_total_tokens']    = [string]$cumTotalTokens }
         if ($usageBasis)                  { $recDict['usage_basis']         = [string]$usageBasis }
+        if ($null -ne $estimatedSec -and [string]$estimatedSec -ne "") { $recDict['estimated_sec'] = [string]$estimatedSec }
         $rec = New-QaRecord $recDict
         # 같은 작업 ID 의 사용량 행이 이미 있으면 먼저 쓴 것을 둔다(InsertOnly). DB 를 잠깐 못 쓰면 pending 폴더에 두었다가 다음에 가져온다.
         if ((Write-QaRecordToDb $AgyDbPath $rec 'InsertOnly') -eq 'pending') { Log "사용량 기록을 DB 에 바로 쓰지 못해 pending 폴더에 두었습니다: $taskId" }
@@ -772,6 +766,10 @@ function Invoke-AgyOnce($agyArgs, $errFile, $workDir, [string]$marker = "") {
         }
         if ($stallCheck -and $convId) {
             $lastActivity = Get-AgyConversationActivity $agyHome $convId
+            if (Get-Command Get-AgyChildConversationActivity -ErrorAction SilentlyContinue) {
+                $childAct = Get-AgyChildConversationActivity $agyHome $convId
+                if ($childAct -and (($null -eq $lastActivity) -or ($childAct -gt $lastActivity))) { $lastActivity = $childAct }
+            }
             if (Test-AgyStalled $lastActivity $startedAt $now $AgyStallSeconds) {
                 # 오래 걸리는 명령을 agy 가 백그라운드로 돌려 두고 기다리는 중이면 새 단계가 없는 게 정상이다. 끊지 않는다(절대 마감은 그대로).
                 $bgPending = @(Get-AgyPendingBackgroundTasks $agyHome $convId)
@@ -893,7 +891,7 @@ function Get-OtherRunningMarkers([string]$ExceptTaskId) {
     return @{ Markers = $markers; Total = $total }
 }
 
-function Invoke-AgyWithFallback($safePrompt, $targetCwd, [bool]$skipPerm, $errFile, [string]$conversationId = "", [string]$knownModel = "", [string]$taskId = "", [string]$promptFile = "", [string[]]$modelChain = @(), [string]$tier = "") {
+function Invoke-AgyWithFallback($safePrompt, $targetCwd, [bool]$skipPerm, $errFile, [string]$conversationId = "", [string]$knownModel = "", [string]$taskId = "", [string]$promptFile = "", [string[]]$modelChain = @(), [string]$tier = "", [string]$slashCommand = "", [string]$executionMode = "") {
     $result = [ordered]@{
         Success        = $false
         Response       = $null
@@ -933,11 +931,12 @@ function Invoke-AgyWithFallback($safePrompt, $targetCwd, [bool]$skipPerm, $errFi
 
         # 지시문 전달 방식(인라인 / 파일 참조)과 표식. 인라인이면 표식을 작업 표시 파일에 적어 둬서, 같은 표식으로 시작하는 다른 작업이 파일 참조로 비켜 가게 한다.
         $plainPrompt = ([string]$safePrompt).Replace('\"', '"')
+        $inlinePrompt = if ($slashCommand) { "$slashCommand $plainPrompt" } else { $plainPrompt }
         $hasPromptFile = [bool]($promptFile -and (Test-Path -LiteralPath $promptFile))
-        $delivery = @{ Mode = 'inline'; Marker = (Get-AgyPromptMarker $plainPrompt); Reason = '' }
+        $delivery = @{ Mode = 'inline'; Marker = (Get-AgyPromptMarker $inlinePrompt); Reason = '' }
         if ($hasPromptFile) {
             $others = Get-OtherRunningMarkers $taskId
-            $delivery = Get-AgyPromptDelivery $plainPrompt $others.Markers $others.Total
+            $delivery = Get-AgyPromptDelivery $inlinePrompt $others.Markers $others.Total
         }
         if ($taskId) { try { Write-RunningClaim $taskId @{ marker = [string]$(if ($delivery.Mode -eq 'inline') { $delivery.Marker } else { '' }) } } catch {} }
 
@@ -961,11 +960,16 @@ function Invoke-AgyWithFallback($safePrompt, $targetCwd, [bool]$skipPerm, $errFi
             } catch {}
         }
 
-        # 프롬프트 인자: 위에서 정한 방식(인라인 글 또는 @임시프롬프트파일)
-        $promptArg = if ($delivery.Mode -eq 'file') { "@$promptFile" } else { $plainPrompt }
+        # 프롬프트 인자: 위에서 정한 방식(인라인 글 또는 @임시프롬프트파일). 슬래시 명령은 파일 참조 앞에도 붙여 agy 가 명령을 확장하게 한다.
+        $promptArg = if ($delivery.Mode -eq 'file') {
+            if ($slashCommand) { "$slashCommand @$promptFile" } else { "@$promptFile" }
+        } else {
+            $inlinePrompt
+        }
         $agyArgs = @('-p', $promptArg, '--output-format', 'json')
 
         if ($conversationId) { $agyArgs += @('--conversation', $conversationId) } else { $agyArgs += @('--model', $candidate) }
+        if ($executionMode)  { $agyArgs += @('--mode', $executionMode) }
 
         foreach ($dir in @($targetCwd)) { if ($dir) { $agyArgs += @('--add-dir', [string]$dir) } }
 
@@ -1318,8 +1322,6 @@ function Invoke-InboxTask([string]$TaskPath) {
         Invoke-InboxTaskBody $file
     } finally {
         Remove-RunningClaim $taskKey
-        # 위임이 한도를 썼으니 agy 한도를 새로 읽어 둔다(3분 안에 이미 읽었으면 건너뜀). 한도 균형(quota-balance.ps1)이 쓴다.
-        Start-AgyQuotaRefresh 3
     }
 }
 
@@ -1403,6 +1405,40 @@ function Invoke-InboxTaskBody([System.IO.FileInfo]$file) {
 
 
 
+    # @cmd / @mode 검사: 지원하지 않는 명령이나 대화형 TUI 전용 명령은 agy 를 부르지 않고 바로 실패 처리합니다.
+    $cmdCheck = if ($directives.Cmd -and (Get-Command Resolve-AgySlashCommand -ErrorAction SilentlyContinue)) { Resolve-AgySlashCommand $directives.Cmd } else { $null }
+    if ($cmdCheck -and -not $cmdCheck.Valid) {
+        Set-Content -Path $outFile -Value $cmdCheck.Error -Encoding UTF8
+        Set-Content -Path $errFile -Value $cmdCheck.Error -Encoding UTF8
+        Log "실패: $($cmdCheck.Error)"
+        Write-UsageRow $baseName $null $null $requestedModel $null $null $null $null $null "ERROR" $sessionName $conversationId
+        Complete-TaskQaRecord $baseName $file.FullName $doneFile
+        return
+    }
+    $modeCheck = if ($directives.Mode -and (Get-Command Resolve-AgyExecutionMode -ErrorAction SilentlyContinue)) { Resolve-AgyExecutionMode $directives.Mode } else { $null }
+    if ($modeCheck -and -not $modeCheck.Valid) {
+        Set-Content -Path $outFile -Value $modeCheck.Error -Encoding UTF8
+        Set-Content -Path $errFile -Value $modeCheck.Error -Encoding UTF8
+        Log "실패: $($modeCheck.Error)"
+        Write-UsageRow $baseName $null $null $requestedModel $null $null $null $null $null "ERROR" $sessionName $conversationId
+        Complete-TaskQaRecord $baseName $file.FullName $doneFile
+        return
+    }
+    $leadCmd = if (Get-Command Split-AgyLeadingSlashCommand -ErrorAction SilentlyContinue) { Split-AgyLeadingSlashCommand $promptText } else { @{ Name = ""; Command = ""; Body = $promptText } }
+    $effectiveSlashCmd = ""
+    if ($cmdCheck -and $cmdCheck.Valid) {
+        $effectiveSlashCmd = [string]$cmdCheck.Command
+        if ($leadCmd.Command -and ($leadCmd.Command -ieq $effectiveSlashCmd)) { $promptText = [string]$leadCmd.Body }
+    } elseif ($leadCmd.Command) {
+        $effectiveSlashCmd = [string]$leadCmd.Command
+        $promptText = [string]$leadCmd.Body
+    }
+    $effectiveMode = if ($modeCheck -and $modeCheck.Valid) { [string]$modeCheck.Mode } else { "" }
+    # agy --mode plan 은 내부적으로 /plan 을 자동으로 붙이므로 중복을 막는다.
+    if ($effectiveMode -eq "plan" -and $effectiveSlashCmd -ieq "/plan") { $effectiveSlashCmd = "" }
+    if ($effectiveSlashCmd) { Log "  -> 실행 명령(@cmd): $effectiveSlashCmd" }
+    if ($effectiveMode) { Log "  -> 실행 모드(@mode): $effectiveMode" }
+
     # @model 검사: 쓸 수 없는 모델이면 agy 를 부르지 않고 바로 실패 처리합니다(@cwd 오류와 같은 방식).
     $modelCheck = Resolve-RequestedModel $requestedModel $conversationId $knownModel $sessionName ([bool]$directives.Upgrade)
     if ($modelCheck.Error) {
@@ -1432,7 +1468,7 @@ function Invoke-InboxTaskBody([System.IO.FileInfo]$file) {
     }
 
     # 모델을 지정하지 않았고 새 대화(@session 없음)면 요청 내용으로 단계를 자동 선택한다(agy-autotier.ps1).
-    # 자동 선택은 quick(읽기만 하는 짧은 일) / build(파일을 바꾸는 일)만 고른다. build-hard · feature · think · deep 은 Claude 가 @model 로 적는다.
+    # 자동 선택은 quick(읽기만 하는 짧은 일) / build(파일을 바꾸는 일)만 고른다. build-hard · feature · feature-argon · think · think-argon · deep 은 Claude 가 @model 로 적는다.
     # 이어가는 세션은 시작할 때의 모델을 유지한다.
     if (-not $requestedModel -and -not $sessionName -and (Test-AgyAutoTierEnabled)) {
         $autoTier = Get-AgyAutoTier $promptText (@($targetCwds).Count -gt 0)
@@ -1507,14 +1543,15 @@ function Invoke-InboxTaskBody([System.IO.FileInfo]$file) {
             New-Item -ItemType Directory -Force -Path $promptsDir | Out-Null
         }
         # 폴더(@cwd)를 여는 작업에는 표준 규칙을 붙인다(@raw: true 면 안 붙임). 위임 기록에는 원본 지시문이 남는다(여기서는 agy 에 넘길 프롬프트만 바꾼다).
-        $withRules = Add-AgyStandardRules $promptText (@($targetCwds).Count -gt 0) ([bool]$directives.Raw)
-        $promptForAgy = [string]$withRules.Text
+        $withRules = Add-AgyStandardRules $promptText (@($targetCwds).Count -gt 0) ([bool]$directives.Raw) $effectiveSlashCmd
+        $withEta = if (Get-Command Add-AgyEtaInstruction -ErrorAction SilentlyContinue) { Add-AgyEtaInstruction ([string]$withRules.Text) ([bool]$directives.Raw) } else { @{ Text = [string]$withRules.Text; Added = $false } }
+        $promptForAgy = [string]$withEta.Text
         if (@($withRules.Added).Count -gt 0) { Log "  -> 표준 규칙 자동 추가: $(@($withRules.Added) -join ', ')" }
         $tempPromptFile = Join-Path $promptsDir "prompt_$baseName.txt"
         [System.IO.File]::WriteAllText($tempPromptFile, $promptForAgy, (New-Object System.Text.UTF8Encoding($false)))
         $safePrompt = $promptForAgy -replace '"', '\"'
 
-        $agyResult = Invoke-AgyWithFallback -safePrompt $safePrompt -targetCwd $targetCwds -skipPerm:$SkipPermissions -errFile $errFile -conversationId $conversationId -knownModel $knownModel -taskId $baseName -promptFile $tempPromptFile -modelChain $modelChain -tier $modelTier
+        $agyResult = Invoke-AgyWithFallback -safePrompt $safePrompt -targetCwd $targetCwds -skipPerm:$SkipPermissions -errFile $errFile -conversationId $conversationId -knownModel $knownModel -taskId $baseName -promptFile $tempPromptFile -modelChain $modelChain -tier $modelTier -slashCommand $effectiveSlashCmd -executionMode $effectiveMode
 
         $agyStderr = [string]$agyResult.StdErr
 
@@ -1541,7 +1578,23 @@ function Invoke-InboxTaskBody([System.IO.FileInfo]$file) {
                 $lastResortBanner = "[알림] 단계 '$(if ($modelTier) { $modelTier } else { '기본' })' 의 앞 모델($(@($agyResult.TriedModels | Select-Object -SkipLast 1) -join ', '))이 한도 · 과부하로 막혀 맨 마지막 대안 $($agyResult.ModelUsed) 로 처리했습니다. 결과를 더 꼼꼼히 검토하세요.`r`n`r`n"
                 Log "  참고: 맨 마지막 대안 $($agyResult.ModelUsed) 로 처리했습니다(시도: $($agyResult.TriedModels -join ' -> '))"
             }
-            Set-Content -Path $outFile -Value ($guardBanner + $lastResortBanner + $agyResult.Response) -Encoding UTF8
+            $etaParsed = if (Get-Command Split-AgyEtaFromText -ErrorAction SilentlyContinue) { Split-AgyEtaFromText ([string]$agyResult.Response) } else { @{ EstimatedSec = $null; CleanText = [string]$agyResult.Response } }
+            $cleanResponse = [string]$etaParsed.CleanText
+            if (Get-Command Remove-AgyGoalMarkers -ErrorAction SilentlyContinue) { $cleanResponse = Remove-AgyGoalMarkers $cleanResponse }
+            $recEstimatedSec = $etaParsed.EstimatedSec
+            if ($null -eq $recEstimatedSec -and $effectiveSessionId -and (Get-Command Get-AgyEstimatedSecFromTranscript -ErrorAction SilentlyContinue)) {
+                try {
+                    $etaSince = $null
+                    if ($sessionName -or $conversationId) {
+                        $etaSince = (Get-Date).AddSeconds(-([double]$agyResult.ElapsedSec + 5))
+                    }
+                    $etaTPath = Get-AgyTranscriptPath (Get-AgyHomeDir) ([string]$effectiveSessionId)
+                    $etaCompact = if ($etaTPath) { Join-Path (Split-Path -Parent $etaTPath) "transcript.jsonl" } else { $null }
+                    $etaFile = if ($etaCompact -and (Test-Path -LiteralPath $etaCompact)) { $etaCompact } elseif ($etaTPath -and (Test-Path -LiteralPath $etaTPath)) { $etaTPath } else { $null }
+                    if ($etaFile) { $recEstimatedSec = Get-AgyEstimatedSecFromTranscript $etaFile $etaSince }
+                } catch {}
+            }
+            Set-Content -Path $outFile -Value ($guardBanner + $lastResortBanner + $cleanResponse) -Encoding UTF8
 
             # 이어가는 세션에서 agy 가 보고하는 duration_seconds 는 그 대화를 처음 연 때부터의 누적이라(사이에 쉰 시간 포함) 이번 호출의 시간이 아니다.
             # 그래서 이어가는 호출은 워처가 잰 이번 호출의 시간을 쓴다.
@@ -1666,7 +1719,7 @@ function Invoke-InboxTaskBody([System.IO.FileInfo]$file) {
             $recElapsed  = $elapsedForLog
             $recStatus   = "OK"
 
-            Write-UsageRow $baseName $recModel $recAttempts $recTried $recInTok $recOutTok $recThinkTok $recTotTok $recElapsed "OK" $sessionName $effectiveSessionId $cumInTok $cumOutTok $cumThinkTok $cumTotTok $usageBasis
+            Write-UsageRow $baseName $recModel $recAttempts $recTried $recInTok $recOutTok $recThinkTok $recTotTok $recElapsed "OK" $sessionName $effectiveSessionId $cumInTok $cumOutTok $cumThinkTok $cumTotTok $usageBasis $recEstimatedSec
 
             if ($sessionName -and $agyResult.ConversationId) {
                 Write-Session -Name $sessionName -ConversationId $agyResult.ConversationId -Cwd $targetCwds -Model $agyResult.ModelUsed
@@ -1877,8 +1930,6 @@ try {
     Remove-Item -LiteralPath $AvailableModelsFile -Force -ErrorAction SilentlyContinue
     Log "모델 확인: agy 를 찾지 못해 확인 없이 시작합니다 ($($_.Exception.Message))."
 }
-# 한도 균형용 agy 한도를 한 번 읽어 둔다(창 없는 별도 프로세스, 기다리지 않음)
-Start-AgyQuotaRefresh 0
 
 New-Item -ItemType Directory -Force -Path $RunningDir -ErrorAction SilentlyContinue | Out-Null
 Remove-StaleSessions -MaxAgeDays $SessionMaxAgeDays

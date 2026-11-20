@@ -1,6 +1,6 @@
 ---
 name: samjil-delegate-agy
-description: "Delegate implementation, fixes, refactors, tests and UI work that Claude can specify, plus bulky simple jobs (log or document summaries, translation, the same edit across many files, format conversion), to the Antigravity CLI (agy) on Gemini 4 models through a local watcher to save Claude quota, and consult Argon before very complex decisions. Claude keeps work that needs the conversation's context, one- or two-line edits, and the final call on security, auth, payments and migrations. Use when the user says 'delegate', 'ask agy', 'let agy do it', 'save quota', or the work fits that description. Windows only; needs a one-time local runtime install (see Setup)."
+description: "Delegate implementation, fixes, refactors, tests and UI work that Claude can specify, plus bulky simple jobs (log or document summaries, translation, the same edit across many files, format conversion), to the Antigravity CLI (agy) on Gemini 4 Hydrogen/Neon/Argon models with slash-command optimization (@cmd: goal, swarm, run-workflow, boost, browser, plan; @mode: plan, accept-edits, auto) through a local watcher to save Claude quota, and consult Neon (think) or Argon (think-argon) before very complex decisions. Claude keeps work that needs the conversation's context, one- or two-line edits, and the final call on security, auth, payments and migrations. Use when the user says 'delegate', 'ask agy', 'let agy do it', 'save quota', or the work fits that description. Windows only; needs a one-time local runtime install (see Setup)."
 license: MIT
 compatibility: "Windows 10/11 with Windows PowerShell 5.1, Claude Code, and the Antigravity CLI (agy) installed and signed in."
 metadata:
@@ -10,9 +10,11 @@ metadata:
 
 # samjil-delegate-agy
 
-Delegate to the Antigravity CLI (`agy`) work you can specify exactly, review everything that comes back, and keep for yourself what needs this conversation. Goal: spend less Claude quota without lowering quality.
+Delegate to the Antigravity CLI (`agy`) as much as you can: anything you can specify exactly goes to agy, you review everything that comes back, and you keep only what needs this conversation. Goal: spend less Claude quota without lowering quality.
 
-Measured on the author's PC (2026-11-17, test tasks with hidden tests): Gemini 4 Hydrogen medium finished a 4-file feature in 93 s (17/17 tests), a 4-function task in 61 s (11/11); 3.8 Flash medium needed 562 s and 248 s for the same work at 5x the tokens. Argon, Orchestrator and Hydrogen Extra scored the same but were 2-4x slower on clearly specified work; they pay off only where the thinking is hard. Every Claude call re-reads the whole conversation, so keep each delegation to a few calls.
+**Default: delegate.** Before doing work yourself, ask "can I write a spec for this?" If yes, delegate it. Doing it yourself is the exception and needs one of the reasons in the "Keep" column below.
+
+Measured on the author's PC (2026-11-17) and vendor/independent benchmarks (2026-11-18): Gemini 4 Hydrogen medium finished a 4-file feature in 93 s (17/17 tests), a 4-function task in 61 s (11/11); 3.8 Flash medium needed 562 s and 248 s at 5x tokens. Among frontier models, **Neon** leads coding/reasoning benchmarks (Artificial Analysis Intelligence Index: medium 55, high 60, xhigh 61; Terminal-Bench 4.1 65.2%; AA Coding Agent Index #1 at 58.6; $3/$15) , while **Argon** (AA ~50–53; Deep SWE 77.9%; $4/$20) excels at long-document exploration, structured domain review and cross-model second opinions. Both Neon and Argon remain first-class tiers (`feature`/`think` vs `feature-argon`/`think-argon`) with cross-family fallbacks. Hydrogen handles `quick`/`build` fast; reserve Neon/Argon tiers for harder edge cases, orchestration, review and deep logic. Every Claude call re-reads the whole conversation, so keep each delegation to a few calls.
 
 ## 0. Setup check (do this first, every conversation)
 
@@ -33,11 +35,16 @@ If `agy` itself is missing or not signed in, the installer says so. The user fix
 
 ## 1. What to delegate, and on which tier
 
-| Delegate | Keep (do it yourself) |
+| Delegate (default) | Keep (do it yourself) — only these |
 |---|---|
-| Implementation, fixes, refactors, tests, UI work whose spec you can write (paths, AS-IS -> TO-BE, names, checks) | Work that needs this conversation's context |
-| Bulky simple work: long logs or documents, translation, the same edit across many files, format conversion, test data, first-pass search | A one- or two-line edit (the brief costs more than the edit) |
-| | The final decision on security, auth, payments, migrations and anything hard to undo (agy may draft; you decide and review line by line) |
+| Implementation, fixes, refactors, tests, UI work whose spec you can write (paths, AS-IS -> TO-BE, names, checks) | Work that needs this conversation's context and cannot be written into a brief |
+| Bulky simple work: long logs or documents, translation, the same edit across many files, format conversion, test data, first-pass search or code exploration | A one- or two-line edit (the brief costs more than the edit) |
+| Reading and summarizing large files or many files before you decide something | The final decision on security, auth, payments, migrations and anything hard to undo (agy may draft; you decide and review line by line) |
+| Writing or updating tests and docs for code you just changed | Talking to the user, and reviewing what agy returns |
+
+- When in doubt, delegate. A task that "needs some context" usually needs only a few facts: put them in the brief instead of keeping the task.
+- Split a big job into briefs and send them in parallel (`-NoWait`, at most 5) instead of doing part of it yourself.
+- Keep for yourself only the parts that truly need you; delegate the rest of the same request.
 
 Pick a tier and write it as `@model: <tier>` (details and fallbacks: `references/models.md`):
 
@@ -45,43 +52,46 @@ Pick a tier and write it as `@model: <tier>` (details and fallbacks: `references
 |---|---|---|---|
 | `quick` | lookups, summaries, translation, format conversion, short questions | Hydrogen low | 3 min |
 | `build` | clearly specified implementation, a few files, tests, repeated edits (**default for code**) | Hydrogen medium | 8 min |
-| `build-hard` | `build` with many edge cases, or a `build` that failed once | Hydrogen high | 12 min |
-| `feature` | a multi-file feature where agy must also split the work and plan the steps | Orchestrator (Argon) | 20 min |
-| `think` | little editing, deep reasoning: design review, root cause of a hard bug, consultation | Argon high | 20 min |
-| `deep` | few files but hard logic: algorithms, concurrency or races, parsers or state machines, numeric precision, a measured performance target, fixing a bug whose cause Argon found, re-sending a failed `build-hard` | Hydrogen Extra (xhigh) | 20 min |
+| `build-hard` | `build` with many edge cases or complex multi-file edits, or a `build` that failed once | Neon medium | 12 min |
+| `feature` | a multi-file feature where agy must also split the work and plan the steps (coding priority) | Orchestrator (Neon) | 20 min |
+| `feature-argon` | same multi-file planning/execution from Argon's perspective | Orchestrator (Argon) | 20 min |
+| `think` | little editing, deep reasoning: design review, root cause of a hard bug, consultation (coding/reasoning priority) | Neon high | 20 min |
+| `think-argon` | design review, second opinion, long-doc/domain analysis using Argon high | Argon high | 20 min |
+| `deep` | few files but extreme logic: algorithms, concurrency or races, parsers or state machines, numeric precision, a measured performance target, fixing a bug whose cause `think`/`think-argon` found, re-sending a failed `build-hard` | Neon Extra (xhigh) | 20 min |
 
-- Choose `deep` yourself whenever its conditions hold; the user does not have to ask. Do not use it for clearly specified ordinary logic (slower and 2-3x the tokens for the same result).
-- `build` vs `feature`: if you write the per-file spec yourself, it is `build`/`build-hard`, however many files. Use `feature` only when agy should plan the split.
+- Choose `deep` yourself whenever its conditions hold; the user does not have to ask. Do not use it for clearly specified ordinary logic (slower and higher token cost for the same result).
+- `build` vs `build-hard` vs `feature`/`feature-argon`: clear spec on a few files -> `build`; many edge cases/complex files or retry -> `build-hard` (Neon medium); only use `feature` (Orchestrator Neon) or `feature-argon` (Orchestrator Argon) when agy should plan the split itself.
+- Neon vs Argon (`feature`/`think` vs `feature-argon`/`think-argon`): pick Neon by default for the highest coding benchmarks (`65.2%` Terminal-Bench 4.1); pick Argon for long-document/domain analysis, or when consulting both models for a second opinion on critical architecture. If one family is blocked, the tier's fallbacks move to the other automatically.
 - Without `@model` the watcher picks only `quick` (short read-only) or `build` (changes files). It never picks a higher tier.
 - 3.8 Flash is only the last fallback when the Gemini 4 models are blocked; a result from it starts with an `[알림]` line. Review it more carefully.
 
 If the user asks to delegate and the job belongs on the "keep" side, say so in one line and offer to do it directly; follow the user's choice. agy has no web search. Never trust factual claims from agy without checking.
 
-### Balance the two quotas
+### Optimize execution with slash commands (`@cmd` / `@mode`)
 
-Use the Claude and agy subscriptions at a similar pace relative to the time left in each window (not 50:50, just not far apart). A line `[한도 균형] <mode> ...` and an advice line come with each prompt (hook) and from `quota-balance.ps1`; follow the mode:
+Pair `@model:` with an optional `@cmd:` or `@mode:` directive when the task shape warrants it (details: `references/brief-and-commands.md`):
 
-| Mode | When | What changes |
+| Directive | Best for | Behavior & safeguards |
 |---|---|---|
-| `agy-more` | Claude is burning faster than agy | Delegate multi-file work, tests, docs and code-exploration bundles. Hand the delegation procedure to a subagent above 80k context. One- or two-line edits stay direct (a delegation costs at least two Claude calls). |
-| `agy-max` | Claude 5-hour limit 90% or more used | Delegate everything delegable; Claude only writes briefs, reviews and talks to the user. Subagent above 30k context. |
-| `balanced` | similar pace | The rules above as they are. |
-| `claude-more` | agy is burning faster | Still delegate whatever meets the rules above; only pick the lighter tier when it gives the same result (`quick`/`build`), and use `deep`/`feature` only when really needed. Claude having more quota left is never a reason to skip a delegation. |
-| `no-agy` | agy Gemini 5-hour under 10% or weekly under 5% | Do not delegate until it resets. |
+| `@cmd: goal` | Clear spec that needs full end-to-end execution | Runs autonomously until completion without mid-turn pauses; watcher strips internal completion markers. |
+| `@cmd: swarm` | Wide work splitting cleanly across **non-overlapping files** + independent verification | Spawns parallel workers + Verifier on shared board. Watcher enforces `workspace:"inherit"` (no commits) and 20 min min wait. Uses a lot of agy quota: only when the task shape needs it. |
+| `@cmd: run-workflow` | Uniform fan-out across many files or strict multi-stage Python orchestration | Writes/runs Python `parallel()`/`pipeline()`. Watcher enforces `workspace:"inherit"` and 20 min min wait. Uses a lot of agy quota: only when the task shape needs it. |
+| `@cmd: boost` | Single extremely hard bug, race condition, or algorithm | Deep iterative solve -> challenge -> re-verify pipeline (20 min min wait). Uses a lot of agy quota: only when the task shape needs it. |
+| `@cmd: browser` | Live frontend UI verification, visual diff, console/network inspection | Invokes Chrome DevTools browser subagent on localhost. |
+| `@cmd: plan` or `@mode: plan` | Read-only implementation blueprint / architecture proposal | Read-only planning before editing (if `@mode: plan`, omit `@cmd: plan`). |
 
-If the line also says Argon is tight, keep `think`/`feature` to required consultations and split the work yourself into `build`/`build-hard`.
+- **`Orchestrator` vs `/swarm` vs `/run-workflow`**: daily multi-file feature in one flow -> `feature`/`feature-argon`; independent non-overlapping file edits needing cross-verification -> `@cmd: swarm`; mechanical N-item fan-out or strict sequential schema stages -> `@cmd: run-workflow`. Prefer several `-NoWait` `build` tasks when you already wrote exact per-file specs.
+- **Interactive TUI commands & consumer-plan note**: `/teamwork`, `/grill-me`, `/rewind`, `/fork`, `/btw`, `/compact`, `/learn`, `/permissions`, `/tasks`, `/agents`, `/resume` are **interactive-TUI only** (rejected by headless watcher and `agy-brief-lint`). Also, Antigravity consumer plans (Google AI Pro/Ultra) officially scope `agy -p` to direct scripting rather than third-party agent wrapping — for multi-milestone `/teamwork`, interactive `/grill-me`, or when you prefer direct execution, write a clean spec `.md` file and let the user run `@spec.md` interactively in their own `agy` session.
 
-Claude's own limits are visible only to you (the desktop app's usage tool). When the line says the Claude numbers are missing or older than 30 minutes and the request is real work, read your usage once in the same message as your first other call, then put this before your next shell command (same call, no extra round trip): `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$USERPROFILE/.samjil/delegate-agy/scripts/sub/quota-balance.ps1" -Claude5hUsed <N> -Claude5hResetsAt <ISO> -ClaudeWeekUsed <N> -ClaudeWeekResetsAt <ISO> ;`. Without that tool, the mode uses agy numbers only.
+## 2. Consult Neon (`think`) or Argon (`think-argon`) before very complex decisions
 
-## 2. Consult Argon before very complex decisions
+For a design across several modules, a structural change that is hard to undo, a bug whose cause you cannot see, or a decision between two or more directions that is hard to call: consult `think` (Neon high) or `think-argon` (Argon high) at least once before you decide. Use the `samjil-handoff` channel (default `think`; set `위임모델: think-argon` in message front-matter to route to Argon or run a cross-model second opinion).
 
-For a design across several modules, a structural change that is hard to undo, a bug whose cause you cannot see, or a decision between two or more directions that is hard to call: consult Argon (`think`) at least once before you decide. Use the `samjil-handoff` channel (its default model is `think`).
-
-- Send: the problem, the options, your recommendation and why, **the relevant file paths and the constraints** (Argon does not know this conversation), and always: "Do not simply agree. Focus on objections, missed edge cases and alternatives; list what you would change as numbered items."
-- One round trip as a rule, two at most. These do not count toward the 3-call budget of a delegation.
+- Send: the problem, the options, your recommendation and why, **the relevant file paths and the constraints** (the reviewer does not know this conversation), and always: "Do not simply agree. Focus on objections, missed edge cases and alternatives; list what you would change as numbered items."
+- One round trip as a rule (two at most, e.g., when getting both Neon and Argon perspectives on a critical architectural call). These do not count toward the 3-call budget of a delegation.
 - If the consultation fails or passes the 20-minute limit, do not ask again: decide alone and tell the user you could not consult.
-- After deciding, tell the user in one or two lines what you changed because of Argon, and in one line each what you did not take and why. The decision and the responsibility stay with you.
-- Hard bug: `think` finds the cause and the fix direction; `deep` makes the fix.
+- After deciding, tell the user in one or two lines what you changed because of the consultation, and in one line each what you did not take and why. The decision and the responsibility stay with you.
+- Hard bug: `think`/`think-argon` finds the cause and the fix direction; `deep` (or `@cmd: boost` on `deep`/`think`) makes the fix.
 
 ## 3. Delegate: submit, wait up to the tier limit, check
 
@@ -94,6 +104,7 @@ Budget per delegated task: **at most 3 Claude calls** (5 when you escalate once)
    powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$S/submit-task.ps1" -NoWait <<'CLAUDE_TASK_EOF'
    @cwd: C:\path\to\project
    @model: build
+   @cmd: goal                      # optional: goal | swarm | run-workflow | boost | browser | plan (see references/brief-and-commands.md)
    @reason: one line, why this is delegated
    [1. Goal] one or two lines; say whether it is read-only or edits files
    [2. Spec] file paths (with line numbers), exact AS-IS -> TO-BE, names and values. Do not paste whole files
@@ -112,7 +123,7 @@ Budget per delegated task: **at most 3 Claude calls** (5 when you escalate once)
 
 **Escalate once, one step.** If the result fails its tests: `build` -> `build-hard`, `build-hard` -> `deep`, sent once (same brief plus what failed). The two waits together stay under 20 minutes when you started at `build`, 30 minutes when you started at `build-hard`. A failed `deep`, `quick`, `feature` or `think` task is not re-sent: fix it yourself (consult `think` first if the cause is unclear). If agy fails (`===ERROR===`, or the answer reports an agy run failure), check `git diff --stat` for half-done edits and finish directly.
 
-**Large context.** `submit-task.ps1` prints `[컨텍스트 <N>k] ...` on stderr when the conversation context is over about 200k tokens (`AGY_CTX_SUBAGENT_THRESHOLD`). Then hand the delegation procedure (submit, wait, diff review, tests) to one fresh-context subagent running a cheap model, and do only the brief and a final `git diff --stat` check yourself. The subagent reports in at most 5 lines: passed or not, changed files, concerns.
+**Large context.** When the context is over the limit (200k; `AGY_CTX_SUBAGENT_THRESHOLD` changes it), the prompt hook adds `[컨텍스트 <N>k] ...` before you start. If that question ends up delegated, write the brief yourself and give it to one fresh-context subagent running a cheap model, which submits, waits, reviews the diff and runs the tests; you only read its report (at most 5 lines: passed or not, changed files, concerns) and do a final `git diff --stat`. If you only see the warning from `submit-task.ps1` after submitting, the task is already queued: do not start your own poll; hand the task ID and the test command to such a subagent for the wait and the review.
 
 More: several tasks at once (`-NoWait`, then `-Poll <ID1>,<ID2>`, at most 5), `@session`, `@model`, `@upgrade`: `references/brief-and-commands.md` and `references/models.md`.
 

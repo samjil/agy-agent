@@ -675,6 +675,10 @@ function Get-AgyProgress([string]$ConversationId, $StartedAt, [string]$TaskId = 
             try { $waitingBg = (@(Get-AgyPendingBackgroundTasks $agyHome $ConversationId).Count -gt 0) } catch {}
         }
         $stepList = @(Get-AgyProcessStepsCached $ConversationId $stepFilter)
+        $estimatedSec = $null
+        if ($targetTokenFile -and (Get-Command Get-AgyEstimatedSecFromTranscript -ErrorAction SilentlyContinue)) {
+            try { $estimatedSec = Get-AgyEstimatedSecFromTranscript $targetTokenFile $stepFilter } catch {}
+        }
 
         return [PSCustomObject]@{
             conversation_id = $ConversationId
@@ -687,6 +691,7 @@ function Get-AgyProgress([string]$ConversationId, $StartedAt, [string]$TaskId = 
             step_count      = $stepList.Count
             stall_seconds   = $stallSec
             waiting_background = $waitingBg
+            estimated_sec   = $estimatedSec
             steps           = $stepList
             thinking        = $thinking
             say             = $say
@@ -1604,8 +1609,10 @@ $ViewerHandleRequest = {
 
                             # 5초마다 불리는 목록에 단계 전체(최대 1,500개)를 싣지 않는다. 개수만 알려 주고, 단계는 /api/delegate/process?since= 로 새 것만 받아 간다.
                             $liveConvId = ""
+                            $estSec = $null
                             if ($progress) {
                                 $liveConvId = [string]$progress.conversation_id
+                                if ($null -ne $progress.estimated_sec) { $estSec = $progress.estimated_sec }
                                 $progress.PSObject.Properties.Remove('steps')
                             }
 
@@ -1621,6 +1628,7 @@ $ViewerHandleRequest = {
                                 session_id = $sessionId
                                 model      = $resolvedModel
                                 state      = $state
+                                estimated_sec = $estSec
                                 progress   = $progress
                             }
                             $claudeMetaPath = Join-Path $runtimeDir ("claude-meta\{0}.json" -f $f.BaseName)

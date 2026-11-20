@@ -28,11 +28,13 @@ function Get-ClaudeTranscriptLastUsage([string]$SessionId = "", [string]$Transcr
         return $null
     }
 
+    # 끝에서부터 64KB 를 먼저 보고, 응답 줄을 못 찾으면 512KB 까지 늘려 다시 본다(질문마다 도는 훅이 쓰므로 빠르게).
+    foreach ($tailBytes in @(65536L, 524288L)) {
     try {
         $fs = [System.IO.File]::Open($transcriptFile, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
         try {
             $len = $fs.Length
-            $readBytes = [Math]::Min($len, 524288L)
+            $readBytes = [Math]::Min($len, $tailBytes)
             $offset = $len - $readBytes
             [void]$fs.Seek($offset, [System.IO.SeekOrigin]::Begin)
             $buf = New-Object byte[] $readBytes
@@ -49,8 +51,10 @@ function Get-ClaudeTranscriptLastUsage([string]$SessionId = "", [string]$Transcr
 
         $lines = $rawText -split "[\r\n]+"
         for ($i = $lines.Count - 1; $i -ge 0; $i--) {
-            $ln = $lines[$i].Trim()
-            if (-not $ln -or -not ($ln -match '"usage"')) { continue }
+            $ln = $lines[$i]
+            # 정규식보다 싼 포함 검사로 먼저 거른다(줄이 수십 KB 일 수 있다)
+            if (-not $ln -or $ln.IndexOf('"usage"', [System.StringComparison]::Ordinal) -lt 0 -or $ln.IndexOf('"assistant"', [System.StringComparison]::Ordinal) -lt 0) { continue }
+            $ln = $ln.Trim()
             if ($ln -match '"type"\s*:\s*"assistant"' -and -not $ln.Contains('"model":"<synthetic>"')) {
                 $mModel = ""
                 if ($ln -match '"model"\s*:\s*"([^"]+)"') { $mModel = $Matches[1] }
@@ -67,7 +71,8 @@ function Get-ClaudeTranscriptLastUsage([string]$SessionId = "", [string]$Transcr
                         $effort = $Matches[1].Trim()
                     } else {
                         for ($j = $i - 1; $j -ge 0; $j--) {
-                            $prevLn = $lines[$j].Trim()
+                            $prevLn = $lines[$j]
+                            if ($prevLn.IndexOf('"effort"', [System.StringComparison]::Ordinal) -lt 0) { continue }
                             if ($prevLn -match '"effort"\s*:\s*"([^"]+)"' -and $Matches[1].Trim()) {
                                 $effort = $Matches[1].Trim()
                                 break
@@ -83,7 +88,10 @@ function Get-ClaudeTranscriptLastUsage([string]$SessionId = "", [string]$Transcr
                 }
             }
         }
+        # 파일 전체를 이미 읽었으면 더 늘려도 같다
+        if ($readBytes -ge $len) { break }
     } catch {}
+    }
 
     return $null
 }

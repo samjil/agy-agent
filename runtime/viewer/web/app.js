@@ -189,7 +189,8 @@
   }
 
   // agy 모델 이름을 짧게(전체 이름은 툴팁에): gemini-4-hydrogen-medium -> hydrogen-medium, gemini-4-hydrogen-xhigh -> hydrogen-extra,
-  // gemini-4-argon-high -> argon-high, gemini-pro-orchestrator-g1-pro -> orchestrator, gemini-3.8-flash-medium -> flash-medium.
+  // gemini-4-neon-high -> neon-high, gemini-4-neon-xhigh -> neon-extra, gemini-4-argon-high -> argon-high,
+  // gemini-pro-orchestrator-neon -> orchestrator-neon, gemini-pro-orchestrator-g1-pro -> orchestrator, gemini-3.8-flash-medium -> flash-medium.
   // "a -> b" 처럼 시도한 모델을 이은 글은 하나씩 줄인다. 모르는 이름은 그대로.
   function shortAgyModel(name) {
     if (!name) return "";
@@ -197,9 +198,11 @@
     if (s.indexOf("->") >= 0) {
       return s.split("->").map(function (x) { return shortAgyModel(x); }).filter(Boolean).join(" → ");
     }
-    if (/^gemini-4-hydrogen-xhigh$/i.test(s)) return "hydrogen-extra";
-    var m = s.match(/^gemini-4-(hydrogen|argon)-(\w+)$/i);
+    var mx = s.match(/^gemini-4-(hydrogen|neon)-xhigh$/i);
+    if (mx) return mx[1].toLowerCase() + "-extra";
+    var m = s.match(/^gemini-4-(hydrogen|argon|neon)-(\w+)$/i);
     if (m) return m[1].toLowerCase() + "-" + m[2].toLowerCase();
+    if (/^gemini-pro-orchestrator-neon$/i.test(s)) return "orchestrator-neon";
     if (/^gemini-pro-orchestrator/i.test(s)) return "orchestrator";
     m = s.match(/^gemini-\d+(?:\.\d+)?-(flash|pro|lite)-(\w+)$/i);
     if (m) return m[1].toLowerCase() + "-" + m[2].toLowerCase();
@@ -255,25 +258,16 @@
 
   function pad2(n) { return (n < 10 ? "0" : "") + n; }
 
-  // 같은 모델로 끝난 위임 기록(최근 30건)의 실행 시간: 중앙값(med)과 느린 쪽 90번째 백분위(p90), 초 단위. 표본이 3건 미만이면 null.
-  // 진행 중 카드의 "완료 예정"을 어림하는 데 쓴다: 이어가는 세션이나 큰 작업은 이보다 훨씬 오래 걸릴 수 있다.
-  function typicalRunSec(model, excludeTaskId) {
-    if (!model) return null;
-    var xs = [];
-    for (var i = 0; i < allItems.length && xs.length < 30; i++) {
-      var r = allItems[i];
-      if (r && r.model === model && r.elapsed_sec != null && !(excludeTaskId && r.task_id === excludeTaskId)) {
-        var v = Number(r.elapsed_sec);
-        if (isFinite(v) && v > 0) xs.push(v);
-      }
-    }
-    if (xs.length < 3) return null;
-    xs.sort(function (a, b) { return a - b; });
-    var mid = Math.floor(xs.length / 2);
-    return {
-      med: xs.length % 2 ? xs[mid] : (xs[mid - 1] + xs[mid]) / 2,
-      p90: xs[Math.min(xs.length - 1, Math.ceil(xs.length * 0.9) - 1)]
-    };
+  // 작업을 직접 수행하는 Gemini(agy)가 과거 기록을 보지 않고 해당 프롬프트의 양·난이도·복잡도만 분석해
+  // 첫 응답에 남긴 예상 실행 시간(초)을 읽는다. 아직 산정 전이거나 없으면 null.
+  function resolveTaskEtaSec(item) {
+    if (!item) return null;
+    var raw = item.estimated_sec != null && item.estimated_sec !== ""
+      ? item.estimated_sec
+      : (item.progress && item.progress.estimated_sec != null ? item.progress.estimated_sec : null);
+    if (raw == null || raw === "") return null;
+    var v = Number(raw);
+    return (isFinite(v) && v > 0) ? Math.round(v) : null;
   }
 
   // 진행 중 카드의 예정 위상: 예정 시간(estSec) 안이면 {over:false, sec:남은 시간}, 넘으면 {over:true, sec:넘긴 시간}.
@@ -282,7 +276,7 @@
     return el < estSec ? { over: false, sec: estSec - el } : { over: true, sec: el - estSec };
   }
 
-  // 진행 중 카드의 예상 항목을 지금 시각으로 다시 그린다. 예정 시간은 이 작업을 처음 본 때 기억해 둔 값이다.
+  // 진행 중 카드의 예상 항목을 지금 시각으로 다시 그린다. 예정 시간은 산정 구간 동안 진행률로 보정한 값이다.
   // 끝난 카드와 같은 모양 "예상 [처음 예정 ±차이]" 이고 차이만 강조한다.
   //  - 예정 시간 안: "[12분 28초 −6분 40초]" — 남은 시간(초록)이 줄어든다
   //  - 넘으면: "[12분 28초 +3분 05초]" — 넘긴 시간(주황)이 늘어난다
@@ -311,10 +305,11 @@
     if (!isFinite(d) || !(estSec > 0) || Math.abs(d) < 5) return null;
     return d > 0 ? { over: true, label: "예상 초과", text: "+" + formatDuration(d) } : { over: false, label: "예상 미만", text: "−" + formatDuration(-d) };
   }
-  // 진행 중에 이 브라우저가 기억해 둔 처음 예정 시간(초). 없으면 null(읽기만 하고 새로 저장하지 않는다).
+  // 진행 중에 이 브라우저가 기억해 둔 예정 시간(초). 없으면 null(읽기만 하고 새로 저장하지 않는다).
   function etaStoredMed(taskId) {
+    if (!taskId) return null;
     try {
-      var v = Number(window.localStorage.getItem("samjil-eta-init:" + taskId));
+      var v = Number(window.localStorage.getItem("samjil-eta-v2:" + taskId));
       return isFinite(v) && v > 0 ? v : null;
     } catch (e) { return null; }
   }
@@ -326,15 +321,17 @@
     if (!isFinite(d) || Math.abs(d) < 5) return null;
     return { up: d > 0, text: (d > 0 ? "▲ " : "▼ ") + formatDuration(Math.abs(d)) };
   }
-  // 이 작업을 처음 본 때의 보통 시간(초)을 브라우저에 기억해 둔다(새로고침해도 유지). 저장소를 못 쓰면 지금 값을 처음 값으로 본다.
+  // Gemini(agy)가 산정한 예상 시간(초)을 브라우저에 기억해 두고 유지한다.
   function etaInitialMed(taskId, medNow) {
-    var key = "samjil-eta-init:" + taskId;
+    if (!taskId) return Math.round(medNow);
+    var key = "samjil-eta-v2:" + taskId;
+    var roundedNow = Math.round(medNow);
     try {
       var v = Number(window.localStorage.getItem(key));
       if (isFinite(v) && v > 0) return v;
-      window.localStorage.setItem(key, String(medNow));
+      window.localStorage.setItem(key, String(roundedNow));
     } catch (e) {}
-    return medNow;
+    return roundedNow;
   }
 
   // 차이 항목의 글자·색·설명을 지금 시각 기준으로 다시 정한다. 차이가 없으면 숨긴다.
@@ -351,6 +348,51 @@
     el.classList.toggle("up", dl.up);
     el.classList.toggle("down", !dl.up);
     el.title = "처음 예상 " + hm(initEnd) + " → 지금 예상 " + hm(liveEnd) + (dl.up ? ": 처음 예상보다 늦어지고 있습니다." : ": 처음 예상보다 빨라졌습니다.");
+  }
+
+  function computePendingEta(p, startMs, nowMs) {
+    var estSec = resolveTaskEtaSec(p);
+    if (!estSec) return null;
+    var initMed = etaInitialMed(p.task_id || "", estSec);
+    return {
+      est: estSec,
+      initMed: initMed,
+      title: "작업 수행 모델(Gemini)이 이 프롬프트의 분량·난이도·복잡도를 분석해 산정한 예상 시간: " + formatDuration(initMed) + "."
+    };
+  }
+
+  function updateLiveEtaElements() {
+    var items = document.querySelectorAll(".live-eta[data-task-id]");
+    if (!items || !items.length) return;
+    var nowMs = Date.now();
+    var byId = {};
+    (pendingItems || []).forEach(function (p) { if (p && p.task_id) byId[String(p.task_id)] = p; });
+    for (var i = 0; i < items.length; i++) {
+      var etaEl = items[i];
+      var tid = etaEl.getAttribute("data-task-id");
+      var p = tid ? byId[tid] : null;
+      if (!p || p.state !== "processing") continue;
+      var startMs = Number(etaEl.getAttribute("data-start"));
+      if (!isFinite(startMs) || startMs <= 0) continue;
+      var info = computePendingEta(p, startMs, nowMs);
+      if (!info) continue;
+      etaEl.setAttribute("data-med", String(info.est));
+      etaEl.setAttribute("data-init-med", String(info.initMed));
+      etaEl.title = info.title;
+      paintEta(etaEl, nowMs);
+
+      var parent = etaEl.parentNode;
+      if (parent) {
+        var deltas = parent.querySelectorAll(".live-eta-delta[data-task-id]");
+        for (var k = 0; k < deltas.length; k++) {
+          if (deltas[k].getAttribute("data-task-id") === tid) {
+            deltas[k].setAttribute("data-med", String(info.est));
+            deltas[k].setAttribute("data-init-med", String(info.initMed));
+            paintEtaDelta(deltas[k], nowMs);
+          }
+        }
+      }
+    }
   }
 
   // 오늘이면 "14:05", 아니면 "09-22"
@@ -3004,9 +3046,10 @@
       var pfx = els2[i].getAttribute("data-label-prefix") || "";
       (els2[i].querySelector(".mv") || els2[i]).textContent = pfx + formatDuration((Date.now() - Number(els2[i].getAttribute("data-start"))) / 1000);
     }
-    var etas = document.querySelectorAll(".live-eta[data-start]");
+    updateLiveEtaElements();
+    var etas = document.querySelectorAll(".live-eta[data-start]:not([data-task-id])");
     for (var e = 0; e < etas.length; e++) { paintEta(etas[e], Date.now()); }
-    var deltas = document.querySelectorAll(".live-eta-delta[data-start]");
+    var deltas = document.querySelectorAll(".live-eta-delta[data-start]:not([data-task-id])");
     for (var q = 0; q < deltas.length; q++) { paintEtaDelta(deltas[q], Date.now()); }
     var idles = document.querySelectorAll(".pg-idle[data-ms]");
     for (var j = 0; j < idles.length; j++) {
@@ -3331,8 +3374,9 @@
 
   // 모델 ID -> 사람이 읽는 이름. 모르는 모양이면 추측하지 않고 그대로 돌려준다.
   //   claude-opus-4-5-20251101 -> Claude Opus 4.5 · claude-sonnet-5-5 -> Claude Sonnet 5.5 · claude-3-5-sonnet-20241022 -> Claude 3.5 Sonnet
-  //   gemini-4-hydrogen-medium -> Gemini 4 Hydrogen (Medium) · gemini-4-hydrogen-xhigh -> Gemini 4 Hydrogen (Extra)
-  //   gemini-pro-orchestrator-g1-pro -> Orchestrator (Argon) · gemini-3.8-flash-high -> Gemini 3.8 Flash (High) · "Claude Opus 5.5" 처럼 이미 사람이 쓴 이름(공백·대문자)은 그대로
+  //   gemini-4-hydrogen-medium -> Gemini 4 Hydrogen (Medium) · gemini-4-neon-xhigh -> Gemini 4 Neon (Extra)
+  //   gemini-pro-orchestrator-neon -> Orchestrator (Neon) · gemini-pro-orchestrator-g1-pro -> Orchestrator (Argon)
+  //   gemini-3.8-flash-high -> Gemini 3.8 Flash (High) · "Claude Opus 5.5" 처럼 이미 사람이 쓴 이름(공백·대문자)은 그대로
   function formatModelName(raw) {
     var s = String(raw == null ? "" : raw).trim();
     if (!s) return "";
@@ -3343,8 +3387,9 @@
     if (m) return "Claude " + cap(m[1]) + " " + m[2] + (m[3] ? "." + m[3] : "");
     m = s.match(/^claude-(\d+)(?:-(\d+))?-(opus|sonnet|haiku)(?:-\d{8})?$/);
     if (m) return "Claude " + m[1] + (m[2] ? "." + m[2] : "") + " " + cap(m[3]);
+    if (/^gemini-pro-orchestrator-neon$/.test(s)) return "Orchestrator (Neon)";
     if (/^gemini-pro-orchestrator/.test(s)) return "Orchestrator (Argon)";
-    m = s.match(/^gemini-(\d+)-(hydrogen|argon)-(low|medium|high|xhigh)$/);
+    m = s.match(/^gemini-(\d+)-(hydrogen|argon|neon)-(low|medium|high|xhigh)$/);
     if (m) return "Gemini " + m[1] + " " + cap(m[2]) + " (" + (m[3] === "xhigh" ? "Extra" : cap(m[3])) + ")";
     m = s.match(/^gemini-(\d+(?:\.\d+)?)-(flash|pro|ultra|nano|lite)(?:-(low|medium|high))?$/);
     if (m) return "Gemini " + m[1] + " " + cap(m[2]) + (m[3] ? " (" + cap(m[3]) + ")" : "");
@@ -3420,8 +3465,9 @@
   function handoffDispatchResolver(channelData, records, pendings) {
     // 단계 -> 기본 주 모델(화면에서 짐작할 때만 쓴다. 실제 선택은 워처가 config\models.json 으로 한다).
     var tierModels = {
-      "quick": "gemini-4-hydrogen-low", "build": "gemini-4-hydrogen-medium", "build-hard": "gemini-4-hydrogen-high",
-      "feature": "gemini-pro-orchestrator-g1-pro", "think": "gemini-4-argon-high", "deep": "gemini-4-hydrogen-xhigh"
+      "quick": "gemini-4-hydrogen-low", "build": "gemini-4-hydrogen-medium", "build-hard": "gemini-4-neon-medium",
+      "feature": "gemini-pro-orchestrator-neon", "feature-argon": "gemini-pro-orchestrator-g1-pro",
+      "think": "gemini-4-neon-high", "think-argon": "gemini-4-argon-high", "deep": "gemini-4-neon-xhigh"
     };
     var ds = channelData && channelData.auto && Array.isArray(channelData.auto.dispatches) ? channelData.auto.dispatches : [];
     var recs = Array.isArray(records) ? records : [];
@@ -4731,12 +4777,6 @@
     if (!hasMarked) return escapeHtml(text);
 
     var hasKatex = window.katex && typeof window.katex.renderToString === "function";
-    if (!hasKatex) {
-      var rawHtml = window.marked.parse(text);
-      return window.DOMPurify && typeof window.DOMPurify.sanitize === "function" ?
-        window.DOMPurify.sanitize(rawHtml, { ADD_TAGS: ["input"], ADD_ATTR: ["type", "checked", "disabled"] }) : rawHtml;
-    }
-
     var mathList = [];
 
     // 1. 코드 블록(```...```) 및 인라인 코드(`...`) 임시 보호
@@ -4747,43 +4787,52 @@
       return ph;
     });
 
-    // 2. 블록 수식 ($$...$$ 또는 \[...\]) 보호
-    s = s.replace(/(?:\$\$([\s\S]*?)\$\$|\\\[([\s\S]*?)\\\])/g, function (match, m1, m2) {
-      var math = (m1 || m2 || "").trim();
-      var ph = "%%%MATH_B_" + mathList.length + "%%%";
-      mathList.push({ type: "block", math: math });
-      return "\n\n" + ph + "\n\n";
-    });
+    if (hasKatex) {
+      // 2. 블록 수식 ($$...$$ 또는 \[...\]) 보호
+      s = s.replace(/(?:\$\$([\s\S]*?)\$\$|\\\[([\s\S]*?)\\\])/g, function (match, m1, m2) {
+        var math = (m1 || m2 || "").trim();
+        var ph = "%%%MATH_B_" + mathList.length + "%%%";
+        mathList.push({ type: "block", math: math });
+        return "\n\n" + ph + "\n\n";
+      });
 
-    // 3. 인라인 수식 ($...$ 또는 \(...\)) 보호
-    // 절충: PowerShell 변수($env:..., $PSScriptRoot)나 가격($5 ~ $10), 일반 한글 문장이 수식으로
-    // 깨지는 오탐을 막기 위해, $...$ 안에 한글이나 $식별자가 들어 있으면 수식으로 보지 않는다.
-    // (수식 안에 한글이 꼭 필요하면 \( \text{정답} \) 또는 $$ 블록 수식을 쓴다.)
-    s = s.replace(/(?:(?<!\\|\w)\$(?!\s)([^\$\n]+?)(?<!\s)\$(?![A-Za-z0-9_:])|\\\(([\s\S]*?)\\\))/g, function (match, m1, m2) {
-      var math = (m1 || m2 || "").trim();
-      if (!math) return match;
-      if (m1 && (/[\uAC00-\uD7A3]/.test(math) || /(?:^|\s)\$[A-Za-z_]/.test(math))) {
-        return match;
-      }
-      var ph = "%%%MATH_I_" + mathList.length + "%%%";
-      mathList.push({ type: "inline", math: math });
-      return ph;
-    });
+      // 3. 인라인 수식 ($...$ 또는 \(...\)) 보호
+      // 절충: PowerShell 변수($env:..., $PSScriptRoot)나 가격($5 ~ $10), 일반 한글 문장이 수식으로
+      // 깨지는 오탐을 막기 위해, $...$ 안에 한글이나 $식별자가 들어 있으면 수식으로 보지 않는다.
+      // (수식 안에 한글이 꼭 필요하면 \( \text{정답} \) 또는 $$ 블록 수식을 쓴다.)
+      s = s.replace(/(?:(?<!\\|\w)\$(?!\s)([^\$\n]+?)(?<!\s)\$(?![A-Za-z0-9_:])|\\\(([\s\S]*?)\\\))/g, function (match, m1, m2) {
+        var math = (m1 || m2 || "").trim();
+        if (!math) return match;
+        if (m1 && (/[\uAC00-\uD7A3]/.test(math) || /(?:^|\s)\$[A-Za-z_]/.test(math))) {
+          return match;
+        }
+        var ph = "%%%MATH_I_" + mathList.length + "%%%";
+        mathList.push({ type: "inline", math: math });
+        return ph;
+      });
+    }
 
-    // 4. 코드 블록 복원
+    // 4. 백틱 바깥 일반 텍스트의 '<' 이스케이프 (URL 자동 링크 <http(s)://...> 제외)
+    // 백틱 없이 적힌 <!--주석-->, 닫히지 않은 <script ...> 등이 HTML 블록으로 해석되어
+    // marked/DOMPurify 에서 뒤쪽 본문 전체가 잘리는 현상을 막는다.
+    s = s.replace(/<(?![hH][tT][tT][pP][sS]?:\/\/[^\s<>]+>)/g, "&lt;");
+
+    // 5. 코드 블록 복원
     codeBlocks.forEach(function (code, i) {
       s = s.replace("%%%CBLOCK_" + i + "%%%", function () { return code; });
     });
 
-    // 5. 마크다운 변환
-    var html = window.marked.parse(s);
+    // 6. 마크다운 변환 (질문 지시문 등의 단일 줄바꿈도 줄바꿈으로 유지)
+    var html = window.marked.parse(s, { breaks: true });
 
-    // 6. DOMPurify 정제 (수식 플레이스홀더 및 task-list 체크박스 보존)
+    // 7. DOMPurify 정제 (수식 플레이스홀더 및 task-list 체크박스 보존)
     if (window.DOMPurify && typeof window.DOMPurify.sanitize === "function") {
       html = window.DOMPurify.sanitize(html, { ADD_TAGS: ["input"], ADD_ATTR: ["type", "checked", "disabled"] });
     }
 
-    // 7. KaTeX 수식 HTML 치환
+    if (!hasKatex) return html;
+
+    // 8. KaTeX 수식 HTML 치환
     mathList.forEach(function (item, i) {
       var rendered = "";
       try {
@@ -6035,6 +6084,7 @@
         if (lp.steps.length !== before || (res && res.reset)) {
           renderProcessDialog();
           updateProcessButtons();
+          updateLiveEtaElements();
         }
       })
       .catch(function () {})
@@ -6628,12 +6678,14 @@
     if (r.elapsed_sec) {
       var elSec = Number(r.elapsed_sec);
       meta.appendChild(labeledMeta("소요", formatDuration(elSec), "elapsed", "실제 실행 시간: " + r.elapsed_sec + "초"));
-      // 예상과 비교: 진행 중에 보였던 처음 예정값, 없으면 같은 모델의 다른 기록 중앙값
-      var estSec = etaStoredMed(r.task_id || "");
-      var estFrom = "이 브라우저가 진행 중에 기억한 처음 예정 시간";
+      // 예상과 비교: 작업을 수행한 Gemini가 프롬프트만으로 산정한 예상 시간(없으면 진행 중 저장값). 과거 기록 통계는 쓰지 않는다.
+      var estSec = resolveTaskEtaSec(r);
+      var estFrom = "작업 수행 모델(Gemini)이 프롬프트의 분량·난이도·복잡도를 분석해 산정한 예상 시간";
       if (!estSec) {
-        var typDone = typicalRunSec(r.model, r.task_id);
-        if (typDone) { estSec = typDone.med; estFrom = "같은 모델(" + r.model + ")로 끝난 다른 위임의 보통 실행 시간"; }
+        estSec = etaStoredMed(r.task_id || "");
+        if (estSec) {
+          estFrom = "진행 중 Gemini가 산정해 둔 예상 시간";
+        }
       }
       var vs = estSec ? runVsEstimate(elSec, estSec) : null;
       if (vs) {
@@ -6740,8 +6792,11 @@
     var m = {
       run_command: "명령 실행",
       view_file: "파일 읽기",
+      read_file: "파일 읽기",
       write_to_file: "파일 쓰기",
+      write_file: "파일 쓰기",
       replace_file_content: "파일 일부 수정",
+      edit_file: "파일 일부 수정",
       list_dir: "폴더 목록 보기",
       find_by_name: "파일 이름 찾기",
       grep_search: "파일 내용 검색",
@@ -6749,7 +6804,16 @@
       read_url_content: "웹 페이지 읽기",
       manage_task: "작업 관리",
       schedule: "잠시 대기",
-      generate_image: "이미지 생성"
+      generate_image: "이미지 생성",
+      swarm: "스웜 관리",
+      post_message: "스웜 보드 게시",
+      read_board: "스웜 보드 읽기",
+      swarm_wait: "스웜 대기",
+      run_workflow: "워크플로 실행",
+      invoke_subagent: "서브에이전트 호출",
+      manage_subagents: "서브에이전트 관리",
+      send_message: "에이전트 메시지",
+      exit_plan_mode: "계획 완료"
     };
     if (!name) return "";
     return Object.prototype.hasOwnProperty.call(m, name) ? m[name] : name;
@@ -7080,21 +7144,21 @@
         live.setAttribute("data-label-prefix", "");
         meta.appendChild(live);
 
-        // 완료 예정: 시작 시각 + 같은 모델의 보통 실행 시간. 이미 넘었으면 시각 대신 "예상보다 오래 걸리는 중"으로 알린다.
-        var typ = typicalRunSec(p.model);
-        if (typ) {
-          var etaBasis = "같은 모델(" + p.model + ")로 끝난 최근 위임 기준: 보통 " + formatDuration(typ.med) + ", 오래 걸린 경우 " + formatDuration(typ.p90) + ". 작업 크기에 따라 달라집니다.";
-          var initMed = etaInitialMed(p.task_id || "", typ.med);
-          var etaItem = labeledMeta("예상", "", "eta live-eta", "추정. " + etaBasis + " 처음 예정 " + formatDuration(initMed) + ".");
+        // 완료 예정: 작업 진행률(단계·턴·수정 시점) + 같은 모델 최근 기록을 반영해 산정 구간(180초) 동안 지속 보정
+        var etaCtx = computePendingEta(p, startTime.getTime(), Date.now());
+        if (etaCtx) {
+          var etaItem = labeledMeta("예상", "", "eta live-eta", etaCtx.title);
+          etaItem.setAttribute("data-task-id", String(p.task_id || ""));
           etaItem.setAttribute("data-start", String(startTime.getTime()));
-          etaItem.setAttribute("data-med", String(typ.med));
-          etaItem.setAttribute("data-init-med", String(initMed));
+          etaItem.setAttribute("data-med", String(etaCtx.est));
+          etaItem.setAttribute("data-init-med", String(etaCtx.initMed));
           paintEta(etaItem, Date.now());
           meta.appendChild(etaItem);
           var deltaItem = metaItem("", "eta-delta live-eta-delta", "");
+          deltaItem.setAttribute("data-task-id", String(p.task_id || ""));
           deltaItem.setAttribute("data-start", String(startTime.getTime()));
-          deltaItem.setAttribute("data-med", String(typ.med));
-          deltaItem.setAttribute("data-init-med", String(initMed));
+          deltaItem.setAttribute("data-med", String(etaCtx.est));
+          deltaItem.setAttribute("data-init-med", String(etaCtx.initMed));
           paintEtaDelta(deltaItem, Date.now());
           meta.appendChild(deltaItem);
         }
@@ -7712,6 +7776,7 @@
         } else {
           updateQaHeader();
           renderProcessDialog();
+          updateLiveEtaElements();
         }
       } else if (currentNav === "handoff") {
         if (force || treeRes.changed || qaRes.changed) {   // qaRes: 새 위임 기록이 들어오면 회신 카드의 토큰 칩도 갱신

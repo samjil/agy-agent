@@ -86,6 +86,21 @@ function Get-AgyBriefWarnings([string]$Text) {
     if ($body -match '(?i)((브라우저|browser|chrome|크롬)[^.\n]{0,14}(열지|쓰지|사용하지|금지)|do\s+not\s+(open|use)\s+(a\s+)?(web\s+)?browser)') {
         [void]$out.Add($(if ($ko) { "'브라우저를 열지 마라' 같은 능력을 추측한 금지가 있습니다. agy 는 chrome-devtools-mcp 로 로컬 화면을 열 수 있으니, 금지는 실제로 위험한 것(범위 밖 수정, git 상태 변경)에만 두세요." } else { "The brief forbids something based on a guess about agy's abilities (for example 'do not open a browser'). agy can open local pages through chrome-devtools-mcp, so only forbid what is really risky (edits out of scope, changing git state)." }))
     }
+    $tuiCmd = ""
+    if ($dir.ContainsKey("cmd") -and @($dir["cmd"]).Count -gt 0) {
+        $cv = ([string]$dir["cmd"][0]).Trim().TrimStart('/').Trim().ToLowerInvariant()
+        if ($cv -and $script:AgyInteractiveOnlyCommands -contains $cv) { $tuiCmd = $cv }
+    }
+    if (-not $tuiCmd) {
+        $firstBodyLine = (($body -split "\r?\n")[0]).Trim()
+        if ($firstBodyLine -match '^/([A-Za-z][A-Za-z0-9-]*)(?:\s|$)') {
+            $lv = $Matches[1].ToLowerInvariant()
+            if ($script:AgyInteractiveOnlyCommands -contains $lv) { $tuiCmd = $lv }
+        }
+    }
+    if ($tuiCmd) {
+        [void]$out.Add($(if ($ko) { "대화형 TUI 전용 명령(/$tuiCmd)은 헤드리스 워처에서 실행할 수 없습니다. 명세를 .md 파일로 저장해 별도 터미널의 agy 세션에서 @파일명 으로 실행하거나, 워처 지원 명령(goal · swarm · run-workflow · boost · browser · plan)을 쓰세요." } else { "Interactive TUI command /$tuiCmd cannot run in the headless watcher. Save the spec to a .md file and run @spec.md in an interactive agy session, or use a watcher-supported command (goal, swarm, run-workflow, boost, browser, plan)." }))
+    }
     if (-not $hasFolder) {
         if ($ko) {
             if ($body -notmatch '(?i)(한글|한국어|in\s+korean)') {

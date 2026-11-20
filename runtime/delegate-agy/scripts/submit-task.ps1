@@ -14,8 +14,9 @@
 #   -WaitSeconds <초>   기다리는 최대 시간(기본 170 — device_bash 한 호출이 3분 제한이라 그 안에 돌아오게)
 #   -MaxWaitSec <초>    -WaitSeconds 와 같은 뜻이고, 주면 그것을 쓴다(그 시간까지만 기다림)
 #   -CancelOnTimeout    기다리는 시간이 다 됐는데 안 끝난 작업을 취소한다. -MaxWaitSec 를 안 주면 작업 단계의 대기 한도까지 기다린다
-#                       (config\models.json 의 wait_sec: quick 3분 · build 8분 · build-hard 12분 · feature · think · deep 20분). 백그라운드 대기로 쓴다
-#   지시문 맨 위에 "@model: <단계>" 를 쓰면 그 단계로 보낸다(quick · build · build-hard · feature · think · deep). 없으면 워처가 quick/build 중에서 고른다.
+#                       (config\models.json 의 wait_sec: quick 3분 · build 8분 · build-hard 12분 · feature · feature-argon · think · think-argon · deep 20분). 백그라운드 대기로 쓴다
+#   지시문 맨 위에 "@model: <단계>" 를 쓰면 그 단계로 보낸다(quick · build · build-hard · feature · feature-argon · think · think-argon · deep). 없으면 워처가 quick/build 중에서 고른다.
+#   지시문 맨 위에 "@cmd: <명령>"(goal · swarm · run-workflow · boost · browser · plan) · "@mode: <모드>"(plan · accept-edits · auto) 를 쓰면 실행 명령과 권한 모드를 함께 넘긴다.
 #   새로 넣으면 표준 오류에 "[단계] <단계> (<모델>) · 대기 한도 <초>" 한 줄을 알린다.
 #   지시문 맨 위에 "@reason: <한 줄>" 을 쓰면 위임 사유로 기록하고(claude-meta\<ID>.json 의 reason) agy 에 보내는 지시문에서는 뺀다.
 #   -Cancel <ID>...     작업(들)을 취소한다: 대기 중이면 지시 파일을 치우고, 실행 중이면 작업자 프로세스 트리를 끝낸다. 기록 상태는 CANCELLED
@@ -140,15 +141,17 @@ try {
     . (Join-Path $PSScriptRoot "sub\agy-models.ps1")
     $autoTierLib = Join-Path $PSScriptRoot "sub\agy-autotier.ps1"
     if (Test-Path -LiteralPath $autoTierLib) { . $autoTierLib }
+    $rulesLibForSubmit = Join-Path $PSScriptRoot "sub\agy-rules.ps1"
+    if (Test-Path -LiteralPath $rulesLibForSubmit) { . $rulesLibForSubmit }
     $script:ModelsReady = $true
 } catch {}
 
-# 지시문 맨 위 지시어(@model · @session · @cwd)로 워처가 쓸 단계를 짐작한다(워처와 같은 규칙).
-# 반환: @{ Tier; Model; WaitSec } (설정을 못 읽으면 $null)
+# 지시문 맨 위 지시어(@model · @session · @cwd · @cmd · @mode)로 워처가 쓸 단계와 대기 한도를 짐작한다(워처와 같은 규칙).
+# 반환: @{ Tier; Model; WaitSec; Cmd; Mode } (설정을 못 읽으면 $null)
 function Get-BriefTierInfo([string]$Text) {
     if (-not $script:ModelsReady) { return $null }
     $cfg = Get-AgyModelConfig
-    $model = ""; $session = ""; $hasCwd = $false; $body = [string]$Text
+    $model = ""; $session = ""; $hasCwd = $false; $cmd = ""; $mode = ""; $body = [string]$Text
     while ($body.Length -gt 0) {
         $parts = $body -split "`r?`n", 2
         $line = $parts[0]
@@ -156,27 +159,53 @@ function Get-BriefTierInfo([string]$Text) {
         elseif ($line -match '^﻿?@model:\s*(.+)$') { $model = $Matches[1].Trim() }
         elseif ($line -match '^﻿?@session:\s*(.+)$') { $session = $Matches[1].Trim() }
         elseif ($line -match '^﻿?@cwd:\s*(.+)$') { $hasCwd = $true }
+        elseif ($line -match '^﻿?@cmd:\s*(.+)$') { $cmd = $Matches[1].Trim() }
+        elseif ($line -match '^﻿?@mode:\s*(.+)$') { $mode = $Matches[1].Trim() }
         elseif ($line -match '^﻿?@(raw|upgrade|reason):') { }
         else { break }
         $body = if ($parts.Length -gt 1) { $parts[1] } else { "" }
     }
+    $cmdName = ""
+    $cmdDisplay = ""
+    if ($cmd -and (Get-Command Resolve-AgySlashCommand -ErrorAction SilentlyContinue)) {
+        $cr = Resolve-AgySlashCommand $cmd
+        if ($cr -and $cr.Valid) { $cmdName = [string]$cr.Name; $cmdDisplay = [string]$cr.Command }
+    } elseif (-not $cmd -and (Get-Command Split-AgyLeadingSlashCommand -ErrorAction SilentlyContinue)) {
+        $lc = Split-AgyLeadingSlashCommand $body
+        if ($lc.Command) { $cmdName = [string]$lc.Name; $cmdDisplay = [string]$lc.Command; $body = [string]$lc.Body }
+    }
+    $modeName = ""
+    if ($mode -and (Get-Command Resolve-AgyExecutionMode -ErrorAction SilentlyContinue)) {
+        $mr = Resolve-AgyExecutionMode $mode
+        if ($mr -and $mr.Valid) { $modeName = [string]$mr.Mode }
+    }
     $writeTier = if ($cfg.Auto -and $cfg.Auto.write -and $cfg.Tiers.Contains([string]$cfg.Auto.write)) { [string]$cfg.Auto.write } else { "build" }
     $tier = ""
+    $resolvedModel = ""
+    $waitSec = 0
     if ($model) {
         $spec = Resolve-AgyModelSpec $model $cfg
         if ($spec -and $spec.Kind -eq "tier") { $tier = [string]$spec.Tier }
         elseif ($spec -and $spec.Kind -eq "model") {
-            $w = if ($spec.WaitSec -gt 0) { [int]$spec.WaitSec } else { [int]$cfg.Tiers[$writeTier].WaitSec }
-            return @{ Tier = [string]$spec.Tier; Model = [string]$spec.Model; WaitSec = $w }
+            $tier = [string]$spec.Tier
+            $resolvedModel = [string]$spec.Model
+            $waitSec = if ($spec.WaitSec -gt 0) { [int]$spec.WaitSec } else { [int]$cfg.Tiers[$writeTier].WaitSec }
         }
     }
-    if (-not $tier) {
-        if (-not $session -and (Get-Command Get-AgyAutoTier -ErrorAction SilentlyContinue) -and (Test-AgyAutoTierEnabled)) {
-            try { $tier = [string](Get-AgyAutoTier $body $hasCwd).Tier } catch { $tier = "" }
+    if (-not $resolvedModel) {
+        if (-not $tier) {
+            if (-not $session -and (Get-Command Get-AgyAutoTier -ErrorAction SilentlyContinue) -and (Test-AgyAutoTierEnabled)) {
+                try { $tier = [string](Get-AgyAutoTier $body $hasCwd).Tier } catch { $tier = "" }
+            }
+            if (-not $tier -or -not $cfg.Tiers.Contains($tier)) { $tier = $writeTier }
         }
-        if (-not $tier -or -not $cfg.Tiers.Contains($tier)) { $tier = $writeTier }
+        $resolvedModel = [string]$cfg.Tiers[$tier].Model
+        $waitSec = [int]$cfg.Tiers[$tier].WaitSec
     }
-    return @{ Tier = $tier; Model = [string]$cfg.Tiers[$tier].Model; WaitSec = [int]$cfg.Tiers[$tier].WaitSec }
+    if ($cmdName -in @('swarm', 'run-workflow', 'boost')) {
+        $waitSec = [Math]::Max($waitSec, 1200)
+    }
+    return @{ Tier = $tier; Model = $resolvedModel; WaitSec = $waitSec; Cmd = $cmdDisplay; Mode = $modeName }
 }
 
 # 작업 하나의 대기 한도(초). 실행 표시 파일의 단계(워처가 정한 것) > 지시문에서 짐작한 단계 > 0(모름)
@@ -397,20 +426,10 @@ if ($ids.Count -eq 0) {
                 . $transcriptLib
                 $lastUsage = Get-ClaudeTranscriptLastUsage -SessionId $sessId
                 $ctxThreshold = 200000
-                # 한도 균형 모드(quota-balance.json, 6시간 안의 값)를 따른다: agy-more 80k, agy-max 30k. 환경변수가 있으면 그 값이 이긴다.
-                try {
-                    $qbFile = Join-Path $script:RuntimeDirResolved "quota-balance.json"
-                    if (Test-Path -LiteralPath $qbFile -PathType Leaf) {
-                        $qb = Read-TextFile $qbFile | ConvertFrom-Json
-                        $qbAt = [datetime]::MinValue
-                        if ([datetime]::TryParse([string]$qb.computed_at, [ref]$qbAt) -and ((Get-Date).ToUniversalTime() - $qbAt.ToUniversalTime()).TotalHours -lt 6) {
-                            if ([string]$qb.mode -eq "agy-more") { $ctxThreshold = 80000 } elseif ([string]$qb.mode -eq "agy-max") { $ctxThreshold = 30000 }
-                        }
-                    }
-                } catch {}
                 if ($env:AGY_CTX_SUBAGENT_THRESHOLD -match '^\d+$') { $ctxThreshold = [int]$env:AGY_CTX_SUBAGENT_THRESHOLD }
                 if ($lastUsage -and $lastUsage.ctx -and [long]$lastUsage.ctx -gt $ctxThreshold) {
-                    [Console]::Error.WriteLine(("[컨텍스트 {0}k] 컨텍스트가 큽니다. 위임 절차는 서브에이전트에 맡기세요(호출마다 대화 전체를 다시 읽습니다)." -f [int][math]::Round([long]$lastUsage.ctx / 1000.0)))
+                    # 이미 제출한 뒤라, 지금 할 수 있는 일(남은 대기 · 검토를 넘기기)을 알린다. 다음 위임부터는 질문 시점의 훅 알림을 보고 처음부터 서브에이전트에 맡긴다.
+                    [Console]::Error.WriteLine(("[컨텍스트 {0}k] 컨텍스트가 큽니다(기준 {1}k). 제출은 됐으니 이 작업의 대기 · diff 검토 · 시험은 본 세션에서 하지 말고, 서브에이전트 하나(저렴한 모델)에 아래 작업 ID 와 확인할 시험 명령을 넘겨 맡긴 뒤 5줄 보고만 받으세요(본 세션은 호출마다 대화 전체를 다시 읽습니다)." -f [int][math]::Round([long]$lastUsage.ctx / 1000.0), [int]($ctxThreshold / 1000)))
                 }
                 if ($lastUsage -and $lastUsage.model) {
                     $metaObj['model'] = $lastUsage.model
@@ -444,7 +463,12 @@ if ($ids.Count -eq 0) {
     Write-Output "submitted: $id"
     try {
         $tierInfo = Get-BriefTierInfo $text
-        if ($tierInfo) { [Console]::Error.WriteLine(("[단계] {0} ({1}) · 대기 한도 {2}초(-CancelOnTimeout 의 기본값)" -f $(if ($tierInfo.Tier) { $tierInfo.Tier } else { "모델 지정" }), $tierInfo.Model, $tierInfo.WaitSec)) }
+        if ($tierInfo) {
+            $extraInfo = ""
+            if ($tierInfo.Cmd) { $extraInfo += " · 명령 $($tierInfo.Cmd)" }
+            if ($tierInfo.Mode) { $extraInfo += " · 모드 $($tierInfo.Mode)" }
+            [Console]::Error.WriteLine(("[단계] {0} ({1}){2} · 대기 한도 {3}초(-CancelOnTimeout 의 기본값)" -f $(if ($tierInfo.Tier) { $tierInfo.Tier } else { "모델 지정" }), $tierInfo.Model, $extraInfo, $tierInfo.WaitSec))
+        }
     } catch {}
     if ($NoWait) { exit 0 }
     $ids = @($id)
@@ -489,7 +513,7 @@ foreach ($id in $ids) {
     $errText = ""
     if ($hasErr) {
         $errText = Read-TextFile $err
-        if ($errText -match '^\ufeff?지정한 @(model|cwd) ') {
+        if ($errText -match '^\ufeff?지정한 @(model|cwd|cmd|mode) ') {
             $isRejected = $true
         }
     }

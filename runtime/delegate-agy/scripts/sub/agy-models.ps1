@@ -1,5 +1,5 @@
 ﻿# agy-models.ps1
-# agy 위임 모델 단계(quick · build · build-hard · feature · think · deep)를 설정 파일에서 읽는 공용 헬퍼입니다.
+# agy 위임 모델 단계(quick · build · build-hard · feature · feature-argon · think · think-argon · deep)를 설정 파일에서 읽는 공용 헬퍼입니다.
 # dot-source 해서 씁니다: `. (Join-Path $PSScriptRoot "agy-models.ps1")`
 #   (watch-agy.ps1 · agy-autotier.ps1 · handoff-pump.ps1 · process-translate.ps1 · submit-task.ps1 · 뷰어가 씁니다)
 #
@@ -19,12 +19,14 @@ $script:AgyModelsScriptDir = $PSScriptRoot
 function Get-AgyModelsBuiltinConfig {
     return @{
         tiers = [ordered]@{
-            "quick"      = @{ model = "gemini-4-hydrogen-low";          fallback = @("gemini-4-hydrogen-medium", "gemini-3.8-flash-low");                          wait_sec = 180 }
-            "build"      = @{ model = "gemini-4-hydrogen-medium";       fallback = @("gemini-4-hydrogen-high", "gemini-3.8-flash-medium");                         wait_sec = 480 }
-            "build-hard" = @{ model = "gemini-4-hydrogen-high";         fallback = @("gemini-4-argon-medium", "gemini-3.8-flash-medium");                          wait_sec = 720 }
-            "feature"    = @{ model = "gemini-pro-orchestrator-g1-pro"; fallback = @("gemini-4-hydrogen-high", "gemini-4-argon-medium", "gemini-3.8-flash-medium"); wait_sec = 1200 }
-            "think"      = @{ model = "gemini-4-argon-high";            fallback = @("gemini-4-argon-medium", "gemini-4-hydrogen-high");                           wait_sec = 1200 }
-            "deep"       = @{ model = "gemini-4-hydrogen-xhigh";        fallback = @("gemini-4-argon-high", "gemini-4-hydrogen-high", "gemini-3.8-flash-medium");  wait_sec = 1200 }
+            "quick"         = @{ model = "gemini-4-hydrogen-low";          fallback = @("gemini-4-hydrogen-medium", "gemini-4-neon-low", "gemini-3.8-flash-low");                                   wait_sec = 180 }
+            "build"         = @{ model = "gemini-4-hydrogen-medium";       fallback = @("gemini-4-hydrogen-high", "gemini-4-neon-low", "gemini-3.8-flash-medium");                                  wait_sec = 480 }
+            "build-hard"    = @{ model = "gemini-4-neon-medium";           fallback = @("gemini-4-hydrogen-high", "gemini-4-neon-high", "gemini-4-argon-medium", "gemini-3.8-flash-medium");        wait_sec = 720 }
+            "feature"       = @{ model = "gemini-pro-orchestrator-neon";   fallback = @("gemini-4-neon-high", "gemini-pro-orchestrator-g1-pro", "gemini-4-hydrogen-high", "gemini-3.8-flash-medium"); wait_sec = 1200 }
+            "feature-argon" = @{ model = "gemini-pro-orchestrator-g1-pro"; fallback = @("gemini-4-argon-high", "gemini-pro-orchestrator-neon", "gemini-4-hydrogen-high", "gemini-3.8-flash-medium"); wait_sec = 1200 }
+            "think"         = @{ model = "gemini-4-neon-high";             fallback = @("gemini-4-argon-high", "gemini-4-neon-medium", "gemini-4-argon-medium", "gemini-4-hydrogen-high");           wait_sec = 1200 }
+            "think-argon"   = @{ model = "gemini-4-argon-high";            fallback = @("gemini-4-argon-medium", "gemini-4-neon-high", "gemini-4-hydrogen-high");                                   wait_sec = 1200 }
+            "deep"          = @{ model = "gemini-4-neon-xhigh";            fallback = @("gemini-4-neon-high", "gemini-4-hydrogen-xhigh", "gemini-4-argon-high", "gemini-3.8-flash-medium");         wait_sec = 1200 }
         }
         escalate        = @{ "build" = "build-hard"; "build-hard" = "deep" }
         auto            = @{ read = "quick"; write = "build" }
@@ -33,8 +35,9 @@ function Get-AgyModelsBuiltinConfig {
         translate       = "quick"
         allowed         = @(
             "gemini-4-hydrogen-low", "gemini-4-hydrogen-medium", "gemini-4-hydrogen-high", "gemini-4-hydrogen-xhigh",
+            "gemini-4-neon-low", "gemini-4-neon-medium", "gemini-4-neon-high", "gemini-4-neon-xhigh",
             "gemini-4-argon-low", "gemini-4-argon-medium", "gemini-4-argon-high",
-            "gemini-pro-orchestrator-g1-pro",
+            "gemini-pro-orchestrator-neon", "gemini-pro-orchestrator-g1-pro",
             "gemini-3.8-flash-low", "gemini-3.8-flash-medium"
         )
     }
@@ -227,23 +230,38 @@ function ConvertFrom-AgyModelsList([string]$Text) {
 }
 
 # `agy models` 를 불러 쓸 수 있는 모델 ID 목록을 돌려준다. 실패하거나 시간 안에 끝나지 않으면 $null.
+# 창이 없는 백그라운드 워처에서도 콘솔 창이 깜빡이지 않도록 ProcessStartInfo(CreateNoWindow) 로 실행한다.
 function Get-AgyAvailableModels([string]$AgyExe = "agy", [int]$TimeoutSec = 20) {
-    $out = Join-Path ([System.IO.Path]::GetTempPath()) ("agy-models-" + [guid]::NewGuid().ToString("N") + ".txt")
-    $errOut = "$out.err"
+    $p = $null
     try {
-        $p = Start-Process -FilePath $AgyExe -ArgumentList @("models") -NoNewWindow -PassThru -RedirectStandardOutput $out -RedirectStandardError $errOut -ErrorAction Stop
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName               = $AgyExe
+        $psi.Arguments              = "models"
+        $psi.UseShellExecute        = $false
+        $psi.CreateNoWindow         = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError  = $true
+        $psi.RedirectStandardInput  = $true
+        $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+        $psi.StandardErrorEncoding  = [System.Text.Encoding]::UTF8
+        $p = New-Object System.Diagnostics.Process
+        $p.StartInfo = $psi
+        [void]$p.Start()
+        $outTask = $p.StandardOutput.ReadToEndAsync()
+        $errTask = $p.StandardError.ReadToEndAsync()
+        try { $p.StandardInput.Close() } catch {}
         if (-not $p.WaitForExit($TimeoutSec * 1000)) {
             try { $p.Kill() } catch {}
             return $null
         }
-        if (-not (Test-Path -LiteralPath $out)) { return $null }
-        $ids = @(ConvertFrom-AgyModelsList ([System.IO.File]::ReadAllText($out, [System.Text.Encoding]::UTF8)))
+        $p.WaitForExit()
+        $ids = @(ConvertFrom-AgyModelsList ([string]$outTask.Result))
         if ($ids.Count -eq 0) { return $null }
         return $ids
     } catch {
         return $null
     } finally {
-        Remove-Item -LiteralPath $out, $errOut -Force -ErrorAction SilentlyContinue
+        if ($p) { try { $p.Dispose() } catch {} }
     }
 }
 
@@ -264,12 +282,15 @@ function Test-AgyLastResortModel([string]$Model) {
     return ([string]$Model) -match '^(?i)gemini-3\.8-flash-'
 }
 
-# 화면 · 로그용 짧은 이름: gemini-4-hydrogen-xhigh -> hydrogen-extra, gemini-4-argon-high -> argon-high,
-# gemini-pro-orchestrator-g1-pro -> orchestrator, gemini-3.8-flash-medium -> flash-medium. 모르는 이름은 그대로.
+# 화면 · 로그용 짧은 이름: gemini-4-hydrogen-xhigh -> hydrogen-extra, gemini-4-neon-xhigh -> neon-extra,
+# gemini-4-argon-high -> argon-high, gemini-4-neon-medium -> neon-medium,
+# gemini-pro-orchestrator-neon -> orchestrator-neon, gemini-pro-orchestrator-g1-pro -> orchestrator,
+# gemini-3.8-flash-medium -> flash-medium. 모르는 이름은 그대로.
 function Get-AgyModelShortName([string]$Model) {
     $m = ([string]$Model).Trim()
-    if ($m -match '^(?i)gemini-4-hydrogen-xhigh$') { return "hydrogen-extra" }
-    if ($m -match '^(?i)gemini-4-(hydrogen|argon)-(\w+)$') { return ("{0}-{1}" -f $Matches[1].ToLowerInvariant(), $Matches[2].ToLowerInvariant()) }
+    if ($m -match '^(?i)gemini-4-(hydrogen|neon)-xhigh$') { return ("{0}-extra" -f $Matches[1].ToLowerInvariant()) }
+    if ($m -match '^(?i)gemini-4-(hydrogen|argon|neon)-(\w+)$') { return ("{0}-{1}" -f $Matches[1].ToLowerInvariant(), $Matches[2].ToLowerInvariant()) }
+    if ($m -match '^(?i)gemini-pro-orchestrator-neon$') { return "orchestrator-neon" }
     if ($m -match '^(?i)gemini-pro-orchestrator') { return "orchestrator" }
     if ($m -match '^(?i)gemini-3\.8-flash-(\w+)$') { return ("flash-{0}" -f $Matches[1].ToLowerInvariant()) }
     return $m

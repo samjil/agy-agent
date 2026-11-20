@@ -1,5 +1,5 @@
 ﻿# register-session-hook.ps1
-# Claude Code 의 ~/.claude/settings.json 에 agy 워처 훅(session-start-hook.ps1)을 넣거나 뺍니다: SessionStart 와 UserPromptSubmit(한도 균형 한 줄).
+# Claude Code 의 ~/.claude/settings.json 에 agy 워처 훅(session-start-hook.ps1)을 넣거나 뺍니다: SessionStart 와 UserPromptSubmit(컨텍스트가 크면 서브에이전트 안내 한 줄).
 #   .\register-session-hook.ps1            # 넣기(이미 있으면 경로만 바꿈)
 #   .\register-session-hook.ps1 -Check     # 지금 상태만 보기
 #   .\register-session-hook.ps1 -Remove    # 빼기(다른 훅과 설정은 그대로)
@@ -11,15 +11,24 @@ param(
     [string]$HookScript = "",
     [int]$TimeoutSeconds = 30,        # 훅은 워처 상태만 확인하고 기동은 백그라운드로 맡기므로 짧게
     [switch]$Remove,
-    [switch]$Check
+    [switch]$Check,
+    [switch]$NoNode                   # 질문마다 도는 훅을 Node 판(prompt-hook.js) 대신 PowerShell 판으로(시험 · Node 가 없을 때)
 )
 $ErrorActionPreference = "Stop"
 $home_ = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
 if (-not $SettingsPath) { $SettingsPath = Join-Path $home_ ".claude/settings.json" }
 if (-not $HookScript) { $HookScript = Join-Path $home_ ".samjil/delegate-agy/scripts/sub/session-start-hook.ps1" }
 $marker = "session-start-hook.ps1"
+$nodeMarker = "prompt-hook.js"
 # 훅 명령은 셸이 무엇이든(cmd · PowerShell · Git Bash) 같은 뜻이 되도록 슬래시 경로를 큰따옴표로 감싼다.
 $command = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + ($HookScript -replace '\\', '/') + '"'
+# 질문마다 도는 훅: Node 가 있으면 Node 판(약 0.1초), 없으면 PowerShell 판(약 0.6초). 같은 폴더의 prompt-hook.js 를 쓴다.
+$promptCommand = $command + ' -Event UserPromptSubmit'
+$nodeHook = Join-Path (Split-Path $HookScript -Parent) "prompt-hook.js"
+if (-not $NoNode -and (Test-Path -LiteralPath $nodeHook)) {
+    $nodeCmd = Get-Command node -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($nodeCmd) { $promptCommand = 'node "' + ($nodeHook -replace '\\', '/') + '"' }
+}
 
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 $settings = $null
@@ -32,10 +41,17 @@ if ($existed) {
 }
 if (-not $settings) { $settings = [pscustomobject]@{} }
 
-# 넣는 훅 둘: SessionStart(워처 켜기 + 규칙 한 줄 + 한도 균형) · UserPromptSubmit(질문마다 한도 균형 한 줄, agy 를 부르지 않는다)
+# 넣는 훅 둘: SessionStart(워처 켜기 + 규칙 한 줄) · UserPromptSubmit(컨텍스트가 크면 질문마다 서브에이전트 안내 한 줄)
 $events = [ordered]@{
     "SessionStart"     = $command
-    "UserPromptSubmit" = $command + ' -Event UserPromptSubmit'
+    "UserPromptSubmit" = $promptCommand
+}
+
+# 우리가 넣은 훅인가(PowerShell 판 또는 Node 판)
+function Test-SamjilAgyHook($h) {
+    if (-not $h) { return $false }
+    $c = [string]$h.command
+    return ($c.Contains($marker) -or $c.Contains($nodeMarker))
 }
 
 function Get-SessionHookEntries($s, [string]$Event = "SessionStart") {
@@ -44,7 +60,7 @@ function Get-SessionHookEntries($s, [string]$Event = "SessionStart") {
         foreach ($g in @($s.hooks.$Event)) {
             if (-not $g) { continue }
             foreach ($h in @($g.hooks)) {
-                if ($h -and ([string]$h.command).Contains($marker)) { $found += $h }
+                if (Test-SamjilAgyHook $h) { $found += $h }
             }
         }
     }
@@ -63,7 +79,7 @@ if ($Remove) {
         $newGroups = @()
         foreach ($g in @($settings.hooks.$ev)) {
             if (-not $g) { continue }
-            $keep = @(@($g.hooks) | Where-Object { $_ -and -not ([string]$_.command).Contains($marker) })
+            $keep = @(@($g.hooks) | Where-Object { $_ -and -not (Test-SamjilAgyHook $_) })
             if ($keep.Count -gt 0) { $g.hooks = $keep; $newGroups += $g }
         }
         if ($newGroups.Count -gt 0) { $settings.hooks.$ev = $newGroups }

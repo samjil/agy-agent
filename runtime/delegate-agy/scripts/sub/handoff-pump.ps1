@@ -25,13 +25,17 @@ function ConvertTo-HandoffSafeName([string]$Name) {
     return $s
 }
 
-# 모델 단계 설정(config\models.json)을 읽는 헬퍼. 워처 안에서는 이미 불러와 있다(시험 등에서 이 파일만 불렀을 때를 위해).
+# 모델 단계 설정(config\models.json)과 슬래시 명령 검증 헬퍼. 워처 안에서는 이미 불러와 있다(시험 등에서 이 파일만 불렀을 때를 위해).
 if (-not (Get-Command Get-AgyModelConfig -ErrorAction SilentlyContinue)) {
     $hpModelsLib = Join-Path $PSScriptRoot "agy-models.ps1"
     if (Test-Path -LiteralPath $hpModelsLib) { . $hpModelsLib }
 }
+if (-not (Get-Command Resolve-AgySlashCommand -ErrorAction SilentlyContinue)) {
+    $hpRulesLib = Join-Path $PSScriptRoot "agy-rules.ps1"
+    if (Test-Path -LiteralPath $hpRulesLib) { . $hpRulesLib }
+}
 
-# 메시지 머리말의 `위임모델:` 값을 해석한다. 단계 이름(quick · build · build-hard · feature · think · deep, 옛 별칭 low · medium · high)
+# 메시지 머리말의 `위임모델:` 값을 해석한다. 단계 이름(quick · build · build-hard · feature · feature-argon · think · think-argon · deep, 옛 별칭 low · medium · high)
 # 또는 모델 이름(config\models.json 의 allowed)을 받는다. 값이 없거나 모르는 값이면 $null(협의 기본 단계로 넘어간다).
 # 반환: @{ Tier; Model; Spec; Reason } ($Auto 와 같은 모양). Spec 은 지시파일의 @model 에 그대로 쓸 값(단계 이름 또는 모델 이름).
 function Get-HandoffModelOverride([string]$Value) {
@@ -44,7 +48,16 @@ function Get-HandoffModelOverride([string]$Value) {
     return @{ Tier = $tierName; Model = [string]$spec.Model; Spec = [string]$spec.Model; Reason = "메시지 머리말 위임모델: $v" }
 }
 
-# 협의(핸드오프)의 기본 단계. 협의는 정확도가 목적이라 자동 선택을 쓰지 않고 설정의 handoff_default(기본 think = gemini-4-argon-high)로 둔다.
+# 메시지 머리말의 `위임명령:` 값을 해석한다(plan · boost · swarm · goal · run-workflow · browser). 유효하지 않으면 "".
+function Get-HandoffCmdOverride([string]$Value) {
+    $v = ([string]$Value).Trim()
+    if (-not $v -or -not (Get-Command Resolve-AgySlashCommand -ErrorAction SilentlyContinue)) { return "" }
+    $res = Resolve-AgySlashCommand $v
+    if ($res -and $res.Valid) { return [string]$res.Name }
+    return ""
+}
+
+# 협의(핸드오프)의 기본 단계. 협의는 정확도가 목적이라 자동 선택을 쓰지 않고 설정의 handoff_default(기본 think = gemini-4-neon-high)로 둔다.
 # 환경변수 AGY_HANDOFF_MODEL: 단계 이름 · 모델 이름이면 그 값, `auto` 면 $null(자동 선택으로 넘어간다), 없으면 handoff_default.
 # 메시지 머리말의 `위임모델:` 은 이 기본값보다 우선한다. 알 수 없는 값은 handoff_default 로 본다.
 # 반환: @{ Tier; Model; Spec; Reason } 또는 $null (자동 선택)
@@ -81,7 +94,7 @@ function Get-HandoffSessionName([string]$SafeChannel, $Auto = $null, [string]$Ti
 }
 
 # 지시파일 맨 위 @session/@cwd 지시어 + 본문. 본문에는 이번 메시지 전문을 담아 agy 가 파일을 못 읽어도 처리할 수 있게 한다.
-function New-HandoffDispatchText([string]$ChannelName, [string]$ChannelDir, [string]$RepoPath, $Row, [string]$MsgPath, [string]$MsgText, $Auto = $null) {
+function New-HandoffDispatchText([string]$ChannelName, [string]$ChannelDir, [string]$RepoPath, $Row, [string]$MsgPath, [string]$MsgText, $Auto = $null, [string]$CmdOverride = "") {
     $safe = ConvertTo-HandoffSafeName $ChannelName
     $lines = New-Object System.Collections.ArrayList
     [void]$lines.Add("@session: $(Get-HandoffSessionName $safe $Auto)")
@@ -91,6 +104,7 @@ function New-HandoffDispatchText([string]$ChannelName, [string]$ChannelDir, [str
         $spec = if ($Auto.Spec) { [string]$Auto.Spec } elseif ($Auto.Tier) { [string]$Auto.Tier } else { [string]$Auto.Model }
         if ($spec) { [void]$lines.Add("@model: $spec"); [void]$lines.Add("@upgrade: true") }
     }
+    if ($CmdOverride) { [void]$lines.Add("@cmd: $CmdOverride") }
     # @raw 를 쓰지 않는다: 워처가 표준 규칙(DO NOT COMMIT · 포그라운드 실행 · 필요한 파일만 수정 · 한글 답변, agy-rules.ps1)을 이 지시문 끝에 붙인다.
     # 핸드오프 agy 는 저장소 폴더를 열고 소스를 고치므로 위임 때와 같은 안전 규칙이 필요하다. 이 지시문이 이미 같은 뜻의 문장을 담고 있으면 그 규칙만 건너뛴다.
     [void]$lines.Add("@cwd: $ChannelDir")
@@ -314,18 +328,23 @@ function Invoke-HandoffPumpChannel([string]$ChannelDir, $Ctx) {
         $repo = Get-HandoffRepoPath $ChannelDir
         # 메시지 머리말에 `위임모델:` 이 있으면 그것을, 없으면 협의 기본 단계(think)를 쓴다. AGY_HANDOFF_MODEL=auto 면 메시지 내용으로 자동 선택(quick/build).
         $auto = $null
+        $cmdOverride = ""
         if ($msgFile) {
             try {
-                $overrideRaw = [string](Read-HandoffFrontMatter $msgFile.FullName)["위임모델"]
+                $fm = Read-HandoffFrontMatter $msgFile.FullName
+                $overrideRaw = [string]$fm["위임모델"]
                 $auto = Get-HandoffModelOverride $overrideRaw
-                if (-not $auto -and $overrideRaw.Trim()) { Write-HandoffLog "핸드오프 [$name] #$($row.Num) 머리말의 위임모델 '$overrideRaw' 은(는) 단계 이름(quick · build · build-hard · feature · think · deep)이나 허용된 모델 이름이 아니라서 무시하고 협의 기본 단계를 씁니다" }
-            } catch { $auto = $null }
+                if (-not $auto -and $overrideRaw.Trim()) { Write-HandoffLog "핸드오프 [$name] #$($row.Num) 머리말의 위임모델 '$overrideRaw' 은(는) 단계 이름(quick · build · build-hard · feature · feature-argon · think · think-argon · deep)이나 허용된 모델 이름이 아니라서 무시하고 협의 기본 단계를 씁니다" }
+                $cmdRaw = [string]$fm["위임명령"]
+                $cmdOverride = Get-HandoffCmdOverride $cmdRaw
+                if (-not $cmdOverride -and $cmdRaw.Trim()) { Write-HandoffLog "핸드오프 [$name] #$($row.Num) 머리말의 위임명령 '$cmdRaw' 은(는) 워처 지원 명령(goal · swarm · run-workflow · boost · browser · plan)이 아니라서 무시합니다" }
+            } catch { $auto = $null; $cmdOverride = "" }
         }
         if (-not $auto) { $auto = Get-HandoffDefaultModel }   # 머리말이 없으면 협의 기본 단계(think). auto 로 두면 아래 자동 선택
         if (-not $auto -and (Get-Command Test-AgyAutoTierEnabled -ErrorAction SilentlyContinue) -and (Test-AgyAutoTierEnabled)) {
             try { $auto = Get-AgyAutoTier ("$($row.Title)`n$msgText") $true } catch { $auto = $null }
         }
-        $text = New-HandoffDispatchText $name $ChannelDir $repo $row $(if ($msgFile) { $msgFile.FullName } else { "" }) $msgText $auto
+        $text = New-HandoffDispatchText $name $ChannelDir $repo $row $(if ($msgFile) { $msgFile.FullName } else { "" }) $msgText $auto $cmdOverride
 
         $taskId = "handoff_{0}_{1}_{2}" -f (ConvertTo-HandoffSafeName $name), $row.Num, (Get-Date -Format "HHmmss")
         $taskPath = Join-Path $Ctx.InboxDir "$taskId.md"

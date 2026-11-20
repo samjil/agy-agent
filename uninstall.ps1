@@ -82,11 +82,18 @@ foreach ($s in $targetSkills) {
 }
 
 # -----------------------------------------------------------------------------
-# 2. Antigravity (AGY) 전역 스킬 제거 (~/.agents/skills/)
+# 2. Antigravity (AGY) 전역 스킬 제거 (~/.agents/skills/ 및 ~/.gemini/config/skills/)
 # -----------------------------------------------------------------------------
 $agentsSkillsDir = Join-Path $env:USERPROFILE ".agents\skills"
 foreach ($s in $targetSkills) {
     $targetPath = Join-Path $agentsSkillsDir $s
+    if (Test-Path $targetPath) {
+        Remove-SkillTarget $targetPath
+    }
+}
+$geminiSkillsDir = Join-Path $env:USERPROFILE ".gemini\config\skills"
+foreach ($s in $targetSkills) {
+    $targetPath = Join-Path $geminiSkillsDir $s
     if (Test-Path $targetPath) {
         Remove-SkillTarget $targetPath
     }
