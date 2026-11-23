@@ -101,13 +101,10 @@ $AvailableModelsFile = Join-Path $RuntimeDir "agy-models-available.json"
 
 function Get-WatcherModelConfig { return (Get-AgyModelConfig) }
 
-# 워처가 시작할 때 확인한 모델 목록(없거나 못 읽으면 빈 배열 = 확인하지 않은 것으로 보고 거르지 않는다)
+# 워처가 이번에 켜질 때 확인한 모델 목록(없거나 못 읽으면 빈 배열 = 확인하지 않은 것으로 보고 거르지 않는다).
+# 워처는 켜질 때 먼저 이 파일을 지우고, 확인에 성공했을 때만 다시 쓴다(Update-AgyAvailableModelsFile).
 function Get-WatcherAvailableModels {
-    try {
-        if (-not (Test-Path -LiteralPath $AvailableModelsFile)) { return @() }
-        $j = [System.IO.File]::ReadAllText($AvailableModelsFile, [System.Text.Encoding]::UTF8).TrimStart([char]0xFEFF) | ConvertFrom-Json
-        return @(@($j.models) | Where-Object { $_ } | ForEach-Object { [string]$_ })
-    } catch { return @() }
+    return @(Read-AgyAvailableModelsFile $AvailableModelsFile)
 }
 
 # 모델을 고르지 않았고 자동 선택도 꺼졌을 때 쓰는 단계(설정의 auto.write, 기본 build)의 모델 순서
@@ -428,6 +425,13 @@ if (-not (Test-Path $gitGuardFile)) {
 }
 . $gitGuardFile
 
+# 백그라운드 프로세스 무창 실행 헬퍼(agy-spawn.ps1). CreateProcessW(CREATE_NO_WINDOW + STARTF_USESHOWWINDOW/SW_HIDE)
+$spawnFile = Join-Path $PSScriptRoot "agy-spawn.ps1"
+if (-not (Test-Path $spawnFile)) {
+    $spawnFile = Join-Path (Split-Path $PSScriptRoot -Parent) "agy-spawn.ps1"
+}
+if (Test-Path $spawnFile) { . $spawnFile }
+
 # 위임 작업 파일(processed · outbox · 스크린샷 등) 보관 기간 정리(agy-retention.ps1). 테스트: tests\delegate-agy\agy-retention.tests.ps1
 $retentionFile = Join-Path $PSScriptRoot "agy-retention.ps1"
 if (-not (Test-Path $retentionFile)) {
@@ -584,7 +588,7 @@ function Complete-TaskQaRecord([string]$TaskId, [string]$SourcePath, [string]$Do
 }
 
 # 사용량 행(tasks 표)을 쓴다: 작업이 끝났을 때 한 번.
-function Write-UsageRow($taskId, $model, $attempts, $triedModels, $inputTokens, $outputTokens, $thinkingTokens, $totalTokens, $elapsedSec, $status, [string]$session = "", [string]$sessionId = "", $cumInputTokens = $null, $cumOutputTokens = $null, $cumThinkingTokens = $null, $cumTotalTokens = $null, [string]$usageBasis = "", $estimatedSec = $null) {
+function Write-UsageRow($taskId, $model, $attempts, $triedModels, $inputTokens, $outputTokens, $thinkingTokens, $totalTokens, $elapsedSec, $status, [string]$session = "", [string]$sessionId = "", $cumInputTokens = $null, $cumOutputTokens = $null, $cumThinkingTokens = $null, $cumTotalTokens = $null, [string]$usageBasis = "") {
     try {
         $recDict = [ordered]@{
             timestamp       = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
@@ -607,7 +611,6 @@ function Write-UsageRow($taskId, $model, $attempts, $triedModels, $inputTokens, 
         if ($null -ne $cumThinkingTokens) { $recDict['cum_thinking_tokens'] = [string]$cumThinkingTokens }
         if ($null -ne $cumTotalTokens)    { $recDict['cum_total_tokens']    = [string]$cumTotalTokens }
         if ($usageBasis)                  { $recDict['usage_basis']         = [string]$usageBasis }
-        if ($null -ne $estimatedSec -and [string]$estimatedSec -ne "") { $recDict['estimated_sec'] = [string]$estimatedSec }
         $rec = New-QaRecord $recDict
         # 같은 작업 ID 의 사용량 행이 이미 있으면 먼저 쓴 것을 둔다(InsertOnly). DB 를 잠깐 못 쓰면 pending 폴더에 두었다가 다음에 가져온다.
         if ((Write-QaRecordToDb $AgyDbPath $rec 'InsertOnly') -eq 'pending') { Log "사용량 기록을 DB 에 바로 쓰지 못해 pending 폴더에 두었습니다: $taskId" }
@@ -674,29 +677,58 @@ function Invoke-AgyOnce($agyArgs, $errFile, $workDir, [string]$marker = "") {
         [void]$sb.Append('"')
         return $sb.ToString()
     }
-    $proc    = $null
-    $outTask = $null
-    $errTask = $null
+    $proc       = $null
+    $outTask    = $null
+    $errTask    = $null
+    $useSpawned = $false
     try {
         $agyCmd = Get-Command agy -CommandType Application -ErrorAction Stop | Select-Object -First 1
-        $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName               = $agyCmd.Source
-        $psi.Arguments              = (@($agyArgs | ForEach-Object { ConvertTo-AgyCommandLineArg ([string]$_) }) -join ' ')
-        $psi.UseShellExecute        = $false
-        $psi.CreateNoWindow         = $true
-        $psi.RedirectStandardInput  = $true
-        $psi.RedirectStandardOutput = $true
-        $psi.RedirectStandardError  = $true
-        # agy 는 UTF-8 로 돌려준다. 이걸 명시하지 않으면 한글이 시스템 코드페이지(CP949)로 잘못 읽혀 전부 깨진다.
-        $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
-        $psi.StandardErrorEncoding  = [System.Text.Encoding]::UTF8
-        if ($workDir -and (Test-Path -LiteralPath $workDir)) { $psi.WorkingDirectory = $workDir }
-        $proc = New-Object System.Diagnostics.Process
-        $proc.StartInfo = $psi
-        [void]$proc.Start()
-        $outTask = $proc.StandardOutput.ReadToEndAsync()
-        $errTask = $proc.StandardError.ReadToEndAsync()
-        try { $proc.StandardInput.Close() } catch {}
+        if (-not (Get-Command Start-AgySpawnedProcess -ErrorAction SilentlyContinue)) {
+            $candidates = @()
+            if ($PSScriptRoot) {
+                $candidates += (Join-Path $PSScriptRoot "agy-spawn.ps1")
+                $pParent = Split-Path $PSScriptRoot -Parent
+                if ($pParent) { $candidates += (Join-Path $pParent "agy-spawn.ps1") }
+            }
+            if ($script:SubDir) { $candidates += (Join-Path $script:SubDir "agy-spawn.ps1") }
+            $home_ = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
+            $candidates += (Join-Path $home_ ".samjil\delegate-agy\scripts\sub\agy-spawn.ps1")
+            foreach ($c in $candidates) {
+                if ($c -and (Test-Path -LiteralPath $c)) { . $c; break }
+            }
+        }
+        $spawnCwd = if ($workDir -and (Test-Path -LiteralPath $workDir)) { [string]$workDir } else { "" }
+        if (Get-Command Start-AgySpawnedProcess -ErrorAction SilentlyContinue) {
+            # 무창 헬퍼가 실패하면(형식 로드 · 파이프 · CreateProcess 오류) 작업을 실패시키지 않고 아래 기본 방식으로 대신한다
+            try {
+                $proc = Start-AgySpawnedProcess -FilePath $agyCmd.Source -ArgumentList $agyArgs -WorkingDirectory $spawnCwd
+                $useSpawned = $true
+            } catch {
+                $proc = $null
+                $useSpawned = $false
+                Log "  창 없는 실행 헬퍼로 agy 를 띄우지 못해 기본 방식으로 대신합니다: $($_.Exception.Message)"
+            }
+        }
+        if (-not $useSpawned) {
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName               = $agyCmd.Source
+            $psi.Arguments              = (@($agyArgs | ForEach-Object { ConvertTo-AgyCommandLineArg ([string]$_) }) -join ' ')
+            $psi.UseShellExecute        = $false
+            $psi.CreateNoWindow         = $true
+            $psi.RedirectStandardInput  = $true
+            $psi.RedirectStandardOutput = $true
+            $psi.RedirectStandardError  = $true
+            # agy 는 UTF-8 로 돌려준다. 이걸 명시하지 않으면 한글이 시스템 코드페이지(CP949)로 잘못 읽혀 전부 깨진다.
+            $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+            $psi.StandardErrorEncoding  = [System.Text.Encoding]::UTF8
+            if ($workDir -and (Test-Path -LiteralPath $workDir)) { $psi.WorkingDirectory = $workDir }
+            $proc = New-Object System.Diagnostics.Process
+            $proc.StartInfo = $psi
+            [void]$proc.Start()
+            $outTask = $proc.StandardOutput.ReadToEndAsync()
+            $errTask = $proc.StandardError.ReadToEndAsync()
+            try { $proc.StandardInput.Close() } catch {}
+        }
     } catch {
         $startError = "agy 실행 프로세스를 시작하지 못했습니다: $($_.Exception.Message)"
         if ($proc) { try { $proc.Dispose() } catch {} }
@@ -816,8 +848,13 @@ function Invoke-AgyOnce($agyArgs, $errFile, $workDir, [string]$marker = "") {
     try { $proc.WaitForExit() } catch {}
     $outText = ""
     $errText = ""
-    try { $outText = [string]$outTask.Result } catch {}
-    try { $errText = [string]$errTask.Result } catch {}
+    if ($useSpawned) {
+        try { $outText = [string]$proc.StandardOutput } catch {}
+        try { $errText = [string]$proc.StandardError } catch {}
+    } else {
+        try { $outText = [string]$outTask.Result } catch {}
+        try { $errText = [string]$errTask.Result } catch {}
+    }
     try { $proc.Dispose() } catch {}
     # 표준오류는 여기서 파일에 쓰지 않고 돌려준다. error.log 는 응답 파일을 쓴 뒤에 쓰도록 호출한 쪽(Invoke-InboxTaskBody)이 맡는다:
     # Claude 의 점검 루프는 비어 있지 않은 error.log 를 보면 "오류"로 끝내므로, 성공했는데 agy 가 남긴 잡음(stderr)이
@@ -956,7 +993,11 @@ function Invoke-AgyWithFallback($safePrompt, $targetCwd, [bool]$skipPerm, $errFi
                     started_at = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
                 } | ConvertTo-Json -Compress | Set-Content -Path $currentTaskFile -Encoding UTF8 -ErrorAction SilentlyContinue
                 # 작업마다 따로 있는 표시 파일에도 모델·시도를 적는다(뷰어가 어느 작업이 어떤 모델로 도는지 읽는다)
-                Write-RunningClaim $taskId @{ model = $modelForReport; tier = [string]$tier; attempt = $result.Attempts; started_at = (Get-Date -Format "yyyy-MM-dd HH:mm:ss") }
+                $claimFields = @{ model = $modelForReport; tier = [string]$tier; attempt = $result.Attempts; started_at = (Get-Date -Format "yyyy-MM-dd HH:mm:ss") }
+                if (-not $conversationId -and $result.TriedModels) {
+                    $claimFields['tried'] = ($result.TriedModels -join ' -> ')
+                }
+                Write-RunningClaim $taskId $claimFields
             } catch {}
         }
 
@@ -1276,6 +1317,27 @@ function Test-TaskConflict([string]$SessionA, $CwdsA, [string]$SessionB, $CwdsB)
     return (Test-SpaceOverlap $CwdsA $CwdsB)
 }
 
+# 작업자 powershell 에 넘길 인자(따옴표 없는 원래 값). 시험: tests\delegate-agy\agy-spawn.tests.ps1
+function Get-InboxWorkerArgs([string]$Wrapper, [string]$TaskPath, [string]$RepoRootValue, [string]$RuntimeDirValue, [bool]$Skip = $false) {
+    $a = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $Wrapper,
+        "-RepoRoot", $RepoRootValue, "-RuntimeDir", $RuntimeDirValue, "-WorkerTask", $TaskPath)
+    if ($Skip) { $a += "-SkipPermissions" }
+    return $a
+}
+
+# 띄운 작업자가 실제로 시작했는가. $TimeoutMs 동안 살아 있거나, 그 전에 끝났더라도 지시 파일을 옮겼으면(처리함) $true.
+# 곧바로 끝났는데 지시 파일이 그대로면 $false(인자 오류 등으로 시작도 못 한 것).
+function Wait-InboxWorkerStarted([int]$WorkerPid, [string]$TaskPath, [int]$TimeoutMs = 1500) {
+    $deadline = (Get-Date).AddMilliseconds($TimeoutMs)
+    while ((Get-Date) -lt $deadline) {
+        if (-not (Get-Process -Id $WorkerPid -ErrorAction SilentlyContinue)) {
+            return (-not (Test-Path -LiteralPath $TaskPath))
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    return $true
+}
+
 # 작업자 프로세스(보이지 않는 창)를 띄워 지시파일 하나를 처리하게 한다. 띄웠으면 $true.
 # 작업자는 watch-agy.ps1 을 그대로 쓰되 명령줄에 "watch-agy.ps1" 이 나타나지 않게 얇은 껍데기(agy-task-worker.ps1)로 띄운다 —
 # start-agy/ensure-agy-running 이 명령줄의 그 이름으로 워처를 찾기 때문에, 작업자가 워처로 오인되어 종료되는 일을 막는다.
@@ -1286,21 +1348,39 @@ function Start-InboxWorker([System.IO.FileInfo]$File, [string]$Session, $Cwds) {
         Log "오류: 작업자 스크립트를 찾을 수 없습니다: $wrapper (install.ps1 을 다시 실행해 주세요)"
         return $false
     }
-    $argList = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$wrapper`"",
-        "-RepoRoot", "`"$RepoRoot`"", "-RuntimeDir", "`"$RuntimeDir`"", "-WorkerTask", "`"$($File.FullName)`"")
-    if ($SkipPermissions) { $argList += "-SkipPermissions" }
+    # 따옴표 없는 원래 값. agy-spawn 헬퍼가 인자마다 Windows 규칙대로 감싼다(미리 따옴표를 붙이면 따옴표가 한 번 더
+    # 이스케이프되어 powershell 이 -File 경로를 찾지 못하고 바로 끝난다). 아래 기본 방식(ProcessStartInfo)에만 따옴표를 붙인다.
+    $rawArgs = @(Get-InboxWorkerArgs $wrapper $File.FullName $RepoRoot $RuntimeDir ([bool]$SkipPermissions))
+    $argList = @($rawArgs | ForEach-Object { if ([string]$_ -match '\s') { "`"$_`"" } else { [string]$_ } })
     try {
         # 표시 파일을 먼저 만들어 두고(PID 는 0) 띄운 뒤 PID 를 채운다: 그 사이 다른 쪽이 "안 도는 작업"으로 보지 않게
         Write-RunningClaim $taskId @{ pid = 0; session = $Session; cwds = @($Cwds); started = (Get-Date -Format "yyyy-MM-dd HH:mm:ss"); watcher_pid = $PID }
-        $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName = "powershell.exe"
-        $psi.Arguments = ($argList -join " ")
-        $psi.UseShellExecute = $false
-        $psi.CreateNoWindow = $true
-        $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
-        $proc = [System.Diagnostics.Process]::Start($psi)
-        Write-RunningClaim $taskId @{ pid = $proc.Id }
-        Log "작업 시작: $($File.Name) (작업자 PID $($proc.Id)$(if ($Session) { ", 세션: $Session" }))"
+        $workerPid = 0
+        if (-not (Get-Command Start-AgyHiddenDetachedProcess -ErrorAction SilentlyContinue)) {
+            $spawnFile = Join-Path $PSScriptRoot "agy-spawn.ps1"
+            if (-not (Test-Path $spawnFile)) { $spawnFile = Join-Path (Split-Path $PSScriptRoot -Parent) "agy-spawn.ps1" }
+            if (Test-Path $spawnFile) { . $spawnFile }
+        }
+        if (Get-Command Start-AgyHiddenDetachedProcess -ErrorAction SilentlyContinue) {
+            $workerPid = Start-AgyHiddenDetachedProcess -FilePath "powershell.exe" -ArgumentList $rawArgs -WorkingDirectory $RuntimeDir -NoShellFallback
+            # 띄운 작업자가 곧바로 끝났는데 지시 파일이 그대로면(인자 오류 등으로 시작도 못 함) 기본 방식으로 다시 띄운다
+            if ($workerPid -gt 0 -and -not (Wait-InboxWorkerStarted $workerPid $File.FullName)) {
+                Log "경고: 작업자(PID $workerPid)가 시작 직후 끝났고 지시 파일이 그대로 남아 있습니다: $($File.Name). 기본 방식으로 다시 띄웁니다."
+                $workerPid = 0
+            }
+        }
+        if ($workerPid -le 0) {
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = "powershell.exe"
+            $psi.Arguments = ($argList -join " ")
+            $psi.UseShellExecute = $false
+            $psi.CreateNoWindow = $true
+            $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+            $proc = [System.Diagnostics.Process]::Start($psi)
+            $workerPid = $proc.Id
+        }
+        Write-RunningClaim $taskId @{ pid = $workerPid }
+        Log "작업 시작: $($File.Name) (작업자 PID $workerPid$(if ($Session) { ", 세션: $Session" }))"
         return $true
     } catch {
         Log "작업자를 띄우지 못했습니다: $($_.Exception.Message)"
@@ -1544,8 +1624,7 @@ function Invoke-InboxTaskBody([System.IO.FileInfo]$file) {
         }
         # 폴더(@cwd)를 여는 작업에는 표준 규칙을 붙인다(@raw: true 면 안 붙임). 위임 기록에는 원본 지시문이 남는다(여기서는 agy 에 넘길 프롬프트만 바꾼다).
         $withRules = Add-AgyStandardRules $promptText (@($targetCwds).Count -gt 0) ([bool]$directives.Raw) $effectiveSlashCmd
-        $withEta = if (Get-Command Add-AgyEtaInstruction -ErrorAction SilentlyContinue) { Add-AgyEtaInstruction ([string]$withRules.Text) ([bool]$directives.Raw) } else { @{ Text = [string]$withRules.Text; Added = $false } }
-        $promptForAgy = [string]$withEta.Text
+        $promptForAgy = [string]$withRules.Text
         if (@($withRules.Added).Count -gt 0) { Log "  -> 표준 규칙 자동 추가: $(@($withRules.Added) -join ', ')" }
         $tempPromptFile = Join-Path $promptsDir "prompt_$baseName.txt"
         [System.IO.File]::WriteAllText($tempPromptFile, $promptForAgy, (New-Object System.Text.UTF8Encoding($false)))
@@ -1578,22 +1657,8 @@ function Invoke-InboxTaskBody([System.IO.FileInfo]$file) {
                 $lastResortBanner = "[알림] 단계 '$(if ($modelTier) { $modelTier } else { '기본' })' 의 앞 모델($(@($agyResult.TriedModels | Select-Object -SkipLast 1) -join ', '))이 한도 · 과부하로 막혀 맨 마지막 대안 $($agyResult.ModelUsed) 로 처리했습니다. 결과를 더 꼼꼼히 검토하세요.`r`n`r`n"
                 Log "  참고: 맨 마지막 대안 $($agyResult.ModelUsed) 로 처리했습니다(시도: $($agyResult.TriedModels -join ' -> '))"
             }
-            $etaParsed = if (Get-Command Split-AgyEtaFromText -ErrorAction SilentlyContinue) { Split-AgyEtaFromText ([string]$agyResult.Response) } else { @{ EstimatedSec = $null; CleanText = [string]$agyResult.Response } }
-            $cleanResponse = [string]$etaParsed.CleanText
+            $cleanResponse = [string]$agyResult.Response
             if (Get-Command Remove-AgyGoalMarkers -ErrorAction SilentlyContinue) { $cleanResponse = Remove-AgyGoalMarkers $cleanResponse }
-            $recEstimatedSec = $etaParsed.EstimatedSec
-            if ($null -eq $recEstimatedSec -and $effectiveSessionId -and (Get-Command Get-AgyEstimatedSecFromTranscript -ErrorAction SilentlyContinue)) {
-                try {
-                    $etaSince = $null
-                    if ($sessionName -or $conversationId) {
-                        $etaSince = (Get-Date).AddSeconds(-([double]$agyResult.ElapsedSec + 5))
-                    }
-                    $etaTPath = Get-AgyTranscriptPath (Get-AgyHomeDir) ([string]$effectiveSessionId)
-                    $etaCompact = if ($etaTPath) { Join-Path (Split-Path -Parent $etaTPath) "transcript.jsonl" } else { $null }
-                    $etaFile = if ($etaCompact -and (Test-Path -LiteralPath $etaCompact)) { $etaCompact } elseif ($etaTPath -and (Test-Path -LiteralPath $etaTPath)) { $etaTPath } else { $null }
-                    if ($etaFile) { $recEstimatedSec = Get-AgyEstimatedSecFromTranscript $etaFile $etaSince }
-                } catch {}
-            }
             Set-Content -Path $outFile -Value ($guardBanner + $lastResortBanner + $cleanResponse) -Encoding UTF8
 
             # 이어가는 세션에서 agy 가 보고하는 duration_seconds 는 그 대화를 처음 연 때부터의 누적이라(사이에 쉰 시간 포함) 이번 호출의 시간이 아니다.
@@ -1719,7 +1784,7 @@ function Invoke-InboxTaskBody([System.IO.FileInfo]$file) {
             $recElapsed  = $elapsedForLog
             $recStatus   = "OK"
 
-            Write-UsageRow $baseName $recModel $recAttempts $recTried $recInTok $recOutTok $recThinkTok $recTotTok $recElapsed "OK" $sessionName $effectiveSessionId $cumInTok $cumOutTok $cumThinkTok $cumTotTok $usageBasis $recEstimatedSec
+            Write-UsageRow $baseName $recModel $recAttempts $recTried $recInTok $recOutTok $recThinkTok $recTotTok $recElapsed "OK" $sessionName $effectiveSessionId $cumInTok $cumOutTok $cumThinkTok $cumTotTok $usageBasis
 
             if ($sessionName -and $agyResult.ConversationId) {
                 Write-Session -Name $sessionName -ConversationId $agyResult.ConversationId -Cwd $targetCwds -Model $agyResult.ModelUsed
@@ -1912,18 +1977,17 @@ if (Test-Path $ManualStopFlag) {
 Initialize-QaStore
 Update-QAReport
 
-# 설정의 모델이 실제로 있는지 `agy models` 로 한 번 확인한다(20초 제한). 목록은 작업자들이 읽도록 파일에 적는다.
-# 실패하면 목록 파일을 지우고(= 거르지 않음) 그대로 시작한다. 없는 모델은 경고하고, 작업 때 그 단계의 다음 모델로 대신한다.
+# 설정의 모델이 실제로 있는지 워처를 켤 때마다 `agy models` 로 확인한다(창 없이 띄우므로 깜빡이지 않음, 20초 제한).
+# agy 계정을 바꾸면 쓸 수 있는 모델이 달라지므로 예전 결과를 다시 쓰지 않는다. 목록은 작업자들이 읽도록 파일에 적는다.
+# 실패하거나 시간 안에 끝나지 않으면 목록 파일을 지우고(= 거르지 않음) 그대로 시작한다. 없는 모델은 경고하고, 작업 때 그 단계의 다음 모델로 대신한다.
 try {
     $agyExeForList = (Get-Command agy -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
-    $avail = Get-AgyAvailableModels $agyExeForList 20
+    $avail = Update-AgyAvailableModelsFile $AvailableModelsFile $agyExeForList 20
     if ($avail -and @($avail).Count -gt 0) {
-        [System.IO.File]::WriteAllText($AvailableModelsFile, ([ordered]@{ checked_at = (Get-Date -Format "yyyy-MM-dd HH:mm:ss"); models = @($avail) } | ConvertTo-Json -Compress), (New-Object System.Text.UTF8Encoding($false)))
         $missing = Get-AgyMissingTierModels $startCfg @($avail)
         if ($missing.Count -eq 0) { Log "모델 확인: 설정의 모델이 모두 agy 에 있습니다(agy models $(@($avail).Count)개)." }
         foreach ($tn in $missing.Keys) { Log "경고: 단계 '$tn' 의 모델 $(@($missing[$tn]) -join ', ') 이(가) agy models 에 없어 건너뜁니다(그 단계의 다음 모델로 대신)." }
     } else {
-        Remove-Item -LiteralPath $AvailableModelsFile -Force -ErrorAction SilentlyContinue
         Log "모델 확인: agy models 를 읽지 못해 확인 없이 시작합니다(설정 그대로 씀)."
     }
 } catch {

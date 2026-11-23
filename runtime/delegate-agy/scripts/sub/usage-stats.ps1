@@ -481,6 +481,12 @@ function Invoke-AgyUsageCollect([string]$DbPath, [string]$ProjectsDir, [string]$
                     if ($reason.Length -gt 200) { $reason = $reason.Substring(0, 200) }
                     [void]$db.Execute("UPDATE usage_questions SET reason = ? WHERE session = ? AND q_ts = ? AND (reason IS NULL OR reason <> ?)", [object[]]@($reason, $own.Session, $own.QTs, $reason))
                 }
+                # 서브에이전트가 보낸 위임이면 서브에이전트 모델 · 노력 단계도 붙인다(한 질문에 여럿이면 먼저 기록된 값을 유지)
+                $agentModel = ([string]$meta.agent_model).Trim()
+                if ($own -and $agentModel) {
+                    $agentEffort = ([string]$meta.agent_effort).Trim().ToLowerInvariant()
+                    [void]$db.Execute("UPDATE usage_questions SET agent_model = ?, agent_effort = ? WHERE session = ? AND q_ts = ? AND (agent_model IS NULL OR agent_model = '')", [object[]]@($agentModel, $agentEffort, $own.Session, $own.QTs))
+                }
             }
         }
 
@@ -563,7 +569,7 @@ function Get-AgyUsageStatsJson([string]$DbPath, [int]$Days = 7, [bool]$Collectin
             for ($i = 0; $i -lt $allIds.Count; $i += 500) {
                 $chunk = @($allIds[$i..([math]::Min($i + 499, $allIds.Count - 1))])
                 $marks = (@($chunk | ForEach-Object { '?' }) -join ',')
-                foreach ($t in $db.Query("SELECT task_id, model, status, elapsed_sec FROM tasks WHERE task_id IN ($marks)", [object[]]$chunk)) {
+                foreach ($t in $db.Query("SELECT task_id, model, status, elapsed_sec, tried_models FROM tasks WHERE task_id IN ($marks)", [object[]]$chunk)) {
                     $taskInfo[[string]$t['task_id']] = $t
                 }
             }
@@ -574,14 +580,48 @@ function Get-AgyUsageStatsJson([string]$DbPath, [int]$Days = 7, [bool]$Collectin
         $claude = ConvertTo-AgyUsageShortModel ([string]$r['claude_model'])
         $effort = if ($r.ContainsKey('claude_effort') -and $null -ne $r['claude_effort']) { [string]$r['claude_effort'] } else { "" }
         $claudeLabel = ConvertTo-AgyUsageClaudeLabel $claude $effort
+        $agentRaw = if ($r.ContainsKey('agent_model') -and $null -ne $r['agent_model']) { [string]$r['agent_model'] } else { "" }
+        $agent = ConvertTo-AgyUsageShortModel $agentRaw
+        $agentEffort = if ($r.ContainsKey('agent_effort') -and $null -ne $r['agent_effort']) { [string]$r['agent_effort'] } else { "" }
+        $agentLabel = ConvertTo-AgyUsageClaudeLabel $agent $agentEffort
         $agy = [string]$r['agy_models']
         $agyShort = ConvertTo-AgyUsageAgyShort $agy
-        $combo = if ([string]$r['mode'] -eq 'delegate') { "{0} → {1}" -f $(if ($claudeLabel) { $claudeLabel } else { '?' }), $(if ($agyShort) { $agyShort } else { '?' }) } else { $(if ($claudeLabel) { $claudeLabel } else { '?' }) }
+        $combo = if ([string]$r['mode'] -eq 'delegate') {
+            $left = if ($claudeLabel) { $claudeLabel } else { '?' }
+            if ($agentLabel) { $left = "{0} › 서브 {1}" -f $left, $agentLabel }
+            "{0} → {1}" -f $left, $(if ($agyShort) { $agyShort } else { '?' })
+        } else { $(if ($claudeLabel) { $claudeLabel } else { '?' }) }
+        # 각 위임 작업 중 한도 · 과부하로 앞 모델이 실패하고 다른 모델로 넘어간 경우, 그 실패한 모델의 짧은 이름 목록(성공한 작업만 센다)
+        $failedList = New-Object System.Collections.ArrayList
+        foreach ($tid in @(([string]$r['task_ids'] -split ',') | Where-Object { $_ })) {
+            $ti = $taskInfo[$tid]
+            if ($ti -and ([string]$ti['status']).ToUpperInvariant() -eq 'OK' -and $ti['tried_models']) {
+                $rawChain = @(([string]$ti['tried_models']) -split '\s*->\s*' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+                if ($rawChain.Count -gt 1) {
+                    $used = [string]$ti['model']
+                    $usedIdx = $rawChain.IndexOf($used)
+                    $earlier = if ($usedIdx -gt 0) {
+                        $rawChain[0..($usedIdx - 1)]
+                    } elseif ($usedIdx -lt 0) {
+                        $rawChain[0..($rawChain.Count - 2)]
+                    } else {
+                        @()
+                    }
+                    foreach ($em in $earlier) {
+                        $sn = ConvertTo-AgyUsageAgyShort $em
+                        if ($sn) { [void]$failedList.Add($sn) }
+                    }
+                }
+            }
+        }
+        $agyFailed = [string[]]@($failedList | Select-Object -Unique)
         $local = $null
         try { $local = ([DateTime]::Parse([string]$r['q_ts'], [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AdjustToUniversal)).ToLocalTime() } catch { $local = Get-Date }
         [void]$items.Add([pscustomobject][ordered]@{
             q_ts = [string]$r['q_ts']; end_ts = [string]$r['end_ts']; session = [string]$r['session']; project = [string]$r['project']
-            mode = [string]$r['mode']; claude_model = $claude; claude_effort = $effort; claude_label = $claudeLabel; agy_models = $agy; combo = $combo
+            mode = [string]$r['mode']; claude_model = $claude; claude_effort = $effort; claude_label = $claudeLabel
+            agent_model = $agent; agent_effort = $agentEffort; agent_label = $agentLabel; agy_models = $agy; combo = $combo
+            agy_failed = $agyFailed
             dur_sec = [long]$r['dur_sec']; calls = [long]$r['calls']
             tokens = ([long]$r['in_tokens'] + [long]$r['cc_tokens'] + [long]$r['out_tokens']); cr_tokens = [long]$r['cr_tokens']
             agy_tokens = $(if ($null -eq $r['agy_tokens']) { $null } else { [long]$r['agy_tokens'] })
@@ -596,6 +636,7 @@ function Get-AgyUsageStatsJson([string]$DbPath, [int]$Days = 7, [bool]$Collectin
                     model = $(if ($ti -and $ti['model']) { [string]$ti['model'] } else { $null })
                     status = $(if ($ti -and $ti['status']) { ([string]$ti['status']).ToUpperInvariant() } else { $null })
                     sec = $sec
+                    tried = $(if ($ti -and $ti['tried_models']) { [string]$ti['tried_models'] } else { $null })
                 }
             })
             task_ok = [long]$(if ($null -eq $r['task_ok']) { 0 } else { $r['task_ok'] }); task_fail = [long]$(if ($null -eq $r['task_fail']) { 0 } else { $r['task_fail'] }); task_cancel = [long]$(if ($null -eq $r['task_cancel']) { 0 } else { $r['task_cancel'] })

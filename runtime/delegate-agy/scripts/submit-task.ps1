@@ -12,9 +12,11 @@
 #   -NoWait             넣기만 하고 작업 ID 만 출력한다(여러 개를 병렬로 보낼 때). 나중에 -Poll 로 기다린다
 #   -Poll <ID>...       이미 보낸 작업(들)의 결과를 기다린다(쉼표·공백으로 여러 개). 시간 초과로 끝난 뒤 다시 확인할 때도 쓴다
 #   -WaitSeconds <초>   기다리는 최대 시간(기본 170 — device_bash 한 호출이 3분 제한이라 그 안에 돌아오게)
-#   -MaxWaitSec <초>    -WaitSeconds 와 같은 뜻이고, 주면 그것을 쓴다(그 시간까지만 기다림)
-#   -CancelOnTimeout    기다리는 시간이 다 됐는데 안 끝난 작업을 취소한다. -MaxWaitSec 를 안 주면 작업 단계의 대기 한도까지 기다린다
-#                       (config\models.json 의 wait_sec: quick 3분 · build 8분 · build-hard 12분 · feature · feature-argon · think · think-argon · deep 20분). 백그라운드 대기로 쓴다
+#   -MaxWaitSec <초>    -WaitSeconds 와 같은 뜻이고, 주면 그것을 쓴다(폴 시작 기준 그 시간까지만 기다림, 연장 없음)
+#   -CancelOnTimeout    기다리는 시간이 다 됐는데 안 끝난 작업을 취소한다. -MaxWaitSec 를 안 주면 작업 시작(claim started_at 또는 ID 제출 시각) 기준
+#                       단계의 대기 한도(config\models.json 의 wait_sec: quick 3분 · build 8분 · build-hard 12분 · feature · feature-argon · think · think-argon · deep 20분)까지 기다린다.
+#                       한도가 지나도 작업이 계속 진행 중이면(대화 활동·도구 출력) 멈출 때까지 대기를 연장하며, 5분간 진행이 없거나 2시간 절대 한도를 넘길 때만 취소한다.
+#                       대기열에서 다른 작업 실행으로 차례를 기다리는 중이어도 워처가 살아 있으면 취소하지 않는다. 백그라운드 대기로 쓴다
 #   지시문 맨 위에 "@model: <단계>" 를 쓰면 그 단계로 보낸다(quick · build · build-hard · feature · feature-argon · think · think-argon · deep). 없으면 워처가 quick/build 중에서 고른다.
 #   지시문 맨 위에 "@cmd: <명령>"(goal · swarm · run-workflow · boost · browser · plan) · "@mode: <모드>"(plan · accept-edits · auto) 를 쓰면 실행 명령과 권한 모드를 함께 넘긴다.
 #   새로 넣으면 표준 오류에 "[단계] <단계> (<모델>) · 대기 한도 <초>" 한 줄을 알린다.
@@ -56,6 +58,8 @@ function Stop-WithCode([int]$Code, [string]$Message) {
 
 # 런타임 폴더: -RuntimeDir > 환경변수 AGY_DELEGATE_RUNTIME > 이 스크립트 옆(설치 위치 ~/.samjil/delegate-agy/scripts -> ../runtime) > 예전 설치 이름들
 . (Join-Path $PSScriptRoot "sub\agy-layout.ps1")
+$progressLib = Join-Path $PSScriptRoot "sub\agy-progress.ps1"
+if (Test-Path -LiteralPath $progressLib) { . $progressLib }
 
 function Resolve-RuntimeDirForSubmit([string]$Given) {
     $cands = @()
@@ -131,6 +135,61 @@ function Get-PendingStatus([string]$Id) {
         return $text
     }
     return "접수 기록 없음(inbox 에도 실행 목록에도 없음): 작업 ID 를 확인하세요"
+}
+
+# 워처가 살아있는지(최근 30초 이내 하트비트) 확인한다
+function Test-SubmitWatcherAlive {
+    $layout = Get-AgyLayout $script:RuntimeDirResolved
+    $hbDir = $layout.HeartbeatDir
+    if (-not (Test-Path -LiteralPath $hbDir -PathType Container)) { return $false }
+    $hb = @(Get-ChildItem -LiteralPath $hbDir -Filter "hb_*.txt" -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1)
+    if ($hb.Count -gt 0 -and ((Get-Date) - $hb[0].LastWriteTime).TotalSeconds -le 30) { return $true }
+    return $false
+}
+
+# 다른 작업이 실제로 실행 중인지(PID 프로세스 살아있음) 확인한다
+function Test-OtherTaskRunning([string]$MyTaskId) {
+    $runningDir = (Get-AgyLayout $script:RuntimeDirResolved).RunningDir
+    if (-not (Test-Path -LiteralPath $runningDir -PathType Container)) { return $false }
+    foreach ($f in @(Get-ChildItem -LiteralPath $runningDir -Filter "*.json" -File -ErrorAction SilentlyContinue)) {
+        if ([System.IO.Path]::GetFileNameWithoutExtension($f.Name) -eq $MyTaskId) { continue }
+        try {
+            $claim = Read-TextFile $f.FullName | ConvertFrom-Json
+            if ($claim) {
+                $claimPid = 0
+                try { $claimPid = [int]$claim.pid } catch { $claimPid = 0 }
+                if ($claimPid -gt 0) {
+                    $p = Get-Process -Id $claimPid -ErrorAction SilentlyContinue
+                    if ($p -and -not $p.HasExited) { return $true }
+                }
+            }
+        } catch {}
+    }
+    return $false
+}
+
+# 작업 시작 시각: 실행 중 claim started_at > 작업 ID 에 담긴 제출 시각(claude_<epoch>_N) > 폴 시작 시각(fallback)
+function Get-TaskStartTime([string]$Id, [datetime]$Fallback) {
+    $runningDir = (Get-AgyLayout $script:RuntimeDirResolved).RunningDir
+    $claimPath = Join-Path $runningDir "$Id.json"
+    if (Test-Path -LiteralPath $claimPath -PathType Leaf) {
+        try {
+            $claim = Read-TextFile $claimPath | ConvertFrom-Json
+            if ($claim) {
+                $startText = if ($claim.started_at) { [string]$claim.started_at } else { [string]$claim.started }
+                $st = [datetime]::MinValue
+                if ($startText -and [datetime]::TryParse($startText, [ref]$st)) {
+                    return $st
+                }
+            }
+        } catch {}
+    }
+    if ($Id -match '^claude_(\d{9,11})_\d+$') {
+        try {
+            return [DateTimeOffset]::FromUnixTimeSeconds([int64]$Matches[1]).LocalDateTime
+        } catch {}
+    }
+    return $Fallback
 }
 
 $script:CancelledPrefix = "취소됨(CANCELLED):"
@@ -424,17 +483,29 @@ if ($ids.Count -eq 0) {
             $transcriptLib = Join-Path $PSScriptRoot "sub\claude-transcript.ps1"
             if (Test-Path -LiteralPath $transcriptLib) {
                 . $transcriptLib
-                $lastUsage = Get-ClaudeTranscriptLastUsage -SessionId $sessId
+                $mainTranscriptPath = Resolve-ClaudeTranscriptPath -SessionId $sessId
+                $lastUsage = if ($mainTranscriptPath) { Get-ClaudeTranscriptLastUsage -TranscriptPath $mainTranscriptPath } else { $null }
+                $subAgent = if ($mainTranscriptPath) { Find-ClaudeSubmittingSubagent -MainTranscriptPath $mainTranscriptPath } else { $null }
                 $ctxThreshold = 200000
                 if ($env:AGY_CTX_SUBAGENT_THRESHOLD -match '^\d+$') { $ctxThreshold = [int]$env:AGY_CTX_SUBAGENT_THRESHOLD }
-                if ($lastUsage -and $lastUsage.ctx -and [long]$lastUsage.ctx -gt $ctxThreshold) {
+                # 서브에이전트가 제출한 경우에는 본 세션이 아니라 서브에이전트 자신의 컨텍스트 크기로 판단한다.
+                $effectiveCtx = if ($subAgent) { [long]$subAgent.ctx } elseif ($lastUsage -and $lastUsage.ctx) { [long]$lastUsage.ctx } else { 0L }
+                if ($effectiveCtx -gt $ctxThreshold) {
                     # 이미 제출한 뒤라, 지금 할 수 있는 일(남은 대기 · 검토를 넘기기)을 알린다. 다음 위임부터는 질문 시점의 훅 알림을 보고 처음부터 서브에이전트에 맡긴다.
-                    [Console]::Error.WriteLine(("[컨텍스트 {0}k] 컨텍스트가 큽니다(기준 {1}k). 제출은 됐으니 이 작업의 대기 · diff 검토 · 시험은 본 세션에서 하지 말고, 서브에이전트 하나(저렴한 모델)에 아래 작업 ID 와 확인할 시험 명령을 넘겨 맡긴 뒤 5줄 보고만 받으세요(본 세션은 호출마다 대화 전체를 다시 읽습니다)." -f [int][math]::Round([long]$lastUsage.ctx / 1000.0), [int]($ctxThreshold / 1000)))
+                    [Console]::Error.WriteLine(("[컨텍스트 {0}k] 컨텍스트가 큽니다(기준 {1}k). 제출은 됐으니 이 작업의 대기 · diff 검토 · 시험은 본 세션에서 하지 말고, 서브에이전트 하나(저렴한 모델)에 아래 작업 ID 와 확인할 시험 명령을 넘겨 맡긴 뒤 5줄 보고만 받으세요(본 세션은 호출마다 대화 전체를 다시 읽습니다)." -f [int][math]::Round($effectiveCtx / 1000.0), [int]($ctxThreshold / 1000)))
                 }
                 if ($lastUsage -and $lastUsage.model) {
                     $metaObj['model'] = $lastUsage.model
                     $metaObj['effort'] = $lastUsage.effort
                     $metaObj['session'] = $sessId
+                }
+                if ($subAgent) {
+                    if ($subAgent.model)  { $metaObj['agent_model']  = [string]$subAgent.model }
+                    if ($subAgent.effort) { $metaObj['agent_effort'] = [string]$subAgent.effort }
+                    if ($subAgent.id)     { $metaObj['agent_id']     = [string]$subAgent.id }
+                    if ($subAgent.type)   { $metaObj['agent_type']   = [string]$subAgent.type }
+                    if ($subAgent.desc)   { $metaObj['agent_desc']   = [string]$subAgent.desc }
+                    if (-not $metaObj.Contains('session')) { $metaObj['session'] = $sessId }
                 }
             }
         }
@@ -474,35 +545,163 @@ if ($ids.Count -eq 0) {
     $ids = @($id)
 }
 
-# 기다리기: 처음 60초는 3초 간격, 그 뒤는 10초 간격(대기는 이 프로세스 안에서 돌아 Claude 토큰을 쓰지 않는다)
+# 기다리기: -MaxWaitSec 가 주어지거나 -CancelOnTimeout 이 없으면 기존처럼 폴 시작 기준 대기.
+# -CancelOnTimeout 만 준 경우: 작업 시작(claim started_at 또는 ID 제출 시각) 기준 단계 한도까지 대기하며,
+# 한도가 지나도 활동(대화/도구 로그)이 있으면 멈출 때까지 대기를 연장하고 10초마다 재확인한다.
 $timedOut = @()
 $startedWait = Get-Date
-# -MaxWaitSec 를 주면 그 값. 안 주고 -CancelOnTimeout 이면 작업 단계의 대기 한도(여러 작업이면 가장 긴 것). 그 밖에는 -WaitSeconds.
-$effectiveWait = $WaitSeconds
-if ($MaxWaitSec -gt 0) {
-    $effectiveWait = $MaxWaitSec
-} elseif ($CancelOnTimeout) {
-    $tierWait = 0
-    foreach ($wid in $ids) { $w = Get-TaskWaitSec $wid; if ($w -gt $tierWait) { $tierWait = $w } }
-    if ($tierWait -gt 0) { $effectiveWait = $tierWait }
-}
-$deadline = $startedWait.AddSeconds([math]::Max(0, $effectiveWait))
-while ($true) {
-    $pending = @($ids | Where-Object { -not (Test-TaskDone $_) })
-    if ($pending.Count -eq 0 -or (Get-Date) -ge $deadline) { break }
-    $interval = if (((Get-Date) - $startedWait).TotalSeconds -lt 60) { 3 } else { 10 }
-    $left = ($deadline - (Get-Date)).TotalSeconds
-    Start-Sleep -Seconds ([math]::Max(1, [math]::Min($interval, [math]::Floor($left))))
+
+if ($MaxWaitSec -gt 0 -or -not $CancelOnTimeout) {
+    $effectiveWait = if ($MaxWaitSec -gt 0) { $MaxWaitSec } else { $WaitSeconds }
+    $deadline = $startedWait.AddSeconds([math]::Max(0, $effectiveWait))
+    while ($true) {
+        $pending = @($ids | Where-Object { -not (Test-TaskDone $_) })
+        if ($pending.Count -eq 0 -or (Get-Date) -ge $deadline) { break }
+        $interval = if (((Get-Date) - $startedWait).TotalSeconds -lt 60) { 3 } else { 10 }
+        $left = ($deadline - (Get-Date)).TotalSeconds
+        Start-Sleep -Seconds ([math]::Max(1, [math]::Min($interval, [math]::Floor($left))))
+    }
+    if ($CancelOnTimeout) {
+        foreach ($pid_ in @($ids | Where-Object { -not (Test-TaskDone $_) })) {
+            [void](Invoke-CancelTask $pid_ ("기다리는 한도({0}초)가 지나도 끝나지 않아 취소했습니다. 직접 처리하세요." -f $effectiveWait))
+            $timedOut += $pid_
+        }
+    }
+} else {
+    # -CancelOnTimeout 만 주어진 경우: 작업별 시작 시각 기준 + 진행 중 대기 연장 규칙
+    $stallSec = Get-AgySecondsSetting "AGY_STALL_SECONDS" 300 30
+    $hardTimeoutSec = Get-AgySecondsSetting "AGY_HARD_TIMEOUT_SECONDS" 7200 60
+    $recheckSec = 10.0
+    if ($env:AGY_POLL_RECHECK_SEC -match '^\d+(\.\d+)?$') {
+        $recheckSec = [double]$env:AGY_POLL_RECHECK_SEC
+    }
+    $agyHome = Get-AgyHomeDir
+    $layout = Get-AgyLayout $script:RuntimeDirResolved
+    $runningDir = $layout.RunningDir
+    $extendedPrinted = @{}
+
+    while ($true) {
+        $pending = @($ids | Where-Object { -not (Test-TaskDone $_) -and ($timedOut -notcontains $_) })
+        if ($pending.Count -eq 0) { break }
+
+        $now = Get-Date
+
+        foreach ($id in $pending) {
+            $tStart = Get-TaskStartTime $id $startedWait
+            $tLimit = Get-TaskWaitSec $id
+            if ($tLimit -le 0) { $tLimit = $WaitSeconds }
+            $elapsed = ($now - $tStart).TotalSeconds
+
+            # 절대 마감: 작업 시작으로부터 AGY_HARD_TIMEOUT_SECONDS(기본 7200) 경과 시 취소
+            if ($elapsed -ge $hardTimeoutSec) {
+                $reason = "절대 대기 한도({0}초)가 지나 취소했습니다. 직접 처리하세요." -f $hardTimeoutSec
+                [void](Invoke-CancelTask $id $reason)
+                $timedOut += $id
+                continue
+            }
+
+            # 단계 한도 전이면 계속 대기
+            if ($elapsed -lt $tLimit) {
+                continue
+            }
+
+            # 단계 대기 한도 초과: 실행 중/대기열/활동 상태 판정
+            $claimPath = Join-Path $runningDir "$id.json"
+            $claim = $null
+            if (Test-Path -LiteralPath $claimPath -PathType Leaf) {
+                try { $claim = Read-TextFile $claimPath | ConvertFrom-Json } catch { $claim = $null }
+            }
+
+            if ($claim) {
+                $convId = [string]$claim.conversation_id
+                if ($convId) {
+                    $actConv = Get-AgyConversationActivity $agyHome $convId
+                    $actTask = Get-AgyTaskLogActivity $agyHome $convId
+                    $actChild = Get-AgyChildConversationActivity $agyHome $convId
+
+                    $latestAct = $null
+                    $actReason = ""
+                    if ($actConv -and ($null -eq $latestAct -or $actConv -gt $latestAct)) {
+                        $latestAct = $actConv
+                        $actReason = "새 단계 기록됨"
+                    }
+                    if ($actTask -and ($null -eq $latestAct -or $actTask -gt $latestAct)) {
+                        $latestAct = $actTask
+                        $actReason = "백그라운드 도구 출력"
+                    }
+                    if ($actChild -and ($null -eq $latestAct -or $actChild -gt $latestAct)) {
+                        $latestAct = $actChild
+                        $actReason = "하위 에이전트 활동"
+                    }
+
+                    $agoSec = if ($latestAct) { [int][Math]::Max(0, ($now - $latestAct).TotalSeconds) } else { [int][Math]::Max(0, $elapsed) }
+                    if ($latestAct -and ($agoSec -lt $stallSec)) {
+                        # 활동 진행 중: 대기 연장 및 re-check 안내 1회 출력
+                        if (-not $extendedPrinted.ContainsKey($id)) {
+                            [Console]::Error.WriteLine(("[대기 연장] {0}: 한도 {1}초가 지났지만 {2}초 전에도 진행했습니다({3}). 멈출 때까지 계속 기다립니다." -f $id, $tLimit, $agoSec, $actReason))
+                            $extendedPrinted[$id] = $true
+                        }
+                    } else {
+                        # 멈춤: 최근 stall window 동안 활동 없음
+                        $cancelReason = "기다리는 한도({0}초)가 지났고 최근 {1}초 동안 진행이 없어 취소했습니다. 직접 처리하세요." -f $tLimit, $stallSec
+                        [void](Invoke-CancelTask $id $cancelReason)
+                        $timedOut += $id
+                    }
+                } else {
+                    # claim 에 conversation_id 가 아직 없음: limit + window 넘었으면 멈춤으로 취소
+                    if ($elapsed -ge ($tLimit + $stallSec)) {
+                        $cancelReason = "기다리는 한도({0}초)가 지났고 최근 {1}초 동안 진행이 없어 취소했습니다. 직접 처리하세요." -f $tLimit, $stallSec
+                        [void](Invoke-CancelTask $id $cancelReason)
+                        $timedOut += $id
+                    }
+                }
+            } else {
+                # running 목록에 없음: 대기열(inbox) 확인
+                $queued = @(Get-ChildItem -LiteralPath $inboxDir -File -ErrorAction SilentlyContinue | Where-Object { [System.IO.Path]::GetFileNameWithoutExtension($_.Name) -eq $id })
+                if ($queued.Count -gt 0) {
+                    $watcherAlive = Test-SubmitWatcherAlive
+                    $otherRunning = Test-OtherTaskRunning $id
+                    if ($watcherAlive -and $otherRunning) {
+                        # 워처가 살아있고 다른 작업이 돌고 있음: 차례 기다리는 중
+                        if (-not $extendedPrinted.ContainsKey($id)) {
+                            [Console]::Error.WriteLine(("[대기 연장] {0}: 아직 차례를 기다리는 중입니다." -f $id))
+                            $extendedPrinted[$id] = $true
+                        }
+                    } elseif (-not $watcherAlive) {
+                        # 워처가 꺼져 있음
+                        $cancelReason = "기다리는 한도({0}초)가 지났고 워처가 꺼져 있어 취소했습니다. 직접 처리하세요." -f $tLimit
+                        [void](Invoke-CancelTask $id $cancelReason)
+                        $timedOut += $id
+                    }
+                } else {
+                    # inbox 에도 running 에도 없음
+                    if (Test-TaskDone $id) { continue }
+                    $cancelReason = "기다리는 한도({0}초)가 지나도 끝나지 않아 취소했습니다. 직접 처리하세요." -f $tLimit
+                    [void](Invoke-CancelTask $id $cancelReason)
+                    $timedOut += $id
+                }
+            }
+        }
+
+        $pending = @($ids | Where-Object { -not (Test-TaskDone $_) -and ($timedOut -notcontains $_) })
+        if ($pending.Count -eq 0) { break }
+
+        $anyOverLimit = $false
+        foreach ($wid in $pending) {
+            $ws = Get-TaskStartTime $wid $startedWait
+            $wl = Get-TaskWaitSec $wid; if ($wl -le 0) { $wl = $WaitSeconds }
+            if (($now - $ws).TotalSeconds -ge $wl) { $anyOverLimit = $true; break }
+        }
+        $interval = if ($anyOverLimit -or (($now - $startedWait).TotalSeconds -ge 60)) { $recheckSec } else { [Math]::Min(3.0, $recheckSec) }
+        if ($interval -ge 1.0) {
+            Start-Sleep -Seconds ([int][Math]::Round($interval))
+        } else {
+            Start-Sleep -Milliseconds ([int]($interval * 1000))
+        }
+    }
 }
 
 $exit = 0
-# -CancelOnTimeout: 기다리는 시간이 다 됐는데 안 끝난 작업은 취소한다
-if ($CancelOnTimeout) {
-    foreach ($pid_ in @($ids | Where-Object { -not (Test-TaskDone $_) })) {
-        [void](Invoke-CancelTask $pid_ ("기다리는 한도({0}초)가 지나도 끝나지 않아 취소했습니다. 직접 처리하세요." -f $effectiveWait))
-        $timedOut += $pid_
-    }
-}
 foreach ($id in $ids) {
     $resp = Join-Path $script:OutboxDir "$id.response.md"
     $err = Join-Path $script:OutboxDir "$id.error.log"

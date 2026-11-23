@@ -161,30 +161,3 @@ function Add-AgyStandardRules([string]$Prompt, [bool]$HasFolder, [bool]$Raw = $f
     $text = ([string]$Prompt).TrimEnd() + "`n`nRules (added automatically by the watcher):`n" + ($lines -join "`n") + "`n"
     return @{ Text = $text; Added = @($added.ToArray()) }
 }
-
-# 직접 작업을 수행하는 Gemini(agy)가 과거 기록이 아닌 현재 프롬프트의 양·난이도·복잡도만 분석해
-# 첫 응답 맨 앞에 예상 소요 시간([ETA: <초>s])을 출력하도록 지시를 붙인다(@raw: true 면 생략).
-function Add-AgyEtaInstruction([string]$Prompt, [bool]$Raw = $false) {
-    if ($Raw) { return @{ Text = $Prompt; Added = $false } }
-    if ([regex]::IsMatch([string]$Prompt, '(?i)\[\s*ETA\s*:')) { return @{ Text = $Prompt; Added = $false } }
-    $inst = "Before calling your first tool (or at the very beginning of your response), estimate the total execution time in seconds based solely on this prompt's volume, difficulty, and complexity (do not assume any prior history), and output a single tag on its own line: [ETA: <seconds>s] (for example, [ETA: 180s])."
-    $text = ([string]$Prompt).TrimEnd() + "`n`n" + $inst + "`n"
-    return @{ Text = $text; Added = $true }
-}
-
-# 텍스트에서 Gemini 가 출력한 [ETA: <초>s] 태그를 추출하고, 본문에서는 해당 태그를 제거한다.
-function Split-AgyEtaFromText([string]$Text) {
-    $raw = [string]$Text
-    $est = $null
-    $m = [regex]::Match($raw, '(?i)\[\s*ETA\s*:\s*(\d+)\s*(?:s|sec|seconds|초)?\s*\]')
-    if ($m.Success) {
-        $v = 0
-        if ([int]::TryParse($m.Groups[1].Value, [ref]$v) -and $v -ge 1 -and $v -le 86400) {
-            $est = $v
-        }
-        $raw = [regex]::Replace($raw, '(?im)^\s*\[\s*ETA\s*:\s*\d+\s*(?:s|sec|seconds|초)?\s*\]\s*(\r?\n)?', '')
-        $raw = [regex]::Replace($raw, '(?i)\s*\[\s*ETA\s*:\s*\d+\s*(?:s|sec|seconds|초)?\s*\]', '')
-        $raw = $raw.TrimStart("`r", "`n")
-    }
-    return @{ EstimatedSec = $est; CleanText = $raw }
-}

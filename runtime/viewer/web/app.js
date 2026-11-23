@@ -137,6 +137,8 @@
   var currentHandoffData = null;// 선택된 프로젝트 상세
   var handoffMessageCache = {}; // 메시지 본문 캐시
   var openHandoffNums = {};     // 열려 있는 메시지 번호
+  var expandedMeta = {};        // 토큰 · 식별 줄을 펼친 카드 키(task_id 또는 data-key)
+  var metaMoreSeq = 0;          // aria-controls 연결용 고유 id 번호
 
   var filteredQa = [];          // 필터 적용된 완료 QA
   var filteredPending = [];     // 필터 적용된 pending
@@ -216,24 +218,58 @@
     return /^gemini-3\.8-flash-/i.test(used) && String(r.tried_models || "").indexOf("->") >= 0;
   }
 
-  function cardModelHtml(agyModel, claudeModel, claudeEffort, fellBack) {
+  function cardModelHtml(agyModel, claudeModel, claudeEffort, fellBack, subAgent, triedModels, isOk) {
     if (!agyModel) return "";
     var full = String(agyModel);
     var agyStr = '<span title="' + escapeHtml(full) + '">' + escapeHtml(shortAgyModel(full)) + '</span>';
     if (fellBack) {
       agyStr += ' <span class="badge model-fallback" title="앞 모델이 한도 · 과부하로 막혀 맨 마지막 대안(3.8 Flash)으로 처리했습니다. 결과를 더 꼼꼼히 확인하세요.">3.8 대체</span>';
     }
-    if (!claudeModel) return agyStr;
-    var cShort = escapeHtml(shortClaudeModel(claudeModel) + (claudeEffort ? " (" + String(claudeEffort).toLowerCase() + ")" : ""));
-    var cTitle = "이 위임을 보낸 Claude 모델: " + claudeModel + (claudeEffort ? " (effort " + claudeEffort + ")" : "");
-    return '<span class="dim" title="' + escapeHtml(cTitle) + '">' + cShort + ' → </span>' + agyStr;
+    var chainStr = "";
+    if (isOk !== false && triedModels) {
+      var rawChain = String(triedModels).split("->").map(function (s) { return s.trim(); }).filter(Boolean);
+      if (rawChain.length > 1) {
+        var usedIdx = rawChain.indexOf(full);
+        if (usedIdx < 0) {
+          var shortFull = shortAgyModel(full);
+          for (var ci = 0; ci < rawChain.length; ci++) {
+            if (shortAgyModel(rawChain[ci]) === shortFull) { usedIdx = ci; break; }
+          }
+        }
+        var failedList = (usedIdx >= 0) ? rawChain.slice(0, usedIdx) : rawChain.slice(0, -1);
+        chainStr = failedList.map(function (m) {
+          var title = "한도 · 과부하로 실패해 다음 모델로 넘어갔습니다: " + m;
+          return '<span class="agy-failed" title="' + escapeHtml(title) + '">' + escapeHtml(shortAgyModel(m)) + ' ✕</span> → ';
+        }).join("");
+      }
+    }
+    var aModel = subAgent && subAgent.model ? String(subAgent.model) : "";
+    if (!claudeModel && !aModel) return chainStr + agyStr;
+    var prefix = "";
+    if (claudeModel) {
+      var cShort = escapeHtml(shortClaudeModel(claudeModel) + (claudeEffort ? " (" + String(claudeEffort).toLowerCase() + ")" : ""));
+      var cTitle = "이 위임을 보낸 Claude 모델: " + claudeModel + (claudeEffort ? " (effort " + claudeEffort + ")" : "");
+      prefix += '<span class="dim" title="' + escapeHtml(cTitle) + '">' + cShort + (aModel ? ' › ' : ' → ') + '</span>';
+    }
+    if (aModel) {
+      var aEffort = subAgent.effort ? String(subAgent.effort) : "";
+      var aType = subAgent.type ? String(subAgent.type) : "";
+      var aDesc = subAgent.desc ? String(subAgent.desc) : "";
+      var aShort = escapeHtml(shortClaudeModel(aModel) + (aEffort ? " (" + aEffort.toLowerCase() + ")" : ""));
+      var aParts = [aModel + (aEffort ? " (effort " + aEffort + ")" : "")];
+      if (aType) aParts.push(aType);
+      if (aDesc) aParts.push(aDesc);
+      var aTitle = "위임을 보낸 서브에이전트: " + aParts.join(" · ");
+      prefix += '<span class="dim" title="' + escapeHtml(aTitle) + '">서브 ' + aShort + ' → </span>';
+    }
+    return prefix + chainStr + agyStr;
   }
 
-  function buildCardModelMeta(agyModel, claudeModel, claudeEffort, fellBack) {
+  function buildCardModelMeta(agyModel, claudeModel, claudeEffort, fellBack, subAgent, triedModels, isOk) {
     var item = labeledMeta("", "", "model", "모델");
     var mv = item.querySelector(".mv");
     if (mv) {
-      mv.innerHTML = cardModelHtml(agyModel, claudeModel, claudeEffort, fellBack);
+      mv.innerHTML = cardModelHtml(agyModel, claudeModel, claudeEffort, fellBack, subAgent, triedModels, isOk);
     }
     return item;
   }
@@ -257,143 +293,6 @@
   }
 
   function pad2(n) { return (n < 10 ? "0" : "") + n; }
-
-  // 작업을 직접 수행하는 Gemini(agy)가 과거 기록을 보지 않고 해당 프롬프트의 양·난이도·복잡도만 분석해
-  // 첫 응답에 남긴 예상 실행 시간(초)을 읽는다. 아직 산정 전이거나 없으면 null.
-  function resolveTaskEtaSec(item) {
-    if (!item) return null;
-    var raw = item.estimated_sec != null && item.estimated_sec !== ""
-      ? item.estimated_sec
-      : (item.progress && item.progress.estimated_sec != null ? item.progress.estimated_sec : null);
-    if (raw == null || raw === "") return null;
-    var v = Number(raw);
-    return (isFinite(v) && v > 0) ? Math.round(v) : null;
-  }
-
-  // 진행 중 카드의 예정 위상: 예정 시간(estSec) 안이면 {over:false, sec:남은 시간}, 넘으면 {over:true, sec:넘긴 시간}.
-  function etaPhase(startMs, estSec, nowMs) {
-    var el = (nowMs - startMs) / 1000;
-    return el < estSec ? { over: false, sec: estSec - el } : { over: true, sec: el - estSec };
-  }
-
-  // 진행 중 카드의 예상 항목을 지금 시각으로 다시 그린다. 예정 시간은 산정 구간 동안 진행률로 보정한 값이다.
-  // 끝난 카드와 같은 모양 "예상 [처음 예정 ±차이]" 이고 차이만 강조한다.
-  //  - 예정 시간 안: "[12분 28초 −6분 40초]" — 남은 시간(초록)이 줄어든다
-  //  - 넘으면: "[12분 28초 +3분 05초]" — 넘긴 시간(주황)이 늘어난다
-  function paintEta(el, nowMs) {
-    var start = Number(el.getAttribute("data-start"));
-    var initMed = Number(el.getAttribute("data-init-med")) || Number(el.getAttribute("data-med"));
-    var ph = etaPhase(start, initMed, nowMs);
-    var host = el.querySelector(".mv") || el;
-    var lab = el.querySelector(".ml");
-    el.classList.remove("eta-over");
-    if (lab) lab.textContent = "예상";
-    el.classList.add("eta-done");
-    host.textContent = "";
-    host.appendChild(document.createTextNode("[" + formatDuration(initMed) + " "));
-    var val = document.createElement("strong");
-    val.className = "eta-done-val " + (ph.over ? "over" : "under");
-    val.textContent = (ph.over ? "+" : "−") + formatDuration(ph.sec);
-    host.appendChild(val);
-    host.appendChild(document.createTextNode("]"));
-  }
-
-  // 끝난 카드: 실제 실행 시간(actualSec)을 예상 시간(estSec)과 비교한다. 5초 미만 차이는 표시하지 않는다(null).
-  // 예상보다 길면 {over:true, label:"예상 초과", text:"+14분 20초"}, 짧으면 {over:false, label:"예상 미만", text:"−2분 05초"}.
-  function runVsEstimate(actualSec, estSec) {
-    var d = actualSec - estSec;
-    if (!isFinite(d) || !(estSec > 0) || Math.abs(d) < 5) return null;
-    return d > 0 ? { over: true, label: "예상 초과", text: "+" + formatDuration(d) } : { over: false, label: "예상 미만", text: "−" + formatDuration(-d) };
-  }
-  // 진행 중에 이 브라우저가 기억해 둔 예정 시간(초). 없으면 null(읽기만 하고 새로 저장하지 않는다).
-  function etaStoredMed(taskId) {
-    if (!taskId) return null;
-    try {
-      var v = Number(window.localStorage.getItem("samjil-eta-v2:" + taskId));
-      return isFinite(v) && v > 0 ? v : null;
-    } catch (e) { return null; }
-  }
-
-  // 처음 계산한 완료 예정(initEnd)과 지금 계산한 완료 예정(liveEnd)의 차이. 5초 미만이면 보이지 않는다(null).
-  // 늦어지면 {up:true, text:"▲ 3분 12초"}, 당겨지면 {up:false, text:"▼ 1분 05초"}.
-  function etaDelta(initEndMs, liveEndMs) {
-    var d = (liveEndMs - initEndMs) / 1000;
-    if (!isFinite(d) || Math.abs(d) < 5) return null;
-    return { up: d > 0, text: (d > 0 ? "▲ " : "▼ ") + formatDuration(Math.abs(d)) };
-  }
-  // Gemini(agy)가 산정한 예상 시간(초)을 브라우저에 기억해 두고 유지한다.
-  function etaInitialMed(taskId, medNow) {
-    if (!taskId) return Math.round(medNow);
-    var key = "samjil-eta-v2:" + taskId;
-    var roundedNow = Math.round(medNow);
-    try {
-      var v = Number(window.localStorage.getItem(key));
-      if (isFinite(v) && v > 0) return v;
-      window.localStorage.setItem(key, String(roundedNow));
-    } catch (e) {}
-    return roundedNow;
-  }
-
-  // 차이 항목의 글자·색·설명을 지금 시각 기준으로 다시 정한다. 차이가 없으면 숨긴다.
-  function paintEtaDelta(el, nowMs) {
-    var start = Number(el.getAttribute("data-start")), med = Number(el.getAttribute("data-med"));
-    var initEnd = start + Number(el.getAttribute("data-init-med")) * 1000;
-    var liveEnd = start + med * 1000;
-    // 예정 시간을 넘긴 뒤에는 "[예정 +넘긴 시간]" 이 대신 말해 주므로 차이 항목은 숨긴다
-    var dl = nowMs >= initEnd ? null : etaDelta(initEnd, liveEnd);
-    if (!dl) { el.hidden = true; el.textContent = ""; return; }
-    var hm = function (ms) { var d = new Date(ms); return pad2(d.getHours()) + ":" + pad2(d.getMinutes()); };
-    el.hidden = false;
-    el.textContent = dl.text;
-    el.classList.toggle("up", dl.up);
-    el.classList.toggle("down", !dl.up);
-    el.title = "처음 예상 " + hm(initEnd) + " → 지금 예상 " + hm(liveEnd) + (dl.up ? ": 처음 예상보다 늦어지고 있습니다." : ": 처음 예상보다 빨라졌습니다.");
-  }
-
-  function computePendingEta(p, startMs, nowMs) {
-    var estSec = resolveTaskEtaSec(p);
-    if (!estSec) return null;
-    var initMed = etaInitialMed(p.task_id || "", estSec);
-    return {
-      est: estSec,
-      initMed: initMed,
-      title: "작업 수행 모델(Gemini)이 이 프롬프트의 분량·난이도·복잡도를 분석해 산정한 예상 시간: " + formatDuration(initMed) + "."
-    };
-  }
-
-  function updateLiveEtaElements() {
-    var items = document.querySelectorAll(".live-eta[data-task-id]");
-    if (!items || !items.length) return;
-    var nowMs = Date.now();
-    var byId = {};
-    (pendingItems || []).forEach(function (p) { if (p && p.task_id) byId[String(p.task_id)] = p; });
-    for (var i = 0; i < items.length; i++) {
-      var etaEl = items[i];
-      var tid = etaEl.getAttribute("data-task-id");
-      var p = tid ? byId[tid] : null;
-      if (!p || p.state !== "processing") continue;
-      var startMs = Number(etaEl.getAttribute("data-start"));
-      if (!isFinite(startMs) || startMs <= 0) continue;
-      var info = computePendingEta(p, startMs, nowMs);
-      if (!info) continue;
-      etaEl.setAttribute("data-med", String(info.est));
-      etaEl.setAttribute("data-init-med", String(info.initMed));
-      etaEl.title = info.title;
-      paintEta(etaEl, nowMs);
-
-      var parent = etaEl.parentNode;
-      if (parent) {
-        var deltas = parent.querySelectorAll(".live-eta-delta[data-task-id]");
-        for (var k = 0; k < deltas.length; k++) {
-          if (deltas[k].getAttribute("data-task-id") === tid) {
-            deltas[k].setAttribute("data-med", String(info.est));
-            deltas[k].setAttribute("data-init-med", String(info.initMed));
-            paintEtaDelta(deltas[k], nowMs);
-          }
-        }
-      }
-    }
-  }
 
   // 오늘이면 "14:05", 아니면 "09-22"
   function formatClock(dateStr) {
@@ -3046,11 +2945,6 @@
       var pfx = els2[i].getAttribute("data-label-prefix") || "";
       (els2[i].querySelector(".mv") || els2[i]).textContent = pfx + formatDuration((Date.now() - Number(els2[i].getAttribute("data-start"))) / 1000);
     }
-    updateLiveEtaElements();
-    var etas = document.querySelectorAll(".live-eta[data-start]:not([data-task-id])");
-    for (var e = 0; e < etas.length; e++) { paintEta(etas[e], Date.now()); }
-    var deltas = document.querySelectorAll(".live-eta-delta[data-start]:not([data-task-id])");
-    for (var q = 0; q < deltas.length; q++) { paintEtaDelta(deltas[q], Date.now()); }
     var idles = document.querySelectorAll(".pg-idle[data-ms]");
     for (var j = 0; j < idles.length; j++) {
       var idleSec = (Date.now() - Number(idles[j].getAttribute("data-ms"))) / 1000;
@@ -3973,16 +3867,43 @@
     var text = usageComboText(r);
     var cut = text.indexOf(" → ");
     if (cut < 0) return escapeHtml(text);
-    return '<span class="usage-model-line">' + escapeHtml(text.slice(0, cut)) + '</span>' +
-      '<span class="usage-model-line usage-model-agy">→ ' + escapeHtml(text.slice(cut + 3)) + '</span>';
+    var first = text.slice(0, cut);
+    var firstHtml = escapeHtml(first);
+    if (r.agent_label) {
+      var subCut = first.indexOf(" › 서브 ");
+      if (subCut >= 0) {
+        var subTitle = "위임을 보낸 서브에이전트: " + (r.agent_model || r.agent_label) + (r.agent_effort ? " (effort " + r.agent_effort + ")" : "");
+        firstHtml = escapeHtml(first.slice(0, subCut)) +
+          ' <span class="usage-model-sub" title="' + escapeHtml(subTitle) + '">' + escapeHtml(first.slice(subCut + 1)) + '</span>';
+      }
+    }
+    var failed = (Array.isArray(r.agy_failed) ? r.agy_failed : (r.agy_failed ? [r.agy_failed] : [])).map(function (m) { return usageAgyShort(m); }).filter(Boolean);
+    var agyHtml = "";
+    if (failed.length) {
+      var failedHtml = failed.map(function (m) {
+        var title = "한도 · 과부하로 실패해 다음 모델로 넘어갔습니다: " + m;
+        return '<span class="agy-failed" title="' + escapeHtml(title) + '">' + escapeHtml(m) + ' ✕</span>';
+      }).join(" → ");
+      var agy = String(r.agy_models || "").split(",").map(function (m) { return usageAgyShort(m); }).filter(Boolean);
+      var agyPart = agy.length ? (agy.length > 2 ? agy[0] + " 외 " + (agy.length - 1) : agy.join(", ")) : "?";
+      agyHtml = '→ ' + failedHtml + ' → ' + escapeHtml(agyPart);
+    } else {
+      agyHtml = '→ ' + escapeHtml(text.slice(cut + 3));
+    }
+    return '<span class="usage-model-line">' + firstHtml + '</span>' +
+      '<span class="usage-model-line usage-model-agy">' + agyHtml + '</span>';
   }
   function usageComboText(r) {
     // Claude 모델은 노력 단계까지("opus-5-5 (high)"). 예전 기록처럼 노력을 모르면 모델만.
     var claude = r.claude_label || r.claude_model || String(r.combo || "").split(" → ")[0] || "?";
     if (r.mode !== "delegate") return claude;
+    if (r.agent_label && claude.indexOf(" › 서브 ") < 0) claude += " › 서브 " + r.agent_label;
     var agy = String(r.agy_models || "").split(",").map(function (m) { return usageAgyShort(m); }).filter(Boolean);
-    if (!agy.length) return claude + " → ?";
-    return claude + " → " + (agy.length > 2 ? agy[0] + " 외 " + (agy.length - 1) : agy.join(", "));
+    var failed = (Array.isArray(r.agy_failed) ? r.agy_failed : (r.agy_failed ? [r.agy_failed] : [])).map(function (m) { return usageAgyShort(m); }).filter(Boolean);
+    var failedPart = failed.length ? failed.map(function (m) { return m + " ✕"; }).join(" → ") + " → " : "";
+    if (!agy.length) return claude + " → " + (failedPart ? failedPart + "?" : "?");
+    var agyPart = (agy.length > 2 ? agy[0] + " 외 " + (agy.length - 1) : agy.join(", "));
+    return claude + " → " + failedPart + agyPart;
   }
 
   // 질문 행의 열고 닫음: 5초마다 표를 다시 그려도 펼친 질문은 펼친 채로 남게 키(세션 + 질문 시각)로 기억한다.
@@ -4012,12 +3933,40 @@
     (r.tasks || []).forEach(function (t) { if (t && t.id) byId[t.id] = t; });
     var chips = ids.map(function (id, i) {
       var t = byId[id] || {};
-      var parts = ["작업 " + (i + 1)];
-      if (t.model) parts.push(usageAgyShort(t.model));
-      parts.push(usageTaskStatusLabel(t.status));
-      if (t.sec !== null && t.sec !== undefined) parts.push(usageDur(t.sec));
+      var numPart = escapeHtml("작업 " + (i + 1));
+      var modelPart = "";
+      if (t.tried && String(t.tried).indexOf("->") >= 0 && t.status === "OK") {
+        var rawChain = String(t.tried).split("->").map(function (s) { return s.trim(); }).filter(Boolean);
+        var usedIdx = t.model ? rawChain.indexOf(t.model) : -1;
+        if (usedIdx < 0 && t.model) {
+          var shortModel = usageAgyShort(t.model);
+          for (var ci = 0; ci < rawChain.length; ci++) {
+            if (usageAgyShort(rawChain[ci]) === shortModel) { usedIdx = ci; break; }
+          }
+        }
+        var failedList = (usedIdx >= 0) ? rawChain.slice(0, usedIdx) : rawChain.slice(0, -1);
+        var usedModel = (usedIdx >= 0) ? rawChain[usedIdx] : (t.model || rawChain[rawChain.length - 1]);
+        if (failedList.length) {
+          var failedHtml = failedList.map(function (m) {
+            var title = "한도 · 과부하로 실패해 다음 모델로 넘어갔습니다: " + m;
+            return '<span class="agy-failed" title="' + escapeHtml(title) + '">' + escapeHtml(usageAgyShort(m)) + ' ✕</span>';
+          }).join(" → ");
+          modelPart = failedHtml + " → " + escapeHtml(usageAgyShort(usedModel));
+        } else if (t.model) {
+          modelPart = escapeHtml(usageAgyShort(t.model));
+        }
+      } else if (t.model) {
+        modelPart = escapeHtml(usageAgyShort(t.model));
+      }
+      var statusPart = escapeHtml(usageTaskStatusLabel(t.status));
+      var durPart = (t.sec !== null && t.sec !== undefined) ? escapeHtml(usageDur(t.sec)) : "";
+      var parts = [numPart];
+      if (modelPart) parts.push(modelPart);
+      parts.push(statusPart);
+      if (durPart) parts.push(durPart);
+
       var cls = "usage-chip" + (t.status === "OK" ? "" : (t.status ? " usage-chip-bad" : " usage-chip-wait"));
-      return '<a class="' + cls + '" href="#/qa?task=' + encodeURIComponent(id) + '" title="' + escapeHtml(id + (t.model ? " · " + t.model : "")) + '">' + escapeHtml(parts.join(" · ")) + '</a>';
+      return '<a class="' + cls + '" href="#/qa?task=' + encodeURIComponent(id) + '" title="' + escapeHtml(id + (t.model ? " · " + t.model : "")) + '">' + parts.join(" · ") + '</a>';
     }).join("");
     return '<tr class="usage-detail" data-row="' + escapeHtml(usageRowKey(r)) + '"' + (open ? "" : " hidden") + '><td colspan="8"><div class="usage-chips">' + chips + '</div></td></tr>';
   }
@@ -5357,6 +5306,56 @@
     return s;
   }
 
+  function metaExpandKey(dataKey, taskId) {
+    return taskId ? String(taskId) : String(dataKey || "");
+  }
+
+  function buildModelRow(agyModel, claudeModel, claudeEffort, fellBack, subAgent, triedModels, isOk) {
+    if (!agyModel) return null;
+    var row = document.createElement("div");
+    row.className = "meta model-meta";
+    row.appendChild(metaHead("모델"));
+    row.appendChild(buildCardModelMeta(agyModel, claudeModel, claudeEffort, fellBack, subAgent, triedModels, isOk));
+    return row;
+  }
+
+  function syncMetaToggle(btn, open) {
+    var label = open ? "토큰 · 식별 숨기기" : "토큰 · 식별 보기";
+    btn.setAttribute("aria-expanded", open ? "true" : "false");
+    btn.title = label;
+    btn.setAttribute("aria-label", label);
+  }
+
+  // 토큰 · 식별 줄을 접이식 묶음(.meta-more)으로 감싸 카드에 붙이고, 실행 줄에 넣을 펼침 버튼을 돌려준다.
+  function attachMetaMore(card, dataKey, taskId, rows) {
+    var more = document.createElement("div");
+    more.className = "meta-more";
+    var moreId = "meta-more-" + (++metaMoreSeq);
+    more.id = moreId;
+    for (var i = 0; i < rows.length; i++) {
+      if (rows[i]) more.appendChild(rows[i]);
+    }
+    var expandKey = metaExpandKey(dataKey, taskId);
+    var isOpen = Boolean(expandedMeta[expandKey]);
+    more.hidden = !isOpen;
+    card.appendChild(more);
+
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "meta-toggle";
+    btn.setAttribute("aria-controls", moreId);
+    btn.innerHTML = '<svg class="meta-toggle-chevron" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 2.5L8 6l-3.5 3.5"/></svg>';
+    syncMetaToggle(btn, isOpen);
+    btn.onclick = function () {
+      var next = more.hidden;
+      more.hidden = !next;
+      if (next) { expandedMeta[expandKey] = true; }
+      else { delete expandedMeta[expandKey]; }
+      syncMetaToggle(btn, next);
+    };
+    return btn;
+  }
+
   // 위임 한 건의 토큰 줄. 기록에 값이 있는 항목만 보여 주고, 하나도 없으면 줄 자체를 만들지 않는다.
   //   총 토큰 = 입력 + 출력(출력에는 사고 토큰이 이미 들어 있다. 그래서 따로 더하지 않고 "응답 · 사고"로 나눠 보여 준다).
   //   입력의 "(캐시 X)" 와 "현재 컨텍스트"(그 호출의 마지막 턴이 보낸 입력 크기)는 위임 기록 DB 에 없어 서버가 대화 기록에서 계산해 준다(받은 뒤에 채운다).
@@ -5902,11 +5901,68 @@
     return parts.join(" · ");
   }
 
-  // 과정 목록(<ol>). 단계 번호 · 시각 · 한글 도구 설명 · 실제 대상 · 영어 라벨. 마우스를 올리면 생각까지 보인다.
-  function buildProcessRowsHtml(steps, cwd) {
+  // 과정 목록(<ol>). 제목 줄(번호 · 시각 · 도구 · 접기/펼치기 · 대상 · 라벨)은 항상 보이고,
+  // 실제 작업 내용(body)·읽기 설명·설명/생각(say/think)은 기본으로 접혀 있다가 ▸ 버튼으로 펼친다.
+  function buildProcessRowsHtml(steps, cwd, opts) {
     var procSteps = groupProcessSteps(steps);
+    var openMap = (opts && opts.openMap) ? opts.openMap : null;
+    var keyPrefix = (opts && opts.keyPrefix) ? String(opts.keyPrefix) : "";
     var hasSkipped = false;
     var totalCalls = 0;
+    var CHEVRON_SVG = '<svg class="proc-toggle-chevron" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.5 2.5L8 6l-3.5 3.5"/></svg>';
+
+    function renderStepBody(body) {
+      if (!body || typeof body !== "object") return "";
+      var parts = [];
+      if (body.desc) {
+        parts.push('<div class="proc-body-desc">' + escapeHtml(String(body.desc)) + '</div>');
+      }
+      if (Array.isArray(body.edits) && body.edits.length) {
+        body.edits.forEach(function (ed) {
+          if (!ed || typeof ed !== "object") return;
+          var cap = "";
+          if (ed.from != null && ed.to != null) {
+            cap = (ed.from === ed.to) ? (ed.from + "행") : (ed.from + "~" + ed.to + "행");
+          } else if (ed.from != null) {
+            cap = ed.from + "행~";
+          } else if (ed.to != null) {
+            cap = "~" + ed.to + "행";
+          }
+          var lines = [];
+          if (ed.old != null && String(ed.old) !== "") {
+            String(ed.old).split(/\r?\n/).forEach(function (ln) {
+              lines.push('<span class="proc-diff-del">- ' + escapeHtml(ln) + '</span>');
+            });
+          }
+          if (ed.new != null && String(ed.new) !== "") {
+            String(ed.new).split(/\r?\n/).forEach(function (ln) {
+              lines.push('<span class="proc-diff-add">+ ' + escapeHtml(ln) + '</span>');
+            });
+          }
+          if (lines.length || cap) {
+            parts.push('<div class="proc-diff">' +
+              (cap ? '<div class="proc-diff-cap">' + escapeHtml(cap) + '</div>' : '') +
+              (lines.length ? '<pre class="proc-diff-code">' + lines.join("\n") + '</pre>' : '') +
+              '</div>');
+          }
+        });
+      }
+      if (body.text != null && String(body.text) !== "") {
+        parts.push('<pre class="proc-body-text">' + escapeHtml(String(body.text)) + '</pre>');
+      }
+      if (Array.isArray(body.args) && body.args.length) {
+        var argRows = [];
+        body.args.forEach(function (pair) {
+          if (!Array.isArray(pair) || pair.length < 2) return;
+          argRows.push('<div class="proc-arg"><dt>' + escapeHtml(String(pair[0])) + '</dt><dd>' + escapeHtml(String(pair[1])) + '</dd></div>');
+        });
+        if (argRows.length) {
+          parts.push('<dl class="proc-args">' + argRows.join("") + '</dl>');
+        }
+      }
+      return parts.join("");
+    }
+
     var rows = procSteps.map(function (st, idx) {
       if (st && st.skipped) {
         hasSkipped = true;
@@ -5930,15 +5986,30 @@
       }
       var readDesc = describeReadStep(st, procSteps, idx);
       var readDescHtml = readDesc ? '<div class="proc-read-desc">' + escapeHtml(readDesc) + '</div>' : "";
+      var narrHtml = buildNarrationHtml("proc", st.say, st.think);
+      var bodyHtml = renderStepBody(st.body);
+      var innerBody = readDescHtml + narrHtml + bodyHtml;
+      var hasBody = innerBody.length > 0;
+      var rowKey = keyPrefix + "|" + String(st.n != null ? st.n : "") + "|" + String(idx);
+      var bodyId = "proc-body-" + idx;
+      var isOpen = Boolean(hasBody && openMap && openMap[rowKey]);
+      var toggleHtml = hasBody
+        ? '<button type="button" class="proc-toggle" aria-expanded="' + (isOpen ? "true" : "false") +
+          '" aria-controls="' + bodyId + '" data-proc-row="' + escapeHtml(rowKey) +
+          '" title="' + (isOpen ? "내용 숨기기" : "내용 보기") +
+          '" aria-label="' + (isOpen ? "내용 숨기기" : "내용 보기") + '">' + CHEVRON_SVG + '</button>'
+        : "";
+      var bodyWrap = hasBody
+        ? ' <div class="proc-body" id="' + bodyId + '"' + (isOpen ? '' : ' hidden') + '>' + innerBody + '</div>'
+        : "";
       return '<li class="proc-row"' + (tip.length ? ' title="' + escapeHtml(tip.join("\n")) + '"' : '') + '>' +
         '<span class="proc-n">' + escapeHtml(String(st.n)) + '</span>' +
         '<span class="proc-at">' + escapeHtml(st.at || "") + '</span>' +
-        '<span class="proc-tool">' + escapeHtml(tool) + (st.bg ? ' (백그라운드)' : '') + '</span>' +
+        '<span class="proc-tool">' + escapeHtml(tool) + (st.bg ? ' (백그라운드)' : '') + toggleHtml + '</span>' +
         '<span class="proc-text">' +
           (st.detail ? '<span class="proc-detail">' + escapeHtml(shown) + '</span>' : '') +
           (st.label ? ' <span class="proc-label">' + (st.detail ? '· ' : '') + escapeHtml(st.label) + '</span>' : '') +
-          readDescHtml +
-          buildNarrationHtml("proc", st.say, st.think) +
+          bodyWrap +
         '</span></li>';
     });
     var note = (hasSkipped || totalCalls > 1500 || (steps && steps.length > 1500))
@@ -6084,7 +6155,6 @@
         if (lp.steps.length !== before || (res && res.reset)) {
           renderProcessDialog();
           updateProcessButtons();
-          updateLiveEtaElements();
         }
       })
       .catch(function () {})
@@ -6520,6 +6590,21 @@
   var procDialogKey = "";   // 지금 열려 있는 과정 창의 카드 키("" 이면 닫힘)
   var procDialogSteps = null;  // 지금 창에 보이는 단계 목록(브라우저 번역 버튼이 쓴다)
   var procDialogLast = "";  // 마지막으로 그린 내용(같으면 다시 그리지 않아 스크롤과 선택이 유지된다)
+  var procExpandedRows = {};  // 과정 창에서 사용자가 펼친 행 키(convId|taskId + "|" + n + "|" + idx -> true)
+
+  function syncProcExpandAllBtn(dlg) {
+    if (!dlg) return;
+    var allBtn = dlg.querySelector(".proc-expand-all");
+    if (!allBtn) return;
+    var toggles = dlg.querySelectorAll(".proc-dlg-body .proc-toggle");
+    if (!toggles.length) return;
+    var allOpen = true;
+    for (var i = 0; i < toggles.length; i++) {
+      if (toggles[i].getAttribute("aria-expanded") !== "true") { allOpen = false; break; }
+    }
+    allBtn.textContent = allOpen ? "모두 접기" : "모두 펼치기";
+    allBtn.setAttribute("data-open", allOpen ? "true" : "false");
+  }
 
   function ensureProcessDialog() {
     var dlg = document.getElementById("process-dialog");
@@ -6545,6 +6630,46 @@
     ].join("");
     dlg.addEventListener("click", function (e) {
       if (e.target === dlg || (e.target.classList && e.target.classList.contains("proc-dlg-close"))) { dlg.close(); return; }
+      var toggle = e.target.closest ? e.target.closest(".proc-toggle") : null;
+      if (toggle) {
+        var rowKey = toggle.getAttribute("data-proc-row") || "";
+        var ctrlId = toggle.getAttribute("aria-controls") || "";
+        var bodyEl = ctrlId ? document.getElementById(ctrlId) : null;
+        var nextOpen = toggle.getAttribute("aria-expanded") !== "true";
+        if (rowKey) {
+          if (nextOpen) procExpandedRows[rowKey] = true;
+          else delete procExpandedRows[rowKey];
+        }
+        toggle.setAttribute("aria-expanded", nextOpen ? "true" : "false");
+        toggle.title = nextOpen ? "내용 숨기기" : "내용 보기";
+        toggle.setAttribute("aria-label", nextOpen ? "내용 숨기기" : "내용 보기");
+        if (bodyEl) bodyEl.hidden = !nextOpen;
+        procDialogLast = "";
+        syncProcExpandAllBtn(dlg);
+        return;
+      }
+      var expandAll = e.target.closest ? e.target.closest(".proc-expand-all") : null;
+      if (expandAll) {
+        var wantOpen = expandAll.getAttribute("data-open") !== "true";
+        var toggles = dlg.querySelectorAll(".proc-dlg-body .proc-toggle");
+        for (var ti = 0; ti < toggles.length; ti++) {
+          var tb = toggles[ti];
+          var rk = tb.getAttribute("data-proc-row") || "";
+          var cid = tb.getAttribute("aria-controls") || "";
+          var bel = cid ? document.getElementById(cid) : null;
+          if (rk) {
+            if (wantOpen) procExpandedRows[rk] = true;
+            else delete procExpandedRows[rk];
+          }
+          tb.setAttribute("aria-expanded", wantOpen ? "true" : "false");
+          tb.title = wantOpen ? "내용 숨기기" : "내용 보기";
+          tb.setAttribute("aria-label", wantOpen ? "내용 숨기기" : "내용 보기");
+          if (bel) bel.hidden = !wantOpen;
+        }
+        procDialogLast = "";
+        syncProcExpandAllBtn(dlg);
+        return;
+      }
       var retry = e.target.closest ? e.target.closest(".proc-retry") : null;
       if (retry) { loadProcessFor(retry.getAttribute("data-conv")); return; }
       var trBtn = e.target.closest ? e.target.closest(".proc-tr-btn") : null;
@@ -6576,11 +6701,12 @@
     var convId = src.opts.convId || "";
     procDialogConv = convId;
     procDialogSince = src.opts.since || "";
+    var rowKeyPrefix = convId || src.taskId || procDialogKey || "";
     var html;
     if (st.steps && st.steps.length) {
       procDialogSteps = st.steps;
       var viewItems = procTrItemsFor(convId, procTrViewOf(convId));
-      html = buildProcessRowsHtml(viewItems ? applyProcessTranslation(st.steps, viewItems) : st.steps, src.opts.cwd);
+      html = buildProcessRowsHtml(viewItems ? applyProcessTranslation(st.steps, viewItems) : st.steps, src.opts.cwd, { openMap: procExpandedRows, keyPrefix: rowKeyPrefix });
     } else if (st.steps) {
       html = '<p class="proc-empty">' + escapeHtml(st.summary) + '.</p>';
     } else {
@@ -6608,6 +6734,11 @@
     healthEl.hidden = !dlgHealth;
 
     var toolsHtml = buildTranslateToolsHtml(convId, st.steps);
+    if (html.indexOf('class="proc-toggle"') >= 0) {
+      var allExpanded = html.indexOf('class="proc-toggle" aria-expanded="false"') === -1;
+      var expandAllBtn = '<button type="button" class="proc-tr-btn proc-expand-all" data-open="' + (allExpanded ? "true" : "false") + '">' + (allExpanded ? "모두 접기" : "모두 펼치기") + '</button>';
+      toolsHtml = toolsHtml ? (toolsHtml + expandAllBtn) : expandAllBtn;
+    }
     var head = [src.taskId, st.summary, src.opts.live ? "live" : "", cwdListOf(src.opts.cwd).join("|"), toolsHtml].join("\u0001");
     if (procDialogLast === head + "\u0002" + html) return;
     procDialogLast = head + "\u0002" + html;
@@ -6674,33 +6805,10 @@
 
     var modelName = recordModel(r) || null;
     var isSession = Boolean(r.session || r.session_id || r.model === "(session)");
-    if (modelName) { meta.appendChild(buildCardModelMeta(modelName, r.claude_model, r.claude_effort, isLastResortFallback(r))); }
+    var rAgent = r.agent_model ? { model: r.agent_model, effort: r.agent_effort, type: r.agent_type, desc: r.agent_desc } : null;
     if (r.elapsed_sec) {
       var elSec = Number(r.elapsed_sec);
       meta.appendChild(labeledMeta("소요", formatDuration(elSec), "elapsed", "실제 실행 시간: " + r.elapsed_sec + "초"));
-      // 예상과 비교: 작업을 수행한 Gemini가 프롬프트만으로 산정한 예상 시간(없으면 진행 중 저장값). 과거 기록 통계는 쓰지 않는다.
-      var estSec = resolveTaskEtaSec(r);
-      var estFrom = "작업 수행 모델(Gemini)이 프롬프트의 분량·난이도·복잡도를 분석해 산정한 예상 시간";
-      if (!estSec) {
-        estSec = etaStoredMed(r.task_id || "");
-        if (estSec) {
-          estFrom = "진행 중 Gemini가 산정해 둔 예상 시간";
-        }
-      }
-      var vs = estSec ? runVsEstimate(elSec, estSec) : null;
-      if (vs) {
-        // "[12분 28초 +27분 11초]": 예상 시간 뒤에 차이를 붙이고, 차이만 강조한다(초과 주황 / 미만 초록)
-        var etaDone = labeledMeta("예상", "", "eta-done",
-          "예상 " + formatDuration(estSec) + " / 실제 " + formatDuration(elSec) + " / " + vs.label + " " + vs.text + " (" + estFrom + ")");
-        var etaHost = etaDone.querySelector(".mv");
-        etaHost.appendChild(document.createTextNode("[" + formatDuration(estSec) + " "));
-        var etaVal = document.createElement("strong");
-        etaVal.className = "eta-done-val " + (vs.over ? "over" : "under");
-        etaVal.textContent = vs.text;
-        etaHost.appendChild(etaVal);
-        etaHost.appendChild(document.createTextNode("]"));
-        meta.appendChild(etaDone);
-      }
     }
     // 끝난 위임에도 접수부터 실행 시작까지 기다린 시간을 남긴다(진행·대기 중 카드의 "대기 N" 과 같은 모양).
     // 서버가 작업 ID 의 접수 시각으로 계산한 근사값이다.
@@ -6712,10 +6820,14 @@
     if (viaMcp(r)) { meta.appendChild(metaItem("MCP", "src-mcp", "위임 경로: Claude 가 antigravity MCP 로 직접 호출한 기록")); }
     card.appendChild(meta);
 
-    var tokenMeta = buildTokenMeta(r);
-    if (tokenMeta) card.appendChild(tokenMeta);
+    var modelRow = buildModelRow(modelName, r.claude_model, r.claude_effort, isLastResortFallback(r), rAgent, r.tried_models, isOk);
+    if (modelRow) card.appendChild(modelRow);
 
-    card.appendChild(buildSessionMeta(r.session, r.session_id, r.task_id));   // 식별 줄: 모든 카드에(세션이 없으면 "세션 없음")
+    var dataKey = card.getAttribute("data-key");
+    var metaToggleBtn = attachMetaMore(card, dataKey, r.task_id, [
+      buildTokenMeta(r),
+      buildSessionMeta(r.session, r.session_id, r.task_id)   // 식별 줄: 모든 카드에(세션이 없으면 "세션 없음")
+    ]);
 
     var dq = document.createElement("details");
     dq.className = "qa q";
@@ -6747,7 +6859,8 @@
     dq.appendChild(qb);
     card.appendChild(dq);
 
-    meta.appendChild(buildProcessButton(card.getAttribute("data-key"), recordProcessOpts(r, qImgInfo.cwds)));
+    meta.appendChild(metaToggleBtn);
+    meta.appendChild(buildProcessButton(dataKey, recordProcessOpts(r, qImgInfo.cwds)));
 
     var da = document.createElement("details");
     da.className = "qa a";
@@ -7129,7 +7242,7 @@
     if (p.task_id && (isProcessing || p.interrupted)) { stateBadge.setAttribute("data-health-task", p.task_id); }
     meta.appendChild(stateBadge);
 
-    if (p.model) { meta.appendChild(buildCardModelMeta(p.model, p.claude_model, p.claude_effort)); }
+    var pAgent = p.agent_model ? { model: p.agent_model, effort: p.agent_effort, type: p.agent_type, desc: p.agent_desc } : null;
 
     if (isProcessing) {
       var createdTime = parseLocalTime(p.created);
@@ -7143,25 +7256,6 @@
         live.setAttribute("data-start", String(startTime.getTime()));
         live.setAttribute("data-label-prefix", "");
         meta.appendChild(live);
-
-        // 완료 예정: 작업 진행률(단계·턴·수정 시점) + 같은 모델 최근 기록을 반영해 산정 구간(180초) 동안 지속 보정
-        var etaCtx = computePendingEta(p, startTime.getTime(), Date.now());
-        if (etaCtx) {
-          var etaItem = labeledMeta("예상", "", "eta live-eta", etaCtx.title);
-          etaItem.setAttribute("data-task-id", String(p.task_id || ""));
-          etaItem.setAttribute("data-start", String(startTime.getTime()));
-          etaItem.setAttribute("data-med", String(etaCtx.est));
-          etaItem.setAttribute("data-init-med", String(etaCtx.initMed));
-          paintEta(etaItem, Date.now());
-          meta.appendChild(etaItem);
-          var deltaItem = metaItem("", "eta-delta live-eta-delta", "");
-          deltaItem.setAttribute("data-task-id", String(p.task_id || ""));
-          deltaItem.setAttribute("data-start", String(startTime.getTime()));
-          deltaItem.setAttribute("data-med", String(etaCtx.est));
-          deltaItem.setAttribute("data-init-med", String(etaCtx.initMed));
-          paintEtaDelta(deltaItem, Date.now());
-          meta.appendChild(deltaItem);
-        }
       }
 
       // 2. 대기 시간 배지 (5초 이상 대기열에 있었던 경우 함께 표시)
@@ -7188,7 +7282,14 @@
 
     // 대기·진행 중인 작업은 모두 inbox 파일 위임(bridge)이라 경로를 따로 표시하지 않는다(MCP 호출은 끝난 뒤에 기록으로만 남는다).
     card.appendChild(meta);
-    card.appendChild(buildSessionMeta(p.session, p.session_id, p.task_id));   // 식별 줄: 모든 카드에(세션이 없으면 "세션 없음")
+
+    var modelRow = buildModelRow(p.model, p.claude_model, p.claude_effort, false, pAgent, p.tried_models, true);
+    if (modelRow) card.appendChild(modelRow);
+
+    var dataKey = card.getAttribute("data-key");
+    var metaToggleBtn = attachMetaMore(card, dataKey, p.task_id, [
+      buildSessionMeta(p.session, p.session_id, p.task_id)   // 식별 줄: 모든 카드에(세션이 없으면 "세션 없음")
+    ]);
 
     var dq = document.createElement("details");
     dq.className = "qa q";
@@ -7222,7 +7323,8 @@
     dq.appendChild(qb);
     card.appendChild(dq);
 
-    meta.appendChild(buildProcessButton(card.getAttribute("data-key"), pendingProcessOpts(p, effCwds)));
+    meta.appendChild(metaToggleBtn);
+    meta.appendChild(buildProcessButton(dataKey, pendingProcessOpts(p, effCwds)));
 
     var da = document.createElement("details");
     da.className = "qa a qa-pending-a";
@@ -7776,7 +7878,6 @@
         } else {
           updateQaHeader();
           renderProcessDialog();
-          updateLiveEtaElements();
         }
       } else if (currentNav === "handoff") {
         if (force || treeRes.changed || qaRes.changed) {   // qaRes: 새 위임 기록이 들어오면 회신 카드의 토큰 칩도 갱신

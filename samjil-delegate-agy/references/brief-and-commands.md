@@ -25,11 +25,11 @@ submit-task.ps1 -Poll <ID,...>  wait for results of submitted tasks
 submit-task.ps1 -WaitSeconds N  how long one call waits (default 170)
 submit-task.ps1 -MaxWaitSec N   same as -WaitSeconds, wins when given
 submit-task.ps1 -CancelOnTimeout  with -Poll: cancel tasks that are still not done when the wait time ends;
-                                without -MaxWaitSec it waits up to the task tier's limit (quick 3, build 8, build-hard 12, others 20 min)
+                                without -MaxWaitSec it waits up to the task tier's limit (quick 3, build 8, build-hard 12, others 20 min) and extends wait while active
 submit-task.ps1 -Cancel <ID,...>  cancel tasks now (queued: instruction file removed; running: worker process tree ended)
 ```
 
-Delegation uses one submit and one background wait: `-NoWait`, then `-Poll <ID> -CancelOnTimeout`. When the tier's limit passes the task is cancelled and you do the job yourself.
+Delegation uses one submit and one background wait: `-NoWait`, then `-Poll <ID> -CancelOnTimeout`. When the tier's limit passes, the poll checks activity, keeps waiting while agy is still making progress, and cancels only when there has been no progress for 5 minutes (or after the 2-hour hard cap; `===CANCELLED=== <ID>`, exit 4): do the job yourself.
 
 | Output | Exit | Meaning |
 |---|---|---|

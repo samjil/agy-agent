@@ -98,7 +98,7 @@ powershell.exe -NoProfile -File "$env:USERPROFILE\.samjil\delegate-agy\scripts\s
 EOF
 ```
 
-- 제출 직후 표준 오류에 `[단계] <tier> (<model>) · 대기 한도 <초>` 를 출력합니다. 기본으로 170초까지 기다리고, 안 끝나면 `===PENDING=== <ID> …` 로 진행 상태(경과·모델·마지막 단계)를 알려 줍니다. `-MaxWaitSec <초>` 는 기다리는 시간을 정하고, `-Poll <ID> -CancelOnTimeout` 을 `-MaxWaitSec` 없이 주면 해당 단계의 대기 한도까지 기다린 뒤 안 끝난 작업을 취소합니다(`===CANCELLED=== <ID>`, 종료 코드 4). 위임은 `-NoWait` 로 제출하고 백그라운드에서 `-Poll <ID> -CancelOnTimeout` 로 한 번만 기다리는 것이 규칙입니다(한도를 넘기면 취소하고 직접 처리).
+- 제출 직후 표준 오류에 `[단계] <tier> (<model>) · 대기 한도 <초>` 를 출력합니다. 기본으로 170초까지 기다리고, 안 끝나면 `===PENDING=== <ID> …` 로 진행 상태(경과·모델·마지막 단계)를 알려 줍니다. `-MaxWaitSec <초>` 는 기다리는 시간을 정하고, `-Poll <ID> -CancelOnTimeout` 을 `-MaxWaitSec` 없이 주면 작업 시작 기준 해당 단계의 대기 한도까지 기다린 뒤(진행 중이면 연장) 멈춘 작업을 취소합니다(`===CANCELLED=== <ID>`, 종료 코드 4). 위임은 `-NoWait` 로 제출하고 백그라운드에서 `-Poll <ID> -CancelOnTimeout` 로 한 번만 기다리는 것이 규칙입니다(한도가 지나도 진행 중이면 계속 기다리고, 5분간 진행이 없거나 2시간 절대 한도를 넘기면 취소하고 직접 처리).
 - `-Cancel <ID>` 는 작업을 바로 취소합니다: 대기 중이면 지시 파일을 치우고, 실행 중이면 작업자 프로세스 트리를 끝냅니다. 기록 상태는 `CANCELLED` 이고 뷰어 카드에 "취소"로 보입니다. 제출할 때 Claude 대화 컨텍스트가 약 20만 토큰을 넘으면(`AGY_CTX_SUBAGENT_THRESHOLD`) 위임 절차를 서브에이전트에 맡기라는 한 줄을 stderr 로 알립니다.
 - `-NoWait` 로 여러 개를 넣고 `-Poll id1,id2` 로 한 번에 기다릴 수 있습니다.
 - 종료 코드: 0 결과 있음 / 1 오류 / 2 진행 중 / 3 입력·환경 오류.

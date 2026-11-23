@@ -1,6 +1,23 @@
 ﻿# claude-transcript.ps1
 # Claude Code 대화 기록 파일(.jsonl) 끝부분을 읽어 최근 모델·effort·컨텍스트 토큰 크기를 가져옵니다.
 
+function Resolve-ClaudeTranscriptPath([string]$SessionId = "") {
+    if (-not $SessionId) { return $null }
+    try {
+        $cleaned = ([string]$SessionId) -replace '[^A-Za-z0-9_-]', ''
+        if ($cleaned) {
+            $claudeProjectsDir = Join-Path $env:USERPROFILE ".claude\projects"
+            if (Test-Path -LiteralPath $claudeProjectsDir) {
+                $matched = @(Resolve-Path (Join-Path $claudeProjectsDir "*\$cleaned.jsonl") -ErrorAction SilentlyContinue)
+                if ($matched.Count -gt 0) {
+                    return $matched[0].Path
+                }
+            }
+        }
+    } catch {}
+    return $null
+}
+
 function Get-ClaudeTranscriptLastUsage([string]$SessionId = "", [string]$TranscriptPath = "") {
     $transcriptFile = $null
     if ($TranscriptPath) {
@@ -10,18 +27,7 @@ function Get-ClaudeTranscriptLastUsage([string]$SessionId = "", [string]$Transcr
             $transcriptFile = $TranscriptPath
         }
     } elseif ($SessionId) {
-        try {
-            $cleaned = ([string]$SessionId) -replace '[^A-Za-z0-9_-]', ''
-            if ($cleaned) {
-                $claudeProjectsDir = Join-Path $env:USERPROFILE ".claude\projects"
-                if (Test-Path -LiteralPath $claudeProjectsDir) {
-                    $matched = @(Resolve-Path (Join-Path $claudeProjectsDir "*\$cleaned.jsonl") -ErrorAction SilentlyContinue)
-                    if ($matched.Count -gt 0) {
-                        $transcriptFile = $matched[0].Path
-                    }
-                }
-            }
-        } catch {}
+        $transcriptFile = Resolve-ClaudeTranscriptPath -SessionId $SessionId
     }
 
     if (-not $transcriptFile -or -not (Test-Path -LiteralPath $transcriptFile)) {
@@ -93,5 +99,129 @@ function Get-ClaudeTranscriptLastUsage([string]$SessionId = "", [string]$Transcr
     } catch {}
     }
 
+    return $null
+}
+
+# 본 세션 아래 subagents\agent-*.jsonl 을 훑어 지금 submit-task 를 호출 중인 서브에이전트를 찾는다.
+# tool_use 는 실행 전에 기록되고 tool_result 는 끝난 뒤에 기록되므로, 짝이 아직 없는 submit-task 호출(-Poll/-Cancel 제외)을 가진 파일이 제출자다.
+function Find-ClaudeSubmittingSubagent([string]$MainTranscriptPath = "", [int]$WindowSec = 120) {
+    try {
+        if (-not $MainTranscriptPath) { return $null }
+        $subDir = Join-Path ($MainTranscriptPath -replace '\.jsonl$', '') "subagents"
+        if (-not (Test-Path -LiteralPath $subDir -PathType Container)) { return $null }
+
+        $cutoff = (Get-Date).AddSeconds(-$WindowSec)
+        $candidates = @(Get-ChildItem -LiteralPath $subDir -Filter "agent-*.jsonl" -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.LastWriteTime -ge $cutoff } |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 8)
+
+        $tailBytes = 65536L
+        foreach ($cand in $candidates) {
+            $rawText = $null
+            try {
+                $fs = [System.IO.File]::Open($cand.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+                try {
+                    $len = $fs.Length
+                    $readBytes = [Math]::Min($len, $tailBytes)
+                    $offset = $len - $readBytes
+                    [void]$fs.Seek($offset, [System.IO.SeekOrigin]::Begin)
+                    $buf = New-Object byte[] $readBytes
+                    $readTotal = 0
+                    while ($readTotal -lt $readBytes) {
+                        $r = $fs.Read($buf, $readTotal, $readBytes - $readTotal)
+                        if ($r -le 0) { break }
+                        $readTotal += $r
+                    }
+                    $rawText = [System.Text.Encoding]::UTF8.GetString($buf, 0, $readTotal)
+                } finally {
+                    $fs.Dispose()
+                }
+            } catch {
+                continue
+            }
+
+            if (-not $rawText -or $rawText.IndexOf("submit-task", [System.StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
+
+            $pendingIds = New-Object System.Collections.Generic.List[string]
+            $lines = $rawText -split "[\r\n]+"
+            foreach ($ln in $lines) {
+                if (-not $ln) { continue }
+                if ($ln.IndexOf('"tool_use"', [System.StringComparison]::Ordinal) -lt 0) { continue }
+                if ($ln.IndexOf("submit-task", [System.StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
+
+                $parsed = $false
+                try {
+                    $obj = ConvertFrom-Json -InputObject $ln
+                    if ($null -ne $obj -and $null -ne $obj.message -and $null -ne $obj.message.content) {
+                        $parsed = $true
+                        foreach ($blk in @($obj.message.content)) {
+                            if ($null -eq $blk -or $blk.type -ne "tool_use") { continue }
+                            $tid = [string]$blk.id
+                            if (-not $tid -or $tid -notmatch '^toolu_') { continue }
+                            $cmd = ""
+                            if ($null -ne $blk.input -and $null -ne $blk.input.command) {
+                                $cmd = [string]$blk.input.command
+                            }
+                            if (-not $cmd -or $cmd.IndexOf("submit-task", [System.StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
+                            if ($cmd -match '(?i)submit-task[^\r\n]*-(?:Poll|Cancel)\b') { continue }
+                            [void]$pendingIds.Add($tid)
+                        }
+                    }
+                } catch {}
+
+                if (-not $parsed) {
+                    if ($ln -notmatch '(?i)-(?:Poll|Cancel)\b') {
+                        foreach ($m in [regex]::Matches($ln, '"id"\s*:\s*"(toolu_[^"]+)"')) {
+                            [void]$pendingIds.Add($m.Groups[1].Value)
+                        }
+                    }
+                }
+            }
+
+            if ($pendingIds.Count -eq 0) { continue }
+
+            $doneIds = @{}
+            foreach ($m in [regex]::Matches($rawText, '"tool_use_id"\s*:\s*"([^"]+)"')) {
+                $doneIds[$m.Groups[1].Value] = $true
+            }
+
+            $hasPending = $false
+            foreach ($tid in $pendingIds) {
+                if (-not $doneIds.ContainsKey($tid)) {
+                    $hasPending = $true
+                    break
+                }
+            }
+            if (-not $hasPending) { continue }
+
+            $agentId = $cand.BaseName -replace '^agent-', ''
+            $usage = Get-ClaudeTranscriptLastUsage -TranscriptPath $cand.FullName
+            $metaType = ""
+            $metaDesc = ""
+            $metaPath = Join-Path $subDir ($cand.BaseName + ".meta.json")
+            if (Test-Path -LiteralPath $metaPath -PathType Leaf) {
+                try {
+                    $metaRaw = [System.IO.File]::ReadAllText($metaPath, [System.Text.Encoding]::UTF8).TrimStart([char]0xFEFF)
+                    if ($metaRaw) {
+                        $metaObj = ConvertFrom-Json -InputObject $metaRaw
+                        if ($null -ne $metaObj) {
+                            if ($null -ne $metaObj.agentType) { $metaType = [string]$metaObj.agentType }
+                            if ($null -ne $metaObj.description) { $metaDesc = [string]$metaObj.description }
+                        }
+                    }
+                } catch {}
+            }
+
+            return @{
+                id     = $agentId
+                model  = if ($usage -and $usage.model) { [string]$usage.model } else { "" }
+                effort = if ($usage -and $usage.effort) { [string]$usage.effort } else { "" }
+                ctx    = if ($usage -and $null -ne $usage.ctx) { [long]$usage.ctx } else { 0L }
+                type   = $metaType
+                desc   = $metaDesc
+            }
+        }
+    } catch {}
     return $null
 }

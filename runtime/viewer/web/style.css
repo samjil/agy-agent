@@ -1225,6 +1225,37 @@ code { font-family: var(--font-mono); font-size: 0.92em; }
   color: var(--ink-3);
 }
 .meta + .meta { margin-top: 4px; }
+.meta-more[hidden] { display: none; }
+.meta + .meta-more { margin-top: 4px; }
+.meta-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: auto;
+  padding: 0 6px;
+  border: 1px solid transparent;
+  border-radius: var(--r-md);
+  background: transparent;
+  color: var(--ink-3);
+  font: inherit;
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+  min-height: calc(1.5em + 2px);
+  cursor: pointer;
+}
+.meta-toggle:hover { color: var(--ink); }
+.meta-toggle:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.meta-toggle + .proc-open { margin-left: 0; }
+.meta-toggle-chevron {
+  display: block;
+  transition: transform .15s;
+}
+.meta-toggle[aria-expanded="true"] .meta-toggle-chevron {
+  transform: rotate(90deg);
+}
+@media (prefers-reduced-motion: reduce) {
+  .meta-toggle-chevron { transition: none; }
+}
 .meta-item { white-space: nowrap; }
 .meta-item.mono, .ts { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .ts { color: var(--ink-2); }
@@ -1284,6 +1315,8 @@ code { font-family: var(--font-mono); font-size: 0.92em; }
 .badge.status-pending-stalled { background: var(--err-soft); color: var(--err); }
 /* 단계의 앞 모델이 막혀 맨 마지막 대안(3.8 Flash)으로 처리한 기록: 모델 이름 옆 작은 경고 배지 */
 .badge.model-fallback { background: var(--warn-soft); color: var(--warn); margin-left: 4px; }
+/* 한도 · 과부하로 실패해 다음 모델로 넘어간 앞 모델 표시 */
+.agy-failed { color: var(--ink-3); text-decoration: line-through; }
 
 .empty, .empty-hint {
   color: var(--ink-3);
@@ -1432,9 +1465,99 @@ code { font-family: var(--font-mono); font-size: 0.92em; }
 .proc-n { text-align: right; color: var(--ink-3); font-variant-numeric: tabular-nums; }
 .proc-at { color: var(--ink-3); font-variant-numeric: tabular-nums; }
 .proc-tool { color: var(--ink); font-weight: 600; }
+.proc-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  vertical-align: middle;
+  margin-left: 4px;
+  padding: 2px;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--ink-3);
+  cursor: pointer;
+}
+.proc-toggle:hover { color: var(--ink); background: var(--raised); }
+.proc-toggle:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.proc-toggle-chevron {
+  display: block;
+  transition: transform .15s;
+}
+.proc-toggle[aria-expanded="true"] .proc-toggle-chevron {
+  transform: rotate(90deg);
+}
+@media (prefers-reduced-motion: reduce) {
+  .proc-toggle-chevron { transition: none; }
+}
 .proc-text { min-width: 0; overflow-wrap: anywhere; }
 .proc-detail { font-family: var(--font-mono); font-size: 0.92em; color: var(--ink); }
 .proc-label { color: var(--ink-3); }
+.proc-body[hidden] { display: none; }
+.proc-body { margin-top: 4px; }
+.proc-body-desc { color: var(--ink-2); margin-bottom: 4px; }
+.proc-diff {
+  margin: 4px 0;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  overflow: hidden;
+  background: var(--sunken);
+}
+.proc-diff-cap {
+  padding: 2px 8px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--ink-3);
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+.proc-diff-code {
+  margin: 0;
+  padding: 6px 8px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow-x: auto;
+}
+.proc-diff-del {
+  display: block;
+  margin: 0 -8px;
+  padding: 0 8px;
+  color: var(--err);
+  background: var(--err-soft);
+}
+.proc-diff-add {
+  display: block;
+  margin: 0 -8px;
+  padding: 0 8px;
+  color: var(--ok);
+  background: var(--ok-soft);
+}
+.proc-body-text {
+  margin: 4px 0;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--sunken);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.proc-args {
+  margin: 4px 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 2px 10px;
+  font-size: var(--fs-xs);
+}
+.proc-arg { display: contents; }
+.proc-args dt { color: var(--ink-3); font-family: var(--font-mono); }
+.proc-args dd { margin: 0; color: var(--ink-2); font-family: var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 /* 그 단계에서 agy 가 적은 설명(say)과 생각(think). 영어 원문이라 흐리게, 도구 줄과 구분되게 아래 줄에 둔다 */
 .proc-say, .proc-think { display: block; margin-top: 2px; color: var(--ink-2); line-height: 1.55; }
 .proc-think { color: var(--ink-3); }
@@ -2445,26 +2568,6 @@ code.inline-image-ref { cursor: zoom-in; text-decoration: underline dotted var(-
   color: var(--loss);   /* 표의 "더 소모" 값: 오류가 아니라 주황 */
   font-weight: 500;
 }
-/* 진행 중 카드: 처음 예상 대비 완료 예정의 변화(▲ 늦어짐 주황 / ▼ 빨라짐 초록) */
-/* 예상 시간을 넘긴 카드: 주황 알약으로 눈에 띄게(빨강은 오류로 읽혀서 피한다) */
-.meta .eta.eta-over {
-  color: var(--loss);
-  background: var(--loss-soft);
-  border: 1px solid var(--loss);
-  border-radius: 999px;
-  padding: 1px 9px;
-  font-weight: 700;
-  letter-spacing: 0.02em;
-}
-/* 끝난 카드: "[예상 시간 +차이]" — 차이만 강조한다. 초과는 주황, 미만은 초록 */
-.meta .eta-done { font-variant-numeric: tabular-nums; }
-.meta .eta-done-val { font-weight: 700; border-radius: 999px; padding: 0 7px; }
-.meta .eta-done-val.over { color: var(--loss); background: var(--loss-soft); }
-.meta .eta-done-val.under { color: var(--gain); background: var(--gain-soft); }
-.meta .eta-delta { font-weight: 600; font-variant-numeric: tabular-nums; }
-.meta .eta-delta.up { color: var(--loss); }
-.meta .eta-delta.down { color: var(--gain); }
-.meta .eta-delta[hidden] { display: none; }
 
 /* ==========================================================================
    위임 카드: Claude 토큰 줄 + agy 세부 토큰 접기/펼치기
@@ -2539,7 +2642,6 @@ code.inline-image-ref { cursor: zoom-in; text-decoration: underline dotted var(-
 .meta-item.lv.dim .mv, .meta-item.lv .mv .dim { color: var(--ink-3); font-weight: 400; }
 .meta-item.lv .mv { font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-weight: 500; color: var(--ink); }
 .meta-item.lv.ts .mv { color: var(--ink-2); font-weight: 400; }
-.meta-item.lv.eta-done .mv, .meta-item.lv.eta .mv { font-weight: 500; }
 .meta-item.lv.copyable .mv { text-decoration: underline dotted var(--line-strong); text-underline-offset: 3px; }
 
 /* ---- 위임 카드의 토큰·시간 줄 ----

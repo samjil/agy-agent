@@ -230,8 +230,26 @@ function ConvertFrom-AgyModelsList([string]$Text) {
 }
 
 # `agy models` 를 불러 쓸 수 있는 모델 ID 목록을 돌려준다. 실패하거나 시간 안에 끝나지 않으면 $null.
-# 창이 없는 백그라운드 워처에서도 콘솔 창이 깜빡이지 않도록 ProcessStartInfo(CreateNoWindow) 로 실행한다.
+# 창이 없는 백그라운드 워처에서도 콘솔 창이 깜빡이지 않도록 Win32 무창 분리 실행(agy-spawn.ps1)으로 실행한다.
 function Get-AgyAvailableModels([string]$AgyExe = "agy", [int]$TimeoutSec = 20) {
+    if (-not (Get-Command Invoke-AgyHiddenWithOutput -ErrorAction SilentlyContinue)) {
+        $spawnLib = Join-Path $PSScriptRoot "agy-spawn.ps1"
+        if (-not (Test-Path $spawnLib)) { $spawnLib = Join-Path (Split-Path $PSScriptRoot -Parent) "agy-spawn.ps1" }
+        if (Test-Path $spawnLib) { . $spawnLib }
+    }
+    if (Get-Command Invoke-AgyHiddenWithOutput -ErrorAction SilentlyContinue) {
+        $res = Invoke-AgyHiddenWithOutput -FilePath $AgyExe -ArgumentList @("models") -TimeoutSeconds $TimeoutSec
+        # Pid -1 = 헬퍼 자체가 실패(실행 파일 없음 · Add-Type 실패 등): 아래 기본 방식으로 한 번 더 해 본다
+        if ($res -and $res.Pid -ge 0) {
+            # 시간 초과면 트리째 끝낸 뒤 바로 돌아온다. 그때 받은 일부 출력은 믿지 않는다(예전과 같이 $null).
+            if ($res.TimedOut) { return $null }
+            if ($res.ExitCode -eq 0 -and $res.StdOut) {
+                $ids = @(ConvertFrom-AgyModelsList $res.StdOut)
+                if ($ids.Count -gt 0) { return $ids }
+            }
+            return $null
+        }
+    }
     $p = $null
     try {
         $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -263,6 +281,42 @@ function Get-AgyAvailableModels([string]$AgyExe = "agy", [int]$TimeoutSec = 20) 
     } finally {
         if ($p) { try { $p.Dispose() } catch {} }
     }
+}
+
+# 워처가 켜질 때 쓸 수 있는 모델 목록을 확인해 $File 에 적는다. 목록(배열)을 돌려주고, 확인하지 못하면 $null.
+# - 늘 `agy models` 를 새로 부른다. agy 계정을 바꾸면 쓸 수 있는 모델이 달라지므로 예전 결과(다른 계정 · 지난 실행)를 다시 쓰지 않는다.
+# - 먼저 예전 파일을 지운다. 확인에 실패하거나 시간 안에 끝나지 않으면 파일이 없는 채로 남아 작업자는 모델을 거르지 않는다.
+# - 파일에는 확인 시각과 모델 ID 만 적는다(계정 · 이메일은 적지 않는다).
+# - 임시 파일에 다 쓴 뒤 이름을 바꿔, 작업자가 쓰다 만 파일을 읽지 않게 한다.
+# $Lister: 시험용. 지정하면 `agy models` 대신 이 스크립트 블록의 결과를 목록으로 쓴다.
+function Update-AgyAvailableModelsFile([string]$File, [string]$AgyExe = "agy", [int]$TimeoutSec = 20, [scriptblock]$Lister = $null) {
+    Remove-Item -LiteralPath $File -Force -ErrorAction SilentlyContinue
+    $avail = $null
+    try {
+        if ($Lister) { $avail = & $Lister } else { $avail = Get-AgyAvailableModels $AgyExe $TimeoutSec }
+    } catch { $avail = $null }
+    $ids = @(@($avail) | Where-Object { $_ } | ForEach-Object { [string]$_ })
+    if ($ids.Count -eq 0) { return $null }
+    $tmp = "$File.$PID.tmp"
+    try {
+        $json = [ordered]@{ checked_at = (Get-Date -Format "yyyy-MM-dd HH:mm:ss"); models = $ids } | ConvertTo-Json -Compress
+        [System.IO.File]::WriteAllText($tmp, $json, (New-Object System.Text.UTF8Encoding($false)))
+        Remove-Item -LiteralPath $File -Force -ErrorAction SilentlyContinue
+        [System.IO.File]::Move($tmp, $File)
+    } catch {
+        Remove-Item -LiteralPath $tmp, $File -Force -ErrorAction SilentlyContinue
+        return $null
+    }
+    return $ids
+}
+
+# 이번 워처 기동 때 확인한 모델 목록을 읽는다. 파일이 없거나 못 읽으면 빈 배열(= 확인하지 않은 것으로 보고 거르지 않는다).
+function Read-AgyAvailableModelsFile([string]$File) {
+    try {
+        if (-not (Test-Path -LiteralPath $File)) { return @() }
+        $j = [System.IO.File]::ReadAllText($File, [System.Text.Encoding]::UTF8).TrimStart([char]0xFEFF) | ConvertFrom-Json
+        return @(@($j.models) | Where-Object { $_ } | ForEach-Object { [string]$_ })
+    } catch { return @() }
 }
 
 # 설정의 모델 중 $Available 에 없는 것들. 반환: @{ <단계> = @(<없는 모델>...) } (없으면 빈 표)

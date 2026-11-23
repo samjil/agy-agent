@@ -214,8 +214,9 @@ function Initialize-AgySqlite {
 #   15: 토큰 통계 표(token_files · token_turns · token_task_links · token_estimates)는 더 만들지 않는다. 이미 있는 DB 의 표는 지우지 않고 그냥 안 쓴다.
 #   16: 실측 통계 표(usage_files · usage_notes · usage_questions). 수집은 sub\usage-stats.ps1, 사유 기록은 note-choice.ps1 · submit-task.ps1(@reason).
 #   17: usage_questions 에 Claude 노력 단계(claude_effort). 열을 새로 더할 때는 usage_files 를 비워 대화 기록을 처음부터 다시 읽게 한다(예전 질문의 노력도 채운다).
-#   18: tasks 에 Gemini 가 프롬프트만으로 산정한 예상 시간(estimated_sec) 추가.
-$script:AgyDbSchemaVersion = 18
+#   18: tasks 에 Gemini 가 프롬프트만으로 산정한 예상 시간(estimated_sec) 추가 (2026-11-20 부터 쓰지 않음).
+#   19: usage_questions 에 위임을 보낸 서브에이전트 모델(agent_model · agent_effort) 추가. claude-meta 에서 채우므로 usage_files 는 비우지 않는다.
+$script:AgyDbSchemaVersion = 19
 $script:AgyDbSchemaSql = @(
     "CREATE TABLE IF NOT EXISTS tasks (
         task_id TEXT PRIMARY KEY NOT NULL,
@@ -238,7 +239,7 @@ $script:AgyDbSchemaSql = @(
     "CREATE INDEX IF NOT EXISTS idx_usage_notes_session ON usage_notes(session, noted_at)",
     "CREATE TABLE IF NOT EXISTS usage_questions (
         session TEXT NOT NULL, q_ts TEXT NOT NULL, project TEXT, mode TEXT,
-        claude_model TEXT, claude_effort TEXT, agy_models TEXT,
+        claude_model TEXT, claude_effort TEXT, agent_model TEXT, agent_effort TEXT, agy_models TEXT,
         dur_sec INTEGER, calls INTEGER,
         in_tokens INTEGER, cc_tokens INTEGER, cr_tokens INTEGER, out_tokens INTEGER,
         agy_tokens INTEGER, agy_sec INTEGER, task_ids TEXT, task_ok INTEGER, task_fail INTEGER, task_cancel INTEGER,
@@ -280,6 +281,12 @@ function Initialize-AgyDbSchema($Db, [string]$Path = "") {
         if ($uqCols.Count -gt 0 -and -not $uqCols.ContainsKey('claude_effort')) {
             [void]$Db.Execute("ALTER TABLE usage_questions ADD COLUMN claude_effort TEXT", $null)
             [void]$Db.Execute("DELETE FROM usage_files", $null)
+        }
+        # 스키마 v19: 위임을 보낸 서브에이전트 모델 · 노력 단계 열. claude-meta 에서 채우므로 usage_files 는 비우지 않는다.
+        foreach ($col in @('agent_model', 'agent_effort')) {
+            if ($uqCols.Count -gt 0 -and -not $uqCols.ContainsKey($col)) {
+                [void]$Db.Execute("ALTER TABLE usage_questions ADD COLUMN $col TEXT", $null)
+            }
         }
     } catch {}
 
@@ -480,7 +487,7 @@ function ConvertFrom-AgyJsonArray([string]$Text) {
 function ConvertTo-AgyProcessJson($Steps) {
     $list = @($Steps)
     if ($list.Count -eq 0) { return '[]' }
-    return (ConvertTo-Json -InputObject $list -Depth 6 -Compress)
+    return (ConvertTo-Json -InputObject $list -Depth 8 -Compress)
 }
 
 # ============================================================================

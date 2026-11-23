@@ -307,17 +307,29 @@ if (Test-WatcherAlive) {
 # 3. 워처 기동 (기본: 새 콘솔 창 / -Hidden: 창 없이 백그라운드)
 # -----------------------------------------------------------------------------
 if ($Hidden) {
-    # ensure-agy-running.ps1 과 같은 방식: WScript.Shell.Run(명령, 0)은 콘솔 창을 아예 만들지 않는다.
+    # agy-spawn.ps1 의 Win32 CreateProcessW(CREATE_NO_WINDOW + STARTF_USESHOWWINDOW/SW_HIDE) 로 콘솔 창 없이 완전히 분리된 백그라운드 프로세스로 기동합니다.
     $launched = $false
-    try {
-        $q   = [char]34
-        $cmd = "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $q$WatcherScript$q -RuntimeDir $q$RuntimeDir$q"
-        $sh  = New-Object -ComObject WScript.Shell
-        try { $sh.CurrentDirectory = $RuntimeDir } catch {}
-        [void]$sh.Run($cmd, 0, $false)
-        $launched = $true
-    } catch {
-        Write-Host "숨김 실행(WScript.Shell)에 실패해 Start-Process 로 대체합니다: $($_.Exception.Message)" -ForegroundColor Yellow
+    $spawnLib = Join-Path (Join-Path $PSScriptRoot "sub") "agy-spawn.ps1"
+    if (Test-Path -LiteralPath $spawnLib) {
+        try {
+            . $spawnLib
+            $pid0 = Start-AgyHiddenDetachedProcess -FilePath "powershell.exe" -WorkingDirectory $RuntimeDir -ArgumentList @(
+                "-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $WatcherScript, "-RuntimeDir", $RuntimeDir
+            )
+            if ($pid0 -gt 0) { $launched = $true }
+        } catch {}
+    }
+    if (-not $launched) {
+        try {
+            $q   = [char]34
+            $cmd = "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $q$WatcherScript$q -RuntimeDir $q$RuntimeDir$q"
+            $sh  = New-Object -ComObject WScript.Shell
+            try { $sh.CurrentDirectory = $RuntimeDir } catch {}
+            [void]$sh.Run($cmd, 0, $false)
+            $launched = $true
+        } catch {
+            Write-Host "숨김 실행(WScript.Shell)에 실패해 Start-Process 로 대체합니다: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
     }
     if (-not $launched) {
         Start-Process -FilePath "powershell.exe" -WindowStyle Hidden -WorkingDirectory $RuntimeDir -ArgumentList @("-NoLogo", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$WatcherScript`"", "-RuntimeDir", "`"$RuntimeDir`"")

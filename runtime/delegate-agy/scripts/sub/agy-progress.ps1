@@ -374,6 +374,213 @@ function Stop-ProcessTree([int]$ProcessId) {
 #   뷰어(serve-viewer.ps1)도 이 파일을 불러 와서 같은 코드를 씁니다.
 # ---------------------------------------------------------------------------------------------------------------
 
+# 단계 본문(body) 크기 상한(DB 저장·브라우저 전송 부담을 막기 위한 제한)
+$script:AgyBodyMaxLines     = 40
+$script:AgyBodyMaxChars     = 1500
+$script:AgyBodyMaxEdits     = 5
+$script:AgyBodyMaxJsonChars = 6000
+
+# 긴 본문 글자를 줄 수·글자 수 상한으로 자릅니다. 잘리면 "…(N줄 더)" / "…" 표식을 붙입니다.
+function Limit-AgyBodyText([string]$Text, [int]$MaxLines = $script:AgyBodyMaxLines, [int]$MaxChars = $script:AgyBodyMaxChars) {
+    if ($null -eq $Text -or $Text -eq "") { return "" }
+    $norm = ($Text -replace "`r`n", "`n") -replace "`r", "`n"
+    $lines = $norm -split "`n"
+    $out = $norm
+    if ($lines.Count -gt $MaxLines) {
+        $extra = $lines.Count - $MaxLines
+        $out = (($lines[0..($MaxLines - 1)]) -join "`n") + "`n…(${extra}줄 더)"
+    }
+    if ($out.Length -gt $MaxChars) {
+        $out = $out.Substring(0, $MaxChars) + "…"
+    }
+    return $out
+}
+
+# 도구 호출 하나에서 제목(tool/detail/label) 외에 보여 줄 실제 작업 내용(body)을 뽑습니다.
+# 추가 내용이 없으면 $null 을 돌려줍니다(키 자체를 생략).
+function Get-AgyToolBody($call, [string]$Detail = "", [string]$Label = "") {
+    if ($null -eq $call -or $null -eq $call.args) { return $null }
+    $a = $call.args
+    $n = [string]$call.name
+
+    $getProp = {
+        param($obj, [string]$k)
+        if ($null -eq $obj) { return $null }
+        $p = $obj.PSObject.Properties[$k]
+        if ($null -eq $p) { return $null }
+        return $p.Value
+    }
+    $getRaw = {
+        param($obj, [string]$k)
+        $v = & $getProp $obj $k
+        if ($null -eq $v) { return "" }
+        return [string]$v
+    }
+    $getTrim = {
+        param($obj, [string]$k)
+        return (& $getRaw $obj $k).Trim()
+    }
+    $getIntOrNull = {
+        param($obj, [string]$k)
+        $v = & $getProp $obj $k
+        if ($null -eq $v) { return $null }
+        $s = ([string]$v).Trim()
+        if ($s -match '^\d+$') { return [int]$s }
+        return $null
+    }
+
+    $body = [ordered]@{}
+
+    # 설명(Description / Instruction) — 둘 다 있고 서로 다르면 ' · '로 이어 붙입니다.
+    if ($n -in @('edit_file', 'replace_file_content', 'multi_replace_file_content', 'write_file', 'write_to_file')) {
+        $desc1 = & $getTrim $a 'Description'
+        $desc2 = & $getTrim $a 'Instruction'
+        $descParts = @()
+        if ($desc1) { $descParts += $desc1 }
+        if ($desc2 -and ($desc2 -ne $desc1)) { $descParts += $desc2 }
+        if ($descParts.Count -gt 0) {
+            $body.desc = Limit-AgyBodyText ($descParts -join ' · ')
+        }
+    }
+
+    switch ($n) {
+        'edit_file' {
+            $old = & $getRaw $a 'Target'
+            $new = & $getRaw $a 'Replacement'
+            if ($old -ne "" -or $new -ne "") {
+                $body.edits = @([ordered]@{
+                    from = $null
+                    to   = $null
+                    old  = (Limit-AgyBodyText $old)
+                    new  = (Limit-AgyBodyText $new)
+                })
+            }
+        }
+        { $_ -in @('replace_file_content', 'multi_replace_file_content') } {
+            $chunks = & $getProp $a 'ReplacementChunks'
+            $edits = New-Object System.Collections.ArrayList
+            if ($null -ne $chunks) {
+                foreach ($ch in @($chunks)) {
+                    if ($null -eq $ch) { continue }
+                    if ($edits.Count -ge $script:AgyBodyMaxEdits) { break }
+                    $old = & $getRaw $ch 'TargetContent'
+                    $new = & $getRaw $ch 'ReplacementContent'
+                    if ($old -eq "" -and $new -eq "") { continue }
+                    [void]$edits.Add([ordered]@{
+                        from = (& $getIntOrNull $ch 'StartLine')
+                        to   = (& $getIntOrNull $ch 'EndLine')
+                        old  = (Limit-AgyBodyText $old)
+                        new  = (Limit-AgyBodyText $new)
+                    })
+                }
+            } else {
+                $old = & $getRaw $a 'TargetContent'
+                $new = & $getRaw $a 'ReplacementContent'
+                if ($old -ne "" -or $new -ne "") {
+                    [void]$edits.Add([ordered]@{
+                        from = (& $getIntOrNull $a 'StartLine')
+                        to   = (& $getIntOrNull $a 'EndLine')
+                        old  = (Limit-AgyBodyText $old)
+                        new  = (Limit-AgyBodyText $new)
+                    })
+                }
+            }
+            if ($edits.Count -gt 0) { $body.edits = @($edits.ToArray()) }
+        }
+        'write_file' {
+            $txt = & $getRaw $a 'Content'
+            if ($txt -ne "") { $body.text = Limit-AgyBodyText $txt }
+        }
+        'write_to_file' {
+            $txt = & $getRaw $a 'CodeContent'
+            if ($txt -ne "") { $body.text = Limit-AgyBodyText $txt }
+        }
+        'exit_plan_mode' {
+            $txt = & $getRaw $a 'plan'
+            if ($txt -ne "") { $body.text = Limit-AgyBodyText $txt }
+        }
+        'enter_plan_mode' {
+            $txt = & $getRaw $a 'reason'
+            if ($txt -ne "") { $body.text = Limit-AgyBodyText $txt }
+        }
+        'schedule' {
+            $txt = & $getRaw $a 'Prompt'
+            if ($txt -ne "") { $body.text = Limit-AgyBodyText $txt }
+        }
+        'search_web' {
+            $txt = & $getRaw $a 'query'
+            if ($txt -ne "") { $body.text = Limit-AgyBodyText $txt }
+        }
+        { $_ -in @('read_file', 'view_file', 'run_command', 'manage_task', 'grep_search', 'list_dir', 'find_by_name',
+                   'read_url_content', 'generate_image', 'call_mcp_tool', 'swarm', 'post_message', 'read_board',
+                   'swarm_wait', 'run_workflow', 'invoke_subagent', 'manage_subagents', 'send_message') } {
+            # 제목(detail/label)과 기존 읽기 설명으로 충분한 도구들
+        }
+        default {
+            # 위에서 다루지 않은 도구 중 제목에 라벨이 없는 경우, detail 로 이미 보인 인자를 제외한 스칼라 인자를 args 에 담습니다.
+            if (-not $Label) {
+                $pairs = New-Object System.Collections.ArrayList
+                $skippedDetail = $false
+                foreach ($prop in $a.PSObject.Properties) {
+                    if ($prop.Name -in @('toolAction', 'toolSummary')) { continue }
+                    $v = $prop.Value
+                    if ($null -eq $v) { continue }
+                    if ($v -isnot [string] -and $v -isnot [ValueType]) { continue }
+                    $s = [string]$v
+                    if ($s -eq "") { continue }
+                    if (-not $skippedDetail -and $Detail) {
+                        $normS = ($s -replace '\s+', ' ').Trim()
+                        if ($normS.Length -gt 200) { $normS = $normS.Substring(0, 200) + "…" }
+                        if ($normS -eq $Detail) {
+                            $skippedDetail = $true
+                            continue
+                        }
+                    }
+                    [void]$pairs.Add(@([string]$prop.Name, (Limit-AgyBodyText $s)))
+                }
+                if ($pairs.Count -gt 0) { $body.args = @($pairs.ToArray()) }
+            }
+        }
+    }
+
+    if ($body.Count -eq 0) { return $null }
+
+    # 전체 body JSON 크기 상한 적용: edits 뒤쪽 항목부터 줄이고, 그래도 크면 args/text/남은 edit 을 줄입니다.
+    $jsonLen = ($body | ConvertTo-Json -Compress -Depth 6).Length
+    while ($jsonLen -gt $script:AgyBodyMaxJsonChars -and $body.Contains('edits') -and @($body.edits).Count -gt 1) {
+        $arr = @($body.edits)
+        $body.edits = @($arr[0..($arr.Count - 2)])
+        $jsonLen = ($body | ConvertTo-Json -Compress -Depth 6).Length
+    }
+    while ($jsonLen -gt $script:AgyBodyMaxJsonChars -and $body.Contains('args') -and @($body.args).Count -gt 1) {
+        $arr = @($body.args)
+        $body.args = @($arr[0..($arr.Count - 2)])
+        $jsonLen = ($body | ConvertTo-Json -Compress -Depth 6).Length
+    }
+    if ($jsonLen -gt $script:AgyBodyMaxJsonChars -and $body.Contains('text')) {
+        $cut = [Math]::Max(200, [int]([string]$body.text).Length - ($jsonLen - $script:AgyBodyMaxJsonChars) - 100)
+        if ($cut -lt ([string]$body.text).Length) {
+            $body.text = ([string]$body.text).Substring(0, $cut) + "…"
+            $jsonLen = ($body | ConvertTo-Json -Compress -Depth 6).Length
+        }
+    }
+    if ($jsonLen -gt $script:AgyBodyMaxJsonChars -and $body.Contains('edits') -and @($body.edits).Count -eq 1) {
+        $ed = $body.edits[0]
+        $excess = $jsonLen - $script:AgyBodyMaxJsonChars + 100
+        $half = [int][Math]::Ceiling($excess / 2.0)
+        if (([string]$ed.old).Length -gt 200) {
+            $oCut = [Math]::Max(200, ([string]$ed.old).Length - $half)
+            if ($oCut -lt ([string]$ed.old).Length) { $ed.old = ([string]$ed.old).Substring(0, $oCut) + "…" }
+        }
+        if (([string]$ed.new).Length -gt 200) {
+            $nCut = [Math]::Max(200, ([string]$ed.new).Length - $half)
+            if ($nCut -lt ([string]$ed.new).Length) { $ed.new = ([string]$ed.new).Substring(0, $nCut) + "…" }
+        }
+    }
+
+    return $body
+}
+
 # agy 도구 호출 하나가 "무엇을 어디에" 하는지 짧은 글로 만듭니다. 화면의 "지금:" 줄에서 영어 라벨(toolAction)만으로는
 # 알 수 없는 실제 내용(어떤 명령, 어떤 파일, 어떤 폴더)을 보여 주기 위한 것입니다.
 # 도구마다 인자 이름이 달라서 도구별로 고릅니다(agy 대화 기록 131개, 도구 호출 2,287건에서 나온 12종).
@@ -399,6 +606,7 @@ function Get-AgyToolDetail($call) {
         'write_file'           { $d = & $get 'Path'; if (-not $d) { $d = & $get 'TargetFile' } }
         'edit_file'            { $d = & $get 'Path'; if (-not $d) { $d = & $get 'TargetFile' } }
         'replace_file_content' { $d = & $get 'TargetFile'; if (-not $d) { $d = & $get 'Path' } }
+        'multi_replace_file_content' { $d = & $get 'TargetFile'; if (-not $d) { $d = & $get 'Path' } }
         'swarm' {
             $act = & $get 'action'; $nm = & $get 'name'; $tl = & $get 'title'
             $d = (@($act, $nm, $tl) | Where-Object { $_ }) -join ' '
@@ -590,16 +798,19 @@ function Read-AgyProcessSteps {
             $toolName = [string]$c.name
             $label = ""
             if ($c.args) { $label = [string]$c.args.toolAction; if (-not $label) { $label = [string]$c.args.toolSummary } }
+            $detail = (Get-AgyToolDetail $c)
             $st = [ordered]@{
                 n      = [int]$o.step_index
                 at     = $at
                 ts     = $ts
                 tool   = $toolName
-                detail = (Get-AgyToolDetail $c)
+                detail = $detail
                 label  = $label
                 think  = $(if ($first) { $think } else { "" })
             }
             if ($first -and $say) { $st.say = $say }
+            $body = Get-AgyToolBody $c $detail $label
+            if ($null -ne $body) { $st.body = $body }
             if ($toolName -eq 'run_command' -and $c.args -and ([string]$c.args.IsDaemon -match '^(?i:true|1)$')) { $st.bg = $true }
             if ($toolName -eq 'manage_task' -and $c.args) {
                 $tId = [string]$c.args.TaskId
@@ -772,52 +983,4 @@ function Get-AgyUsageSummary($State, [int]$MaxStep = 0, $Since = $null) {
         }
     }
     return @{ Input = $in; Cache = $cache; Output = $out; Thinking = $think; Total = ($in + $out); Context = $ctx; Turns = $turns }
-}
-
-# 대화 기록(transcript.jsonl / transcript_full.jsonl)에서 Gemini 가 첫 응답에 남긴 [ETA: <초>s] 값을 읽는다.
-# Since 를 주면 그 시각(로컬) 이후의 PLANNER_RESPONSE 에서만 찾는다(이어가는 세션 구분). 없으면 $null.
-function Get-AgyEstimatedSecFromTranscript([string]$Path, $Since = $null) {
-    if (-not $Path -or -not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
-    $sinceDt = $null
-    if ($Since) {
-        try {
-            if ($Since -is [datetime]) { $sinceDt = $Since }
-            elseif ($Since -is [DateTimeOffset]) { $sinceDt = $Since.LocalDateTime }
-            else { $sinceDt = [datetime]::Parse([string]$Since, [System.Globalization.CultureInfo]::InvariantCulture) }
-        } catch {}
-    }
-    $fs = $null; $sr = $null
-    try {
-        $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
-        $sr = New-Object System.IO.StreamReader($fs, [System.Text.Encoding]::UTF8)
-        while (-not $sr.EndOfStream) {
-            $line = $sr.ReadLine()
-            if (-not $line -or $line.IndexOf('PLANNER_RESPONSE') -lt 0) { continue }
-            if ($line.IndexOf('ETA') -lt 0 -and $line.IndexOf('eta') -lt 0) { continue }
-            $o = $null
-            try { $o = $line.TrimStart([char]0xFEFF) | ConvertFrom-Json } catch { continue }
-            if ($o.type -ne 'PLANNER_RESPONSE') { continue }
-            if ($sinceDt -and $o.created_at) {
-                try {
-                    $parsed = [datetime]::Parse([string]$o.created_at, [System.Globalization.CultureInfo]::InvariantCulture,
-                        [System.Globalization.DateTimeStyles]::RoundtripKind)
-                    if ($parsed.ToLocalTime() -lt $sinceDt) { continue }
-                } catch {}
-            }
-            foreach ($candText in @([string]$o.content, [string]$o.thinking)) {
-                if (-not $candText) { continue }
-                $m = [regex]::Match($candText, '(?i)\[\s*ETA\s*:\s*(\d+)\s*(?:s|sec|seconds|초)?\s*\]')
-                if ($m.Success) {
-                    $v = 0
-                    if ([int]::TryParse($m.Groups[1].Value, [ref]$v) -and $v -ge 1 -and $v -le 86400) {
-                        return $v
-                    }
-                }
-            }
-        }
-    } catch {} finally {
-        if ($sr) { $sr.Dispose() }
-        if ($fs) { $fs.Dispose() }
-    }
-    return $null
 }

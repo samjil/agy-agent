@@ -675,10 +675,6 @@ function Get-AgyProgress([string]$ConversationId, $StartedAt, [string]$TaskId = 
             try { $waitingBg = (@(Get-AgyPendingBackgroundTasks $agyHome $ConversationId).Count -gt 0) } catch {}
         }
         $stepList = @(Get-AgyProcessStepsCached $ConversationId $stepFilter)
-        $estimatedSec = $null
-        if ($targetTokenFile -and (Get-Command Get-AgyEstimatedSecFromTranscript -ErrorAction SilentlyContinue)) {
-            try { $estimatedSec = Get-AgyEstimatedSecFromTranscript $targetTokenFile $stepFilter } catch {}
-        }
 
         return [PSCustomObject]@{
             conversation_id = $ConversationId
@@ -691,7 +687,6 @@ function Get-AgyProgress([string]$ConversationId, $StartedAt, [string]$TaskId = 
             step_count      = $stepList.Count
             stall_seconds   = $stallSec
             waiting_background = $waitingBg
-            estimated_sec   = $estimatedSec
             steps           = $stepList
             thinking        = $thinking
             say             = $say
@@ -802,6 +797,14 @@ function Get-ViewerQaRecordsJson([string]$DbPath, [string]$DataDir = "", [long]$
                                     if (-not $firstField) { [void]$sb.Append(',') }
                                     $firstField = $false
                                     [void]$sb.Append('"claude_effort":').Append((ConvertTo-AgyJsonString ([string]$metaObj.effort)))
+                                }
+                                foreach ($ak in @('agent_model', 'agent_effort', 'agent_type', 'agent_desc')) {
+                                    $prop = $metaObj.PSObject.Properties[$ak]
+                                    if ($null -ne $prop -and $null -ne $prop.Value -and [string]$prop.Value) {
+                                        if (-not $firstField) { [void]$sb.Append(',') }
+                                        $firstField = $false
+                                        [void]$sb.Append('"').Append($ak).Append('":').Append((ConvertTo-AgyJsonString ([string]$prop.Value)))
+                                    }
                                 }
                             }
                         }
@@ -1609,10 +1612,8 @@ $ViewerHandleRequest = {
 
                             # 5초마다 불리는 목록에 단계 전체(최대 1,500개)를 싣지 않는다. 개수만 알려 주고, 단계는 /api/delegate/process?since= 로 새 것만 받아 간다.
                             $liveConvId = ""
-                            $estSec = $null
                             if ($progress) {
                                 $liveConvId = [string]$progress.conversation_id
-                                if ($null -ne $progress.estimated_sec) { $estSec = $progress.estimated_sec }
                                 $progress.PSObject.Properties.Remove('steps')
                             }
 
@@ -1628,8 +1629,10 @@ $ViewerHandleRequest = {
                                 session_id = $sessionId
                                 model      = $resolvedModel
                                 state      = $state
-                                estimated_sec = $estSec
                                 progress   = $progress
+                            }
+                            if ($claim -and $claim.tried) {
+                                $pendingObj["tried_models"] = [string]$claim.tried
                             }
                             $claudeMetaPath = Join-Path $runtimeDir ("claude-meta\{0}.json" -f $f.BaseName)
                             if (Test-Path -LiteralPath $claudeMetaPath -PathType Leaf) {
@@ -1643,6 +1646,12 @@ $ViewerHandleRequest = {
                                             }
                                             if ($null -ne $metaData.effort -and [string]$metaData.effort) {
                                                 $pendingObj["claude_effort"] = [string]$metaData.effort
+                                            }
+                                            foreach ($ak in @('agent_model', 'agent_effort', 'agent_type', 'agent_desc')) {
+                                                $prop = $metaData.PSObject.Properties[$ak]
+                                                if ($null -ne $prop -and $null -ne $prop.Value -and [string]$prop.Value) {
+                                                    $pendingObj[$ak] = [string]$prop.Value
+                                                }
                                             }
                                         }
                                     }
@@ -1831,7 +1840,7 @@ $ViewerHandleRequest = {
                         $stepsOut = @(if ($sinceN -ge 0 -and -not $reset) { $all | Where-Object { $null -ne $_.n -and [int]$_.n -gt $sinceN } } else { $all })
                         $lastMs = [int64]([DateTimeOffset](Get-Item -LiteralPath $tp).LastWriteTime).ToUnixTimeMilliseconds()
                     } else { $reset = $false }
-                    $json = ([PSCustomObject]@{ id = $cid; found = $found; steps = $stepsOut; total = $total; reset = [bool]$reset; last_activity_ms = $lastMs }) | ConvertTo-Json -Depth 5
+                    $json = ([PSCustomObject]@{ id = $cid; found = $found; steps = $stepsOut; total = $total; reset = [bool]$reset; last_activity_ms = $lastMs }) | ConvertTo-Json -Depth 8
                     $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
                     $response.ContentType = "application/json; charset=utf-8"
                     $response.Headers.Add("Cache-Control", "no-store")

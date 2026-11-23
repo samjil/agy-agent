@@ -119,7 +119,7 @@ Budget per delegated task: **at most 3 Claude calls** (5 when you escalate once)
 2. **Call 2: read the result and check it in one command**: the `-Poll` output, `git diff --stat` (and the diff you need to read) and the key test command, together in one shell call.
 3. **Call 3 (only if needed): fix the remainder yourself.**
 
-**Wait limit = the tier's limit.** If the task is not done by then, the `-CancelOnTimeout` poll cancels it (`===CANCELLED=== <ID>`, exit 4): do the job yourself. Do not poll in a loop. To cancel earlier: `submit-task.ps1 -Cancel <ID>`.
+**Wait limit = the tier's limit.** When the limit passes, the `-CancelOnTimeout` poll checks activity: it keeps waiting while agy is still making progress and cancels only when there has been no progress for 5 minutes (or after the 2-hour hard cap; `===CANCELLED=== <ID>`, exit 4): do the job yourself. Do not poll in a loop. To cancel earlier: `submit-task.ps1 -Cancel <ID>`.
 
 **Escalate once, one step.** If the result fails its tests: `build` -> `build-hard`, `build-hard` -> `deep`, sent once (same brief plus what failed). The two waits together stay under 20 minutes when you started at `build`, 30 minutes when you started at `build-hard`. A failed `deep`, `quick`, `feature` or `think` task is not re-sent: fix it yourself (consult `think` first if the cause is unclear). If agy fails (`===ERROR===`, or the answer reports an agy run failure), check `git diff --stat` for half-done edits and finish directly.
 
