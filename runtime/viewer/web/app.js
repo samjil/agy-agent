@@ -191,8 +191,9 @@
   }
 
   // agy 모델 이름을 짧게(전체 이름은 툴팁에): gemini-4-hydrogen-medium -> hydrogen-medium, gemini-4-hydrogen-xhigh -> hydrogen-extra,
-  // gemini-4-neon-high -> neon-high, gemini-4-neon-xhigh -> neon-extra, gemini-4-argon-high -> argon-high,
-  // gemini-pro-orchestrator-neon -> orchestrator-neon, gemini-pro-orchestrator-g1-pro -> orchestrator, gemini-3.8-flash-medium -> flash-medium.
+  // gemini-4-neon-high -> neon-high, gemini-4-neon-xhigh -> neon-extra, gemini-4-carbon-high -> carbon-high,
+  // gemini-pro-orchestrator-neon -> orchestrator-neon, gemini-pro-orchestrator -> orchestrator-carbon,
+  // gemini-pro-orchestrator-argon -> orchestrator-argon (예전 g1-pro -> orchestrator, 3.8-flash-medium -> flash-medium).
   // "a -> b" 처럼 시도한 모델을 이은 글은 하나씩 줄인다. 모르는 이름은 그대로.
   function shortAgyModel(name) {
     if (!name) return "";
@@ -200,31 +201,48 @@
     if (s.indexOf("->") >= 0) {
       return s.split("->").map(function (x) { return shortAgyModel(x); }).filter(Boolean).join(" → ");
     }
-    var mx = s.match(/^gemini-4-(hydrogen|neon)-xhigh$/i);
+    var mx = s.match(/^gemini-4-(hydrogen|neon|carbon)-xhigh$/i);
     if (mx) return mx[1].toLowerCase() + "-extra";
-    var m = s.match(/^gemini-4-(hydrogen|argon|neon)-(\w+)$/i);
+    var m = s.match(/^gemini-4-(hydrogen|argon|neon|carbon)-(\w+)$/i);
     if (m) return m[1].toLowerCase() + "-" + m[2].toLowerCase();
     if (/^gemini-pro-orchestrator-neon$/i.test(s)) return "orchestrator-neon";
+    if (/^gemini-pro-orchestrator$/i.test(s)) return "orchestrator-carbon";
+    if (/^gemini-pro-orchestrator-argon$/i.test(s)) return "orchestrator-argon";
     if (/^gemini-pro-orchestrator/i.test(s)) return "orchestrator";
     m = s.match(/^gemini-\d+(?:\.\d+)?-(flash|pro|lite)-(\w+)$/i);
     if (m) return m[1].toLowerCase() + "-" + m[2].toLowerCase();
     return s;
   }
 
-  // 단계의 앞 모델들이 한도 · 과부하로 막혀 맨 마지막 대안(3.8 Flash)으로 처리한 기록인가(시도한 모델이 둘 이상이고 쓴 모델이 3.8 Flash).
-  function isLastResortFallback(r) {
-    if (!r) return false;
-    var used = String(r.model || "").trim();
-    return /^gemini-3\.8-flash-/i.test(used) && String(r.tried_models || "").indexOf("->") >= 0;
+  // agy 모델 없이 Claude 쪽(본 세션 · 서브에이전트) 모델만 그린다. 뒤에 붙던 "→" 는 없다.
+  function claudeOnlyModelHtml(claudeModel, claudeEffort, subAgent) {
+    var parts = [];
+    if (claudeModel) {
+      var cShort = escapeHtml(shortClaudeModel(claudeModel) + (claudeEffort ? " (" + String(claudeEffort).toLowerCase() + ")" : ""));
+      var cTitle = "이 위임을 보낸 Claude 모델: " + claudeModel + (claudeEffort ? " (effort " + claudeEffort + ")" : "");
+      parts.push('<span class="dim" title="' + escapeHtml(cTitle) + '">' + cShort + '</span>');
+    }
+    var aModel = subAgent && subAgent.model ? String(subAgent.model) : "";
+    if (aModel) {
+      var aEffort = subAgent.effort ? String(subAgent.effort) : "";
+      var aType = subAgent.type ? String(subAgent.type) : "";
+      var aDesc = subAgent.desc ? String(subAgent.desc) : "";
+      var aShort = escapeHtml(shortClaudeModel(aModel) + (aEffort ? " (" + aEffort.toLowerCase() + ")" : ""));
+      var aParts = [aModel + (aEffort ? " (effort " + aEffort + ")" : "")];
+      if (aType) aParts.push(aType);
+      if (aDesc) aParts.push(aDesc);
+      parts.push('<span class="dim" title="' + escapeHtml("위임을 보낸 서브에이전트: " + aParts.join(" · ")) + '">서브 ' + aShort + '</span>');
+    }
+    return parts.join(' › ');
   }
 
   function cardModelHtml(agyModel, claudeModel, claudeEffort, fellBack, subAgent, triedModels, isOk) {
-    if (!agyModel) return "";
+    var aModelEarly = subAgent && subAgent.model ? String(subAgent.model) : "";
+    // agy 모델이 비어 있는 기록(옛 취소 기록 등)도 Claude 쪽 모델이 있으면 그 부분만 보여 준다.
+    if (!agyModel && !claudeModel && !aModelEarly) return "";
+    if (!agyModel) return claudeOnlyModelHtml(claudeModel, claudeEffort, subAgent);
     var full = String(agyModel);
     var agyStr = '<span title="' + escapeHtml(full) + '">' + escapeHtml(shortAgyModel(full)) + '</span>';
-    if (fellBack) {
-      agyStr += ' <span class="badge model-fallback" title="앞 모델이 한도 · 과부하로 막혀 맨 마지막 대안(3.8 Flash)으로 처리했습니다. 결과를 더 꼼꼼히 확인하세요.">3.8 대체</span>';
-    }
     var chainStr = "";
     if (isOk !== false && triedModels) {
       var rawChain = String(triedModels).split("->").map(function (s) { return s.trim(); }).filter(Boolean);
@@ -343,6 +361,9 @@
     return list.map(function (p) {
       var pg = p.progress || {};
       var tok = (pg.tokens && pg.tokens.total) ? pg.tokens.total : 0;
+      var cu = p.claude_usage || {};
+      var cuM = (cu.main && cu.main.total) ? cu.main.total : 0;
+      var cuS = (cu.sub && cu.sub.total) ? cu.sub.total : 0;
       return [
         p.task_id || "",
         p.state || "",
@@ -350,7 +371,9 @@
         p.started_at || "",
         pg.step != null ? pg.step : "",
         pg.last_activity_ms || "",
-        tok
+        tok,
+        cuM,
+        cuS
       ].join(":");
     }).join(",");
   }
@@ -930,13 +953,19 @@
     return fetchJson("/api/qa/records?since=" + since).then(function (res) {
       var recs = (res && Array.isArray(res.records)) ? res.records : [];
       var total = (res && typeof res.total === "number") ? res.total : recs.length;
+      var incomingLimits = (res && res.limits && typeof res.limits === "object") ? res.limits : null;
+      var limitsChanged = false;
+      if (incomingLimits || (since === 0 && windowLimits !== null)) {
+        limitsChanged = JSON.stringify(incomingLimits) !== JSON.stringify(windowLimits);
+        windowLimits = incomingLimits;
+      }
       var items = (since === 0) ? recs : mergeQaRecords(allItems, recs);
 
       if (since > 0 && items.length !== total) {
         qaSeq = 0;
         return loadAllQa(true);
       }
-      var changed = Boolean(force) || recs.length > 0 || items.length !== allItems.length;
+      var changed = Boolean(force) || recs.length > 0 || items.length !== allItems.length || limitsChanged;
       if (!changed) { return { changed: false }; }
 
       items.sort(function (a, b) {
@@ -3268,8 +3297,8 @@
 
   // 모델 ID -> 사람이 읽는 이름. 모르는 모양이면 추측하지 않고 그대로 돌려준다.
   //   claude-opus-4-5-20251101 -> Claude Opus 4.5 · claude-sonnet-5-5 -> Claude Sonnet 5.5 · claude-3-5-sonnet-20241022 -> Claude 3.5 Sonnet
-  //   gemini-4-hydrogen-medium -> Gemini 4 Hydrogen (Medium) · gemini-4-neon-xhigh -> Gemini 4 Neon (Extra)
-  //   gemini-pro-orchestrator-neon -> Orchestrator (Neon) · gemini-pro-orchestrator-g1-pro -> Orchestrator (Argon)
+  //   gemini-4-hydrogen-medium -> Gemini 4 Hydrogen (Medium) · gemini-4-neon-xhigh -> Gemini 4 Neon (Extra) · gemini-4-carbon-high -> Gemini 4 Carbon (High)
+  //   gemini-pro-orchestrator-neon -> Orchestrator (Neon) · gemini-pro-orchestrator -> Orchestrator (Carbon) · gemini-pro-orchestrator-argon -> Orchestrator (Argon)
   //   gemini-3.8-flash-high -> Gemini 3.8 Flash (High) · "Claude Opus 5.5" 처럼 이미 사람이 쓴 이름(공백·대문자)은 그대로
   function formatModelName(raw) {
     var s = String(raw == null ? "" : raw).trim();
@@ -3282,8 +3311,9 @@
     m = s.match(/^claude-(\d+)(?:-(\d+))?-(opus|sonnet|haiku)(?:-\d{8})?$/);
     if (m) return "Claude " + m[1] + (m[2] ? "." + m[2] : "") + " " + cap(m[3]);
     if (/^gemini-pro-orchestrator-neon$/.test(s)) return "Orchestrator (Neon)";
+    if (/^gemini-pro-orchestrator$/.test(s)) return "Orchestrator (Carbon)";
     if (/^gemini-pro-orchestrator/.test(s)) return "Orchestrator (Argon)";
-    m = s.match(/^gemini-(\d+)-(hydrogen|argon|neon)-(low|medium|high|xhigh)$/);
+    m = s.match(/^gemini-(\d+)-(hydrogen|argon|neon|carbon)-(low|medium|high|xhigh)$/);
     if (m) return "Gemini " + m[1] + " " + cap(m[2]) + " (" + (m[3] === "xhigh" ? "Extra" : cap(m[3])) + ")";
     m = s.match(/^gemini-(\d+(?:\.\d+)?)-(flash|pro|ultra|nano|lite)(?:-(low|medium|high))?$/);
     if (m) return "Gemini " + m[1] + " " + cap(m[2]) + (m[3] ? " (" + cap(m[3]) + ")" : "");
@@ -3360,8 +3390,8 @@
     // 단계 -> 기본 주 모델(화면에서 짐작할 때만 쓴다. 실제 선택은 워처가 config\models.json 으로 한다).
     var tierModels = {
       "quick": "gemini-4-hydrogen-low", "build": "gemini-4-hydrogen-medium", "build-hard": "gemini-4-neon-medium",
-      "feature": "gemini-pro-orchestrator-neon", "feature-argon": "gemini-pro-orchestrator-g1-pro",
-      "think": "gemini-4-neon-high", "think-argon": "gemini-4-argon-high", "deep": "gemini-4-neon-xhigh"
+      "feature": "gemini-pro-orchestrator-neon", "feature-carbon": "gemini-pro-orchestrator", "feature-argon": "gemini-pro-orchestrator",
+      "think": "gemini-4-neon-high", "think-carbon": "gemini-4-carbon-high", "think-argon": "gemini-4-carbon-high", "deep": "gemini-4-neon-xhigh"
     };
     var ds = channelData && channelData.auto && Array.isArray(channelData.auto.dispatches) ? channelData.auto.dispatches : [];
     var recs = Array.isArray(records) ? records : [];
@@ -3431,7 +3461,7 @@
     return { senderParty: senderParty, sender: sender, receiverParty: receiverParty, receiver: receiver, inferred: inferred, senderInferred: senderInferred };
   }
 
-  // 방향 표시: 모델명으로 "Claude Opus 5.5 → Gemini 4 Argon (High)". 채널 정보가 없으면 예전처럼 Claude/agy.
+  // 방향 표시: 모델명으로 "Claude Opus 5.5 → Gemini 4 Carbon (High)". 채널 정보가 없으면 예전처럼 Claude/agy.
   function dirLabelHtml(dir, m, channelName) {
     var data = (m && channelName && handoffChannels[channelName]) ? handoffChannels[channelName] : null;
     var parts = m ? handoffLabelParts(m, data ? data.messages : null, data ? handoffDispatchResolver(data, allItems, pendingItems) : null) : null;
@@ -5311,7 +5341,7 @@
   }
 
   function buildModelRow(agyModel, claudeModel, claudeEffort, fellBack, subAgent, triedModels, isOk) {
-    if (!agyModel) return null;
+    if (!agyModel && !claudeModel && !(subAgent && subAgent.model)) return null;
     var row = document.createElement("div");
     row.className = "meta model-meta";
     row.appendChild(metaHead("모델"));
@@ -5361,6 +5391,88 @@
   //   입력의 "(캐시 X)" 와 "현재 컨텍스트"(그 호출의 마지막 턴이 보낸 입력 크기)는 위임 기록 DB 에 없어 서버가 대화 기록에서 계산해 준다(받은 뒤에 채운다).
   var recordContexts = {};        // "<대화 id>|<마지막 단계 번호>" -> { cache, context }
   var recordContextRequested = {};
+  var windowLimits = null;        // { claude:{five_hour,seven_day}, gemini:{five_hour,weekly} }
+  var LIMIT_EST_TOOLTIP = "한도 크기는 사용량 ÷ 사용 % 로 역산한 추정치입니다(다른 기기 · 대화 사용분이 섞일 수 있음)";
+
+  function agyLimitFamily(model) {
+    var m = String(model || "").toLowerCase();
+    if (!m) return "";
+    if (m.indexOf("gemini") >= 0 || m.indexOf("orchestrator") >= 0) return "gemini";
+    return "";
+  }
+
+  function formatTokenShare(total, est, live, stale, estimatedAt) {
+    var e = Number(est);
+    if (!(e > 0)) return null;
+    var t = Number(total) || 0;
+    var p = (t / e) * 100;
+    var pctText = p < 0.1 ? "<0.1%" : p.toFixed(1) + "%";
+    var estText = e.toLocaleString("en-US");
+    var title = (live ? "진행 중(지금까지) " : "") + "≈" + estText + " 토큰 중 " + t.toLocaleString("en-US") + " (한도 크기는 사용량 ÷ 사용 % 로 역산한 추정치)";
+    if (stale) {
+      var dt = estimatedAt ? new Date(estimatedAt) : null;
+      if (dt && !isNaN(dt.getTime())) {
+        var p2 = function (n) { return n < 10 ? "0" + n : String(n); };
+        title += "\n" + p2(dt.getMonth() + 1) + "-" + p2(dt.getDate()) + " " + p2(dt.getHours()) + ":" + p2(dt.getMinutes()) + " 추정(최근 사용량 기록이 오래됨)";
+      } else {
+        title += "\n추정(최근 사용량 기록이 오래됨)";
+      }
+    }
+    return {
+      estText: estText,
+      pctText: pctText,
+      title: title,
+      high: p >= 10
+    };
+  }
+
+  function buildShareCell(prefix, total, limEntry, live) {
+    var s = limEntry ? formatTokenShare(total, limEntry.est, live, Boolean(limEntry.stale), limEntry.estimated_at) : null;
+    if (!s) return null;
+    var cell = document.createElement("span");
+    cell.className = s.high ? "tok-share tok-share-hi" : "tok-share";
+    cell.textContent = prefix + " ≈" + s.estText + " (" + s.pctText + ")";
+    cell.title = s.title;
+    return cell;
+  }
+
+  function formatClaudeTokenTitle(cu) {
+    if (!cu || typeof cu !== "object") return "";
+    var fmt = function (n) { return Number(n || 0).toLocaleString("en-US"); };
+    var oneLine = function (u) {
+      return "입력 " + fmt(u.in) + " · 캐시 쓰기 " + fmt(u.cache_write) + " · 캐시 읽기 " + fmt(u.cache_read) + " · 출력 " + fmt(u.out);
+    };
+    var lines = [];
+    var main = cu.main && typeof cu.main === "object" ? cu.main : null;
+    var sub = cu.sub && typeof cu.sub === "object" ? cu.sub : null;
+    var hasMain = Boolean(main && (Number(main.total) > 0 || Number(main.calls) > 0));
+    var hasSub = Boolean(sub && (Number(sub.total) > 0 || Number(sub.calls) > 0));
+    if (hasMain && hasSub) {
+      lines.push("본 세션: " + oneLine(main));
+      lines.push("서브: " + oneLine(sub));
+    } else if (hasMain) {
+      lines.push(oneLine(main));
+    } else if (hasSub) {
+      lines.push(oneLine(sub));
+    }
+    return lines.join("\n");
+  }
+
+  function claudeUsageInfo(r) {
+    var cu = r && r.claude_usage;
+    if (!cu || typeof cu !== "object") return null;
+    var main = cu.main && typeof cu.main === "object" ? cu.main : null;
+    var sub = cu.sub && typeof cu.sub === "object" ? cu.sub : null;
+    var hasMain = Boolean(main && (Number(main.total) > 0 || Number(main.calls) > 0));
+    var hasSub = Boolean(sub && (Number(sub.total) > 0 || Number(sub.calls) > 0));
+    if (!hasMain && !hasSub) return null;
+    var fmt = function (n) { return Number(n || 0).toLocaleString("en-US"); };
+    var total = (hasMain ? Number(main.total) || 0 : 0) + (hasSub ? Number(sub.total) || 0 : 0);
+    var parts = [];
+    if (hasMain) parts.push("본 세션 " + fmt(main.total) + " (" + fmt(main.calls) + "회)");
+    if (hasSub) parts.push("서브 " + fmt(sub.total) + " (" + fmt(sub.calls) + "회)");
+    return { total: total, detail: parts.join(" · "), title: formatClaudeTokenTitle(cu) };
+  }
 
   function recordLastStep(r) {
     var steps = r && Array.isArray(r.process) ? r.process : [];
@@ -5371,62 +5483,123 @@
   }
   function recordContextKey(r) { return r && r.session_id ? String(r.session_id) + "|" + recordLastStep(r) : ""; }
 
-  function tokenMetaItems(r) {
+  function agyBreakdownText(r) {
     var num = function (v) { var n = Number(v); return (!v || isNaN(n)) ? 0 : n; };
-    var total = num(r.total_tokens), input = num(r.input_tokens), output = num(r.output_tokens), thinking = num(r.thinking_tokens);
-    var ctxInfo = recordContexts[recordContextKey(r)] || null;
-    var items = [];
-    // 항목마다: label(이름) · value(값) · sub(덧붙임. 없으면 빈 글자) · text(셋을 합친 글자) · title(설명) · cls(항목 모양)
-    var add = function (label, value, sub, title, cls) { items.push({ label: label, value: value, sub: sub, text: label + " " + value + (sub ? " (" + sub + ")" : ""), title: title, cls: cls || "" }); };
-    if (total) { add("총 토큰", total.toLocaleString(), "", "총 토큰 = 입력 + 출력(캐시 읽기와 사고는 따로 더하지 않습니다)", "tok-total"); }
-    if (input) {
-      add("입력", input.toLocaleString(), ctxInfo && ctxInfo.cache > 0 ? "캐시 " + ctxInfo.cache.toLocaleString() : "",
-        "이 위임 호출이 쓴 입력 토큰(캐시 밖). 괄호는 캐시에서 읽은 입력으로 총 토큰에는 넣지 않습니다.");
+    var input = num(r.input_tokens), output = num(r.output_tokens), thinking = num(r.thinking_tokens);
+    var ctxInfo = (r && r._liveCtx) || recordContexts[recordContextKey(r)] || null;
+    var parts = [];
+    if (input > 0) parts.push("입력 " + input.toLocaleString("en-US"));
+    if (ctxInfo && ctxInfo.cache > 0) parts.push("캐시 " + Number(ctxInfo.cache).toLocaleString("en-US"));
+    if (output > 0) {
+      parts.push("출력 " + output.toLocaleString("en-US") + (thinking > 0 ? " (사고 " + thinking.toLocaleString("en-US") + ")" : ""));
     }
-    if (output) {
-      add("출력", output.toLocaleString(), thinking > 0 ? "응답 " + Math.max(0, output - thinking).toLocaleString() + " · 사고 " + thinking.toLocaleString() : "",
-        "이 위임 호출이 쓴 출력 토큰. 사고(thinking) 토큰이 이미 들어 있어서 응답과 사고로 나눠 보여 줍니다.");
-    }
-    if (ctxInfo && ctxInfo.context > 0) {
-      add("현재 컨텍스트", Number(ctxInfo.context).toLocaleString(), "", "이 호출의 마지막 턴이 모델에 보낸 입력 하나의 크기(캐시 포함). 누적 토큰과 다른, 지금 대화의 크기입니다.");
-    }
-    return items;
+    if (ctxInfo && ctxInfo.context > 0) parts.push("컨텍스트 " + Number(ctxInfo.context).toLocaleString("en-US"));
+    return parts.join(" · ");
   }
 
-  // 토큰 줄의 항목 하나: 이름(흐리게) · 값(진하게) · 덧붙임(작고 흐리게)을 나눠 그려 눈으로 구분되게 한다.
-  function setTokItem(el, label, value, sub) {
-    while (el.firstChild) { el.removeChild(el.firstChild); }
-    var l = document.createElement("span"); l.className = "tok-label"; l.textContent = label; el.appendChild(l);
-    var v = document.createElement("b"); v.className = "tok-val"; v.textContent = value; el.appendChild(v);
-    if (sub) { var s = document.createElement("span"); s.className = "tok-sub"; s.textContent = sub; el.appendChild(s); }
-  }
-  function buildTokItem(label, value, sub, title, cls) {
-    var el = document.createElement("span");
-    el.className = "tok-item" + (cls ? " " + cls : "");
-    if (title) { el.title = title; }
-    setTokItem(el, label, value, sub);
-    return el;
+  function appendTokenSourceRows(list, sourceName, total, detailText, totalTitle, lim, live) {
+    var item = document.createElement("div");
+    item.className = "tok-source";
+
+    var srcEl = document.createElement("span");
+    srcEl.className = "tok-src";
+    srcEl.textContent = sourceName;
+    item.appendChild(srcEl);
+
+    var bodyEl = document.createElement("div");
+    bodyEl.className = "tok-body";
+
+    var mainEl = document.createElement("div");
+    mainEl.className = "tok-main";
+
+    var totEl = document.createElement("span");
+    totEl.className = "tok-total-num";
+    totEl.textContent = Number(total || 0).toLocaleString("en-US");
+    if (live) totalTitle = totalTitle ? "진행 중(지금까지)\n" + totalTitle : "진행 중(지금까지)";
+    if (totalTitle) totEl.title = totalTitle;
+    mainEl.appendChild(totEl);
+
+    var shares = [];
+    var s5 = buildShareCell("5시간", total, lim && lim.five_hour, live);
+    if (s5) shares.push(s5);
+    var s7 = buildShareCell("주간", total, lim && (lim.weekly || lim.seven_day), live);
+    if (s7) shares.push(s7);
+
+    if (shares.length > 0) {
+      var limEl = document.createElement("span");
+      limEl.className = "tok-limits";
+      var slash = document.createElement("span");
+      slash.className = "tok-sep";
+      slash.textContent = " / ";
+      limEl.appendChild(slash);
+      limEl.appendChild(shares[0]);
+      if (shares.length > 1) {
+        var dot = document.createElement("span");
+        dot.className = "tok-sep";
+        dot.textContent = " · ";
+        limEl.appendChild(dot);
+        limEl.appendChild(shares[1]);
+      }
+      mainEl.appendChild(limEl);
+    }
+    bodyEl.appendChild(mainEl);
+
+    if (detailText) {
+      var detEl = document.createElement("div");
+      detEl.className = "tok-detail";
+      detEl.textContent = detailText;
+      bodyEl.appendChild(detEl);
+    }
+
+    item.appendChild(bodyEl);
+    list.appendChild(item);
   }
 
-  // agy 토큰 줄(총 토큰 · 입력 · 출력 · 현재 컨텍스트)을 접지 않고 실행 줄 바로 아래에 한 줄로 보인다.
-  // 다른 줄(실행 · 식별)처럼 머리말을 달아 내용이 같은 자리에서 시작한다.
-  function fillTokenMeta(row, r) {
+  // 위임 카드의 토큰 블록: agy · Claude 소스별로 2줄(총합 + 한도 추정, 세부 내역)을 왼쪽 정렬 흐름으로 보여 준다.
+  function fillTokenMeta(row, r, limitsOverride) {
     while (row.firstChild) { row.removeChild(row.firstChild); }
-    var items = tokenMetaItems(r);
-    if (items.length === 0) { return; }
+    var live = Boolean(r && r._live);
+    var hasAgy = Number(r && r.total_tokens) > 0;
+    var cuInfo = claudeUsageInfo(r);
+    if (!hasAgy && !cuInfo) return;
+
+    var lim = (limitsOverride !== undefined) ? limitsOverride : (typeof windowLimits !== "undefined" ? windowLimits : null);
     row.appendChild(metaHead("토큰"));
-    items.forEach(function (it) {
-      row.appendChild(buildTokItem(it.label, it.value, it.sub, it.title, it.cls));
-    });
+    var list = document.createElement("div");
+    list.className = "tok-list";
+
+    if (hasAgy) {
+      var m = (typeof recordModel === "function") ? recordModel(r) : (r && r.model || "");
+      var fam = agyLimitFamily(m);
+      var agyLim = (lim && fam && lim[fam]) ? lim[fam] : null;
+      appendTokenSourceRows(list, "agy", Number(r.total_tokens), agyBreakdownText(r), "", agyLim, live);
+    }
+    if (cuInfo) {
+      appendTokenSourceRows(list, "Claude", cuInfo.total, cuInfo.detail, cuInfo.title, lim && lim.claude, live);
+    }
+    row.appendChild(list);
   }
 
-  function buildTokenMeta(r) {
-    if (!Number(r && r.total_tokens)) return null;
+  // 진행 중(대기 · 실행) 위임의 토큰 블록용 임시 기록. agy 는 진행 정보(progress.tokens), Claude 는 pending 의 claude_usage 를 쓴다.
+  // 값은 "지금까지" 이므로 _live 표시를 달아 title 에 알린다.
+  function pendingTokenRecord(p) {
+    var tk = p && p.progress && p.progress.tokens;
+    var rec = { task_id: p && p.task_id, model: p && p.model, claude_usage: p && p.claude_usage, _live: true };
+    if (tk && Number(tk.total) > 0) {
+      rec.total_tokens = Number(tk.total);
+      rec.input_tokens = Number(tk.input) || 0;
+      rec.output_tokens = Number(tk.output) || 0;
+      rec._liveCtx = { cache: Number(tk.cache) || 0, context: Number(tk.context) || 0 };
+    }
+    return rec;
+  }
+
+  function buildTokenMeta(r, limitsOverride) {
     var row = document.createElement("div");
     row.className = "meta token-meta";
     row.setAttribute("data-token-task", tokenRecordKey(r));
-    fillTokenMeta(row, r);
-    return row.childNodes.length ? row : null;
+    fillTokenMeta(row, r, limitsOverride);
+    return row.children.length ? row : null;
   }
 
   // 끝난 위임의 캐시 읽기·현재 컨텍스트를 서버(/api/qa/contexts)에 묻는다. 받으면 화면의 토큰 줄을 다시 채운다.
@@ -6820,7 +6993,7 @@
     if (viaMcp(r)) { meta.appendChild(metaItem("MCP", "src-mcp", "위임 경로: Claude 가 antigravity MCP 로 직접 호출한 기록")); }
     card.appendChild(meta);
 
-    var modelRow = buildModelRow(modelName, r.claude_model, r.claude_effort, isLastResortFallback(r), rAgent, r.tried_models, isOk);
+    var modelRow = buildModelRow(modelName, r.claude_model, r.claude_effort, false, rAgent, r.tried_models, isOk);
     if (modelRow) card.appendChild(modelRow);
 
     var dataKey = card.getAttribute("data-key");
@@ -7288,6 +7461,7 @@
 
     var dataKey = card.getAttribute("data-key");
     var metaToggleBtn = attachMetaMore(card, dataKey, p.task_id, [
+      buildTokenMeta(pendingTokenRecord(p)),
       buildSessionMeta(p.session, p.session_id, p.task_id)   // 식별 줄: 모든 카드에(세션이 없으면 "세션 없음")
     ]);
 

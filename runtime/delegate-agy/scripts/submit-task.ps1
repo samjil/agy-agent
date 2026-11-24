@@ -14,10 +14,10 @@
 #   -WaitSeconds <초>   기다리는 최대 시간(기본 170 — device_bash 한 호출이 3분 제한이라 그 안에 돌아오게)
 #   -MaxWaitSec <초>    -WaitSeconds 와 같은 뜻이고, 주면 그것을 쓴다(폴 시작 기준 그 시간까지만 기다림, 연장 없음)
 #   -CancelOnTimeout    기다리는 시간이 다 됐는데 안 끝난 작업을 취소한다. -MaxWaitSec 를 안 주면 작업 시작(claim started_at 또는 ID 제출 시각) 기준
-#                       단계의 대기 한도(config\models.json 의 wait_sec: quick 3분 · build 8분 · build-hard 12분 · feature · feature-argon · think · think-argon · deep 20분)까지 기다린다.
-#                       한도가 지나도 작업이 계속 진행 중이면(대화 활동·도구 출력) 멈출 때까지 대기를 연장하며, 5분간 진행이 없거나 2시간 절대 한도를 넘길 때만 취소한다.
+#                       단계의 대기 한도(config\models.json 의 wait_sec: quick 3분 · build 8분 · build-hard 12분 · feature · feature-carbon · think · think-carbon · deep 20분)까지 기다린다.
+#                       한도가 지나도 작업이 계속 진행 중이거나(대화 활동·도구 출력) 백그라운드 도구가 도는 중이면 대기를 연장하며, 5분간 진행이 없고 도는 백그라운드 도구도 없을 때나 2시간 절대 한도를 넘길 때만 취소한다.
 #                       대기열에서 다른 작업 실행으로 차례를 기다리는 중이어도 워처가 살아 있으면 취소하지 않는다. 백그라운드 대기로 쓴다
-#   지시문 맨 위에 "@model: <단계>" 를 쓰면 그 단계로 보낸다(quick · build · build-hard · feature · feature-argon · think · think-argon · deep). 없으면 워처가 quick/build 중에서 고른다.
+#   지시문 맨 위에 "@model: <단계>" 를 쓰면 그 단계로 보낸다(quick · build · build-hard · feature · feature-carbon · think · think-carbon · deep). 없으면 워처가 quick/build 중에서 고른다.
 #   지시문 맨 위에 "@cmd: <명령>"(goal · swarm · run-workflow · boost · browser · plan) · "@mode: <모드>"(plan · accept-edits · auto) 를 쓰면 실행 명령과 권한 모드를 함께 넘긴다.
 #   새로 넣으면 표준 오류에 "[단계] <단계> (<모델>) · 대기 한도 <초>" 한 줄을 알린다.
 #   지시문 맨 위에 "@reason: <한 줄>" 을 쓰면 위임 사유로 기록하고(claude-meta\<ID>.json 의 reason) agy 에 보내는 지시문에서는 뺀다.
@@ -321,16 +321,14 @@ function Get-TaskBodyText([string]$Text) {
 }
 
 # 취소를 마무리한다: 응답 파일(취소 사유)을 쓰고, 지시 파일이 inbox 에 남아 있으면 processed 로 옮기고, 실행 표시를 지우고, 기록(DB)에 CANCELLED 로 남긴다.
-function Complete-CancelledTask([string]$Id, [string]$Reason) {
+function Complete-CancelledTask([string]$Id, [string]$Reason, $Claim = $null) {
     $layout = Get-AgyLayout $script:RuntimeDirResolved
     $message = "$script:CancelledPrefix $Reason"
     $outFile = Join-Path $script:OutboxDir "$Id.response.md"
     $taskText = ""
-    $session = ""
-    $model = ""
     $claimPath = Join-Path $layout.RunningDir "$Id.json"
-    if (Test-Path -LiteralPath $claimPath -PathType Leaf) {
-        try { $c = Read-TextFile $claimPath | ConvertFrom-Json; $session = [string]$c.session; $model = [string]$c.model } catch {}
+    if ($null -eq $Claim -and (Test-Path -LiteralPath $claimPath -PathType Leaf)) {
+        try { $Claim = Read-TextFile $claimPath | ConvertFrom-Json } catch { $Claim = $null }
     }
     foreach ($ext in @(".md", ".txt")) {
         $cand = Join-Path $inboxDir ($Id + $ext)
@@ -349,12 +347,48 @@ function Complete-CancelledTask([string]$Id, [string]$Reason) {
     }
     $existing = $false
     if ((Test-Path -LiteralPath $outFile -PathType Leaf) -and ((Get-Item -LiteralPath $outFile).Length -gt 0)) { $existing = $true }
-    if (-not $existing) {
-        New-Item -ItemType Directory -Force -Path $script:OutboxDir | Out-Null
-        [System.IO.File]::WriteAllText($outFile, $message, $utf8)
-    }
     Remove-Item -LiteralPath $claimPath -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath (Join-Path $layout.RunningDir "$Id.cancel") -Force -ErrorAction SilentlyContinue
+    # 응답 파일이 이미 있으면 워처가 취소를 마무리하고 기록(DB)까지 남긴 것이므로 덮어쓰지 않는다.
+    if ($existing) { return }
+
+    $session = if ($Claim -and $Claim.session) { [string]$Claim.session } else { "" }
+    $model = if ($Claim -and $Claim.model) { [string]$Claim.model } else { "" }
+    $triedModels = if ($Claim -and $Claim.tried) { [string]$Claim.tried } else { "" }
+    $convId = if ($Claim -and $Claim.conversation_id) { [string]$Claim.conversation_id } else { "" }
+    $startedDt = $null
+    $elapsedSec = ""
+    $startText = if ($Claim -and $Claim.started_at) { [string]$Claim.started_at } elseif ($Claim -and $Claim.started) { [string]$Claim.started } else { "" }
+    if ($startText) {
+        $parsedStart = [datetime]::MinValue
+        if ([datetime]::TryParse($startText, [ref]$parsedStart)) {
+            $startedDt = $parsedStart
+            $elapsedSec = [string][math]::Round([math]::Max(0.0, ((Get-Date) - $parsedStart).TotalSeconds), 1)
+        }
+    }
+
+    $answer = $message
+    $processSteps = $null
+    if ($convId) {
+        try {
+            if (-not (Get-Command Get-AgyCancelledWorkText -ErrorAction SilentlyContinue)) {
+                $pLib = Join-Path $PSScriptRoot "sub\agy-progress.ps1"
+                if (Test-Path -LiteralPath $pLib) { . $pLib }
+            }
+            $agyHomeDir = Get-AgyHomeDir
+            $workText = Get-AgyCancelledWorkText $agyHomeDir $convId $startedDt
+            if ($workText) { $answer = $message + "`n`n" + $workText }
+            $tPath = Get-AgyTranscriptPath $agyHomeDir $convId
+            if ($tPath -and (Test-Path -LiteralPath $tPath -PathType Leaf)) {
+                $since = if ($session -and $startedDt) { $startedDt.AddSeconds(-5) } else { $null }
+                $processSteps = @((Read-AgyProcessSteps $tPath 0 1500 500 300 $since).Steps)
+            }
+        } catch {}
+    }
+
+    New-Item -ItemType Directory -Force -Path $script:OutboxDir | Out-Null
+    [System.IO.File]::WriteAllText($outFile, $answer, $utf8)
+
     try {
         . (Join-Path $PSScriptRoot "sub\agy-db.ps1")
         $rec = [ordered]@{
@@ -362,10 +396,14 @@ function Complete-CancelledTask([string]$Id, [string]$Reason) {
             computer_name = [string]$env:COMPUTERNAME
             task_id       = $Id
             model         = $model
+            tried_models  = $triedModels
+            elapsed_sec   = $elapsedSec
             status        = "CANCELLED"
             session       = $session
+            session_id    = $convId
             question      = (Get-TaskBodyText $taskText)
-            answer        = $message
+            answer        = $answer
+            process       = $processSteps
         }
         [void](Write-QaRecordToDb $layout.DbPath $rec 'Upsert')
     } catch {}
@@ -392,7 +430,7 @@ function Invoke-CancelTask([string]$Id, [string]$Reason) {
             }
             # 워처가 살아 있으면 곧 표시를 보고 응답 · 기록을 남긴다. 잠시 기다려 보고, 안 되면(워처가 꺼져 있음) 여기서 마무리한다.
             for ($w = 0; $w -lt 20 -and -not (Test-TaskDone $Id); $w++) { Start-Sleep -Milliseconds 500 }
-            Complete-CancelledTask $Id $Reason
+            Complete-CancelledTask $Id $Reason $claim
             return "cancelled"
         }
         # 대기 중: 지시 파일을 치운다(워처가 그 사이 가져갔으면 다시 확인한다)
@@ -579,6 +617,7 @@ if ($MaxWaitSec -gt 0 -or -not $CancelOnTimeout) {
     $layout = Get-AgyLayout $script:RuntimeDirResolved
     $runningDir = $layout.RunningDir
     $extendedPrinted = @{}
+    $bgExtendedPrinted = @{}
 
     while ($true) {
         $pending = @($ids | Where-Object { -not (Test-TaskDone $_) -and ($timedOut -notcontains $_) })
@@ -642,10 +681,18 @@ if ($MaxWaitSec -gt 0 -or -not $CancelOnTimeout) {
                             $extendedPrinted[$id] = $true
                         }
                     } else {
-                        # 멈춤: 최근 stall window 동안 활동 없음
-                        $cancelReason = "기다리는 한도({0}초)가 지났고 최근 {1}초 동안 진행이 없어 취소했습니다. 직접 처리하세요." -f $tLimit, $stallSec
-                        [void](Invoke-CancelTask $id $cancelReason)
-                        $timedOut += $id
+                        # 멈춤 후보: 최근 stall window 동안 활동 없음. 다만 agy 가 백그라운드로 돌린 도구가 아직 안 끝났으면 기다린다(워처와 같은 판정).
+                        $bgPending = @(Get-AgyPendingBackgroundTasks $agyHome $convId)
+                        if ($bgPending.Count -gt 0) {
+                            if (-not $bgExtendedPrinted.ContainsKey($id)) {
+                                [Console]::Error.WriteLine(("[대기 연장] {0}: 한도 {1}초가 지났고 {2}초 넘게 새 기록이 없지만 agy 가 백그라운드로 돌린 도구 {3}건({4})이 아직 끝나지 않아 기다립니다. 워처의 절대 마감이나 {5}초 절대 한도에서 끝납니다." -f $id, $tLimit, $stallSec, $bgPending.Count, ($bgPending -join ', '), $hardTimeoutSec))
+                                $bgExtendedPrinted[$id] = $true
+                            }
+                        } else {
+                            $cancelReason = "기다리는 한도({0}초)가 지났고 최근 {1}초 동안 진행이 없어 취소했습니다. 직접 처리하세요." -f $tLimit, $stallSec
+                            [void](Invoke-CancelTask $id $cancelReason)
+                            $timedOut += $id
+                        }
                     }
                 } else {
                     # claim 에 conversation_id 가 아직 없음: limit + window 넘었으면 멈춤으로 취소

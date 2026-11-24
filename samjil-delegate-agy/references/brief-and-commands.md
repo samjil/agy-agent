@@ -5,7 +5,7 @@
 | Line | Meaning |
 |---|---|
 | `@cwd: <folder>` | Let agy read and write this folder. Repeat the line for several folders. A missing folder fails the task before agy starts. Sticky per `@session`. |
-| `@model: <tier or id>` | A tier (`quick`, `build`, `build-hard`, `feature`, `feature-argon`, `think`, `think-argon`, `deep`; recommended) uses its model and fallbacks; a model ID uses exactly that model (see `models.md`). Without it the watcher picks `quick` or `build`. |
+| `@model: <tier or id>` | A tier (`quick`, `build`, `build-hard`, `feature`, `feature-carbon`, `think`, `think-carbon`, `deep`; recommended) uses its model and fallbacks; a model ID uses exactly that model (see `models.md`). Without it the watcher picks `quick` or `build`. |
 | `@cmd: <command>` | Headless execution slash command (`goal`, `swarm`, `run-workflow`, `boost`, `browser`, `plan`; leading `/` optional). Preserved across file-reference delivery (`"/swarm @prompt.txt"`) and `@upgrade`. Quota-heavy commands (`swarm`, `run-workflow`, `boost`) raise the default wait limit to at least 1200 s. Interactive TUI-only commands (`teamwork`, `grill-me`, etc.) are rejected before calling `agy`. |
 | `@mode: <mode>` | Passes `--mode <plan|accept-edits|auto>` to `agy` (note `--mode plan` implies `/plan`, so the watcher avoids duplicating `/plan`). |
 | `@session: <name>` | Continue the same agy conversation across several submissions (feedback after review, multi-step jobs). Use a short, stable name. Independent tasks should not share a session. |
@@ -69,7 +69,7 @@ In addition to `@model:` tiers, `watch-agy.ps1` and `submit-task.ps1` support `a
 
 | Command / Mode | Best task shape | How watcher handles it & quota rule |
 |---|---|---|
-| `feature` / `feature-argon` (Orchestrator, no `@cmd`) | Everyday multi-file feature in one linear flow (planning model + Hydrogen executor) | Standard linear cost; Neon or Argon plans, Hydrogen executes. |
+| `feature` / `feature-carbon` (Orchestrator, no `@cmd`) | Everyday multi-file feature in one linear flow (planning model + Hydrogen executor) | Standard linear cost; Neon or Carbon plans, Hydrogen executes. |
 | `@cmd: goal` | Clear spec that must run autonomously until 100% done (all tests passing) | Strips internal `<!-- GOAL_COMPLETE -->` / `<!-- GOAL_CANCELLED -->` tags cleanly. Safe for Pro/Ultra & free plans. |
 | `@cmd: swarm` | Wide scope splitting cleanly into non-overlapping files/tracks + Verifier cross-check | Watcher injects `workspace:"inherit"` + no-commit rule, raises wait limit >= 1200 s, monitors child transcripts against false stalls. **Uses a lot of agy quota: only when the task shape needs it.** |
 | `@cmd: run-workflow` | Uniform N-file fan-out or strict schema-typed Python `parallel()`/`pipeline()` stages | Watcher injects `workspace:"inherit"` + no-commit rule, raises wait limit >= 1200 s. **Uses a lot of agy quota: only when the task shape needs it.** |

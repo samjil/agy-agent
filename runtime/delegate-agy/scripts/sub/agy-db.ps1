@@ -216,7 +216,8 @@ function Initialize-AgySqlite {
 #   17: usage_questions 에 Claude 노력 단계(claude_effort). 열을 새로 더할 때는 usage_files 를 비워 대화 기록을 처음부터 다시 읽게 한다(예전 질문의 노력도 채운다).
 #   18: tasks 에 Gemini 가 프롬프트만으로 산정한 예상 시간(estimated_sec) 추가 (2026-11-20 부터 쓰지 않음).
 #   19: usage_questions 에 위임을 보낸 서브에이전트 모델(agent_model · agent_effort) 추가. claude-meta 에서 채우므로 usage_files 는 비우지 않는다.
-$script:AgyDbSchemaVersion = 19
+#   20: claude_usage(위임별 Claude 토큰 집계 캐시) 추가. 다른 표는 건드리지 않는다.
+$script:AgyDbSchemaVersion = 20
 $script:AgyDbSchemaSql = @(
     "CREATE TABLE IF NOT EXISTS tasks (
         task_id TEXT PRIMARY KEY NOT NULL,
@@ -233,6 +234,11 @@ $script:AgyDbSchemaSql = @(
         conversation_id TEXT, cwd TEXT NOT NULL DEFAULT '[]', model TEXT,
         created_at TEXT, last_used_at TEXT, turn_count INTEGER NOT NULL DEFAULT 0)",
     "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY NOT NULL, value TEXT)",
+    "CREATE TABLE IF NOT EXISTS claude_usage (
+        task_id TEXT PRIMARY KEY NOT NULL,
+        json TEXT,
+        src_mtime TEXT,
+        computed_at TEXT)",
     # 실측 통계: 대화 기록 파일별로 어디까지 읽었는지 / Claude 가 남긴 사유 / 질문 한 건의 측정값(시각은 모두 UTC ISO 글자)
     "CREATE TABLE IF NOT EXISTS usage_files (path TEXT PRIMARY KEY NOT NULL, offset INTEGER NOT NULL DEFAULT 0, mtime TEXT)",
     "CREATE TABLE IF NOT EXISTS usage_notes (id INTEGER PRIMARY KEY, session TEXT, noted_at TEXT, mode TEXT, reason TEXT)",
@@ -724,4 +730,42 @@ function Get-AgyMeta($Db, [string]$Key) {
 
 function Set-AgyMeta($Db, [string]$Key, [string]$Value) {
     [void]$Db.Execute('INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', [object[]]@($Key, $Value))
+}
+
+# ============================================================================
+# claude_usage (위임별 Claude 토큰 집계 캐시)
+# ============================================================================
+
+function Get-ClaudeUsageCache($Db, [string]$TaskId) {
+    if (-not $TaskId) { return $null }
+    $rows = $Db.Query('SELECT json, src_mtime, computed_at FROM claude_usage WHERE task_id = ?', [object[]]@($TaskId))
+    if ($rows.Count -eq 0) { return $null }
+    $r = $rows[0]
+    return @{
+        json        = if ($null -ne $r['json']) { [string]$r['json'] } else { "" }
+        src_mtime   = if ($null -ne $r['src_mtime']) { [string]$r['src_mtime'] } else { "" }
+        computed_at = if ($null -ne $r['computed_at']) { [string]$r['computed_at'] } else { "" }
+    }
+}
+
+function Get-ClaudeUsageCacheMap($Db) {
+    $map = @{}
+    foreach ($r in @($Db.Query('SELECT task_id, json, src_mtime, computed_at FROM claude_usage', $null))) {
+        $tid = [string]$r['task_id']
+        if (-not $tid) { continue }
+        $map[$tid] = @{
+            json        = if ($null -ne $r['json']) { [string]$r['json'] } else { "" }
+            src_mtime   = if ($null -ne $r['src_mtime']) { [string]$r['src_mtime'] } else { "" }
+            computed_at = if ($null -ne $r['computed_at']) { [string]$r['computed_at'] } else { "" }
+        }
+    }
+    return $map
+}
+
+function Set-ClaudeUsageCache($Db, [string]$TaskId, [string]$Json, [string]$SrcMtime, [string]$ComputedAt) {
+    if (-not $TaskId) { return }
+    [void]$Db.Execute(
+        'INSERT INTO claude_usage (task_id, json, src_mtime, computed_at) VALUES (?, ?, ?, ?) ON CONFLICT(task_id) DO UPDATE SET json=excluded.json, src_mtime=excluded.src_mtime, computed_at=excluded.computed_at',
+        [object[]]@($TaskId, $Json, $SrcMtime, $ComputedAt)
+    )
 }

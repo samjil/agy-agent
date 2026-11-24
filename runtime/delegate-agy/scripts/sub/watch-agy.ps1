@@ -90,7 +90,7 @@ if ($MaxParallel -le 0) {
 
 # agy 응답 JSON에는 모델명이 담겨오지 않습니다 (CLI 자체 한계). 그래서 "어떤 모델을 쓸지 우리가 --model로 직접 지정"하고,
 # 성공한 모델을 기록합니다(그래서 model 컬럼은 정확합니다).
-# 모델은 단계(quick · build · build-hard · feature · feature-argon · think · think-argon · deep)로 고르고, 단계마다 주 모델과 폴백 순서가 설정 파일에 있습니다:
+# 모델은 단계(quick · build · build-hard · feature · feature-carbon · think · think-carbon · deep)로 고르고, 단계마다 주 모델과 폴백 순서가 설정 파일에 있습니다:
 #   <delegate-agy>\config\models.json (기본, 동기화 · 설치가 덮어씀) + models.local.json (사용자 덮어쓰기). 읽기는 agy-models.ps1.
 # 설정은 작업마다 다시 읽습니다(바꿔도 워처를 다시 켤 필요가 없습니다).
 # 워처가 켜질 때 `agy models` 로 실제로 쓸 수 있는 모델 목록을 받아 $AvailableModelsFile 에 적고, 작업자는 그 목록에 없는 모델을 건너뜁니다.
@@ -111,7 +111,8 @@ function Get-WatcherAvailableModels {
 function Get-WatcherDefaultChain {
     $cfg = Get-WatcherModelConfig
     $tier = if ($cfg.Auto -and $cfg.Auto.write) { [string]$cfg.Auto.write } else { "build" }
-    return @(Get-AgyTierChain $cfg $tier (Get-WatcherAvailableModels))
+    $avail = @(Get-WatcherAvailableModels)
+    return @(Get-AgyTierChain $cfg $tier $avail)
 }
 
 # 이 패턴에 걸리는 오류일 때만 "다음 모델로 자동 폴백"합니다 (쿼터 초과/요청 과다/일시적
@@ -119,9 +120,21 @@ function Get-WatcherDefaultChain {
 # 재시도하면 시간만 낭비하므로 걸러냅니다.
 $FallbackErrorPattern = '(?i)(quota|rate.?limit|429|resource.?exhausted|overloaded|unavailable|capacity|too many requests|exceeded|throttle)'
 
+# 폴백 대상 오류 판정: 일반 한도 · 과부하($FallbackErrorPattern) 또는 -xhigh 모델에서 effort/xhigh/thinking level 관련 HTTP 400.
+function Test-AgyFallbackError([string]$ErrorText, [string]$Model) {
+    if (-not $ErrorText) { return $false }
+    if ($ErrorText -match $FallbackErrorPattern) { return $true }
+    if ($Model -match '(?i)-xhigh$' -and
+        $ErrorText -match '(?i)(?:\b400\b|HTTP\s*400|status(?:\s*code)?\s*[:=]?\s*400)' -and
+        $ErrorText -match '(?i)(effort|xhigh|extra.?high|thinking.?level|thinking_level|thinking.?budget|reasoning.?effort)') {
+        return $true
+    }
+    return $false
+}
+
 # --- 요청에서 고르는 모델 (@model:) ---
 # 지시파일 맨 위에 "@model: <단계 또는 모델>" 줄을 씁니다.
-#   단계 이름(quick · build · build-hard · feature · feature-argon · think · think-argon · deep, 옛 별칭 low · medium · high): 그 단계의 주 모델부터, 한도 · 과부하 오류면 폴백 순서대로.
+#   단계 이름(quick · build · build-hard · feature · feature-carbon · think · think-carbon · deep, 옛 별칭 low · medium · high · think-argon · feature-argon): 그 단계의 주 모델부터, 폴백 순서대로.
 #   모델 이름(설정의 allowed): 그 모델 하나만 씁니다. 쿼터 초과/사용 불가여도 다른 모델로 자동 전환하지 않고 실패로 기록합니다
 #   (원하지 않은 모델의 결과를 조용히 받지 않게 하려는 것이고, 어떻게 할지는 Claude 가 정합니다).
 # 단계도 모델도 아닌 값은 agy 를 부르지 않고 바로 실패 처리합니다.
@@ -517,7 +530,7 @@ function New-QaRecordFromRow($r, [string]$QuestionPath = "") {
         $tPath = Get-AgyTranscriptPath (Get-AgyHomeDir) ([string]$r.session_id)
         if ($tPath -and (Test-Path -LiteralPath $tPath)) {
             $since = $null
-            if ($r.session -and $r.timestamp -and $null -ne $r.elapsed_sec) {
+            if ($r.session -and $r.timestamp -and $null -ne $r.elapsed_sec -and ([string]$r.elapsed_sec) -ne "") {
                 try {
                     $tsDate = [datetime]::Parse([string]$r.timestamp, [System.Globalization.CultureInfo]::InvariantCulture)
                     $el = [double]$r.elapsed_sec
@@ -1147,7 +1160,7 @@ function Invoke-AgyWithFallback($safePrompt, $targetCwd, [bool]$skipPerm, $errFi
 
         $isLast = ($candidate -eq $candidates[-1])
 
-        if (-not $isLast -and $errText -match $FallbackErrorPattern) {
+        if (-not $isLast -and (Test-AgyFallbackError $errText $candidate)) {
 
             Log "  모델 '$candidate' 사용 불가/쿼터 초과로 다음 모델로 폴백합니다: $errText"
 
@@ -1249,9 +1262,32 @@ function Resolve-DeadClaim($Claim, [string]$ClaimPath) {
     if ($inboxFile) {
         $msg = if ($wasCancelled) { "취소됨(CANCELLED): " + $(if ($cancelReason) { $cancelReason } else { "사용자 요청으로 취소했습니다." }) } else { "작업을 처리하던 프로세스가 끝내지 못하고 사라졌습니다(워처를 껐거나 강제 종료됐을 수 있습니다). 같은 지시를 다시 보내 주세요." }
         Log "$(if ($wasCancelled) { '취소' } else { '실패' }): $taskId - $msg"
+        $claimModel = if ($Claim.model) { [string]$Claim.model } else { $null }
+        $claimTried = if ($Claim.tried) { [string]$Claim.tried } else { $null }
+        $claimSession = if ($Claim.session) { [string]$Claim.session } else { "" }
+        $claimConvId = if ($Claim.conversation_id) { [string]$Claim.conversation_id } else { "" }
+        $startedDt = $null
+        $elapsedSec = $null
+        $startText = if ($Claim.started_at) { [string]$Claim.started_at } elseif ($Claim.started) { [string]$Claim.started } else { "" }
+        if ($startText) {
+            $parsedStart = [datetime]::MinValue
+            if ([datetime]::TryParse($startText, [ref]$parsedStart)) {
+                $startedDt = $parsedStart
+                $elapsedSec = [math]::Round([math]::Max(0.0, ((Get-Date) - $parsedStart).TotalSeconds), 1)
+            }
+        }
+        $respText = $msg
+        if ($claimConvId) {
+            try {
+                $workText = Get-AgyCancelledWorkText (Get-AgyHomeDir) $claimConvId $startedDt
+                if ($workText) { $respText = $msg + "`n`n" + $workText }
+            } catch {}
+        }
         $outFile = Join-Path $OutboxDir "$taskId.response.md"
-        if (-not (Test-Path -LiteralPath $outFile)) { Set-Content -Path $outFile -Value $msg -Encoding UTF8 }
-        Write-UsageRow $taskId $null $null $null $null $null $null $null $null $(if ($wasCancelled) { "CANCELLED" } else { "ERROR" }) ([string]$Claim.session) ""
+        if (-not (Test-Path -LiteralPath $outFile)) {
+            [System.IO.File]::WriteAllText($outFile, $respText, (New-Object System.Text.UTF8Encoding($false)))
+        }
+        Write-UsageRow $taskId $claimModel $null $claimTried $null $null $null $null $elapsedSec $(if ($wasCancelled) { "CANCELLED" } else { "ERROR" }) $claimSession $claimConvId
         Move-Item -LiteralPath $inboxFile -Destination (Join-Path $ProcessedDir (Split-Path $inboxFile -Leaf)) -Force -ErrorAction SilentlyContinue
         Update-QAReport
     }
@@ -1548,17 +1584,20 @@ function Invoke-InboxTaskBody([System.IO.FileInfo]$file) {
     }
 
     # 모델을 지정하지 않았고 새 대화(@session 없음)면 요청 내용으로 단계를 자동 선택한다(agy-autotier.ps1).
-    # 자동 선택은 quick(읽기만 하는 짧은 일) / build(파일을 바꾸는 일)만 고른다. build-hard · feature · feature-argon · think · think-argon · deep 은 Claude 가 @model 로 적는다.
+    # 자동 선택은 quick(읽기만 하는 짧은 일) / build(파일을 바꾸는 일)만 고른다. build-hard · feature · feature-carbon · think · think-carbon · deep 은 Claude 가 @model 로 적는다.
     # 이어가는 세션은 시작할 때의 모델을 유지한다.
     if (-not $requestedModel -and -not $sessionName -and (Test-AgyAutoTierEnabled)) {
         $autoTier = Get-AgyAutoTier $promptText (@($targetCwds).Count -gt 0)
         $modelTier = [string]$autoTier.Tier
-        $modelChain = @(Get-AgyTierChain (Get-WatcherModelConfig) $modelTier (Get-WatcherAvailableModels))
+        $cfgA = Get-WatcherModelConfig
+        $availA = @(Get-WatcherAvailableModels)
+        $modelChain = @(Get-AgyTierChain $cfgA $modelTier $availA)
         Log "  -> 모델 자동 선택: $modelTier ($($autoTier.Reason)) -> $($modelChain -join ' -> ')"
     } elseif (-not $requestedModel -and -not $conversationId) {
         $cfgD = Get-WatcherModelConfig
+        $availD = @(Get-WatcherAvailableModels)
         $modelTier = if ($cfgD.Auto -and $cfgD.Auto.write) { [string]$cfgD.Auto.write } else { "build" }
-        $modelChain = @(Get-AgyTierChain $cfgD $modelTier (Get-WatcherAvailableModels))
+        $modelChain = @(Get-AgyTierChain $cfgD $modelTier $availD)
     }
 
     $missingCwds = @(Get-MissingCwds $targetCwds)
@@ -1651,15 +1690,23 @@ function Invoke-InboxTaskBody([System.IO.FileInfo]$file) {
         $recTried    = $triedStr
 
         if ($agyResult.Success) {
-            # 단계의 앞 모델들이 한도 · 과부하로 막혀 맨 마지막 대안(3.8 Flash)으로 처리했으면 결과 맨 위에 알린다(검토를 더 꼼꼼히 하라는 뜻).
-            $lastResortBanner = ""
-            if (-not $conversationId -and $agyResult.Attempts -gt 1 -and (Test-AgyLastResortModel ([string]$agyResult.ModelUsed))) {
-                $lastResortBanner = "[알림] 단계 '$(if ($modelTier) { $modelTier } else { '기본' })' 의 앞 모델($(@($agyResult.TriedModels | Select-Object -SkipLast 1) -join ', '))이 한도 · 과부하로 막혀 맨 마지막 대안 $($agyResult.ModelUsed) 로 처리했습니다. 결과를 더 꼼꼼히 검토하세요.`r`n`r`n"
-                Log "  참고: 맨 마지막 대안 $($agyResult.ModelUsed) 로 처리했습니다(시도: $($agyResult.TriedModels -join ' -> '))"
-            }
             $cleanResponse = [string]$agyResult.Response
             if (Get-Command Remove-AgyGoalMarkers -ErrorAction SilentlyContinue) { $cleanResponse = Remove-AgyGoalMarkers $cleanResponse }
-            Set-Content -Path $outFile -Value ($guardBanner + $lastResortBanner + $cleanResponse) -Encoding UTF8
+            if ($effectiveSessionId -and (Get-Command Get-AgyPlannerTexts -ErrorAction SilentlyContinue) -and (Get-Command Remove-AgyInterimMessages -ErrorAction SilentlyContinue)) {
+                try {
+                    $tp = Get-AgyTranscriptPath (Get-AgyHomeDir) ([string]$effectiveSessionId)
+                    $callSince = (Get-Date).AddSeconds(-([double]$agyResult.ElapsedSec + 5))
+                    $plannerTexts = @(Get-AgyPlannerTexts $tp $callSince)
+                    if ($plannerTexts.Count -ge 2) {
+                        $strippedResponse = Remove-AgyInterimMessages $cleanResponse $plannerTexts
+                        if ($strippedResponse -ne $cleanResponse) {
+                            Log ("  -> 답변 앞의 중간 안내를 뺐습니다({0}자 -> {1}자)" -f $cleanResponse.Length, $strippedResponse.Length)
+                            $cleanResponse = $strippedResponse
+                        }
+                    }
+                } catch {}
+            }
+            Set-Content -Path $outFile -Value ($guardBanner + $cleanResponse) -Encoding UTF8
 
             # 이어가는 세션에서 agy 가 보고하는 duration_seconds 는 그 대화를 처음 연 때부터의 누적이라(사이에 쉰 시간 포함) 이번 호출의 시간이 아니다.
             # 그래서 이어가는 호출은 워처가 잰 이번 호출의 시간을 쓴다.

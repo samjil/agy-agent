@@ -2,7 +2,7 @@
 
 [![skills.sh](https://img.shields.io/badge/skills.sh-compatible-blue)](https://skills.sh)
 
-Claude Code 와 Antigravity(agy) 를 함께 쓰기 위한 스킬 모음과 부속 도구입니다. 대화 문맥이 필요하거나 한두 줄 수정은 Claude 가 직접 하고, 명세가 분명한 구현·수정·리팩터링·시험·UI 작업과 양이 많은 단순 작업은 agy 의 Gemini 4 Hydrogen/Neon/Argon 단계와 실행 슬래시 명령(`@cmd: goal · swarm · run-workflow · boost · browser · plan`)에 맡기며(매우 복잡한 결정 전에는 Neon `think` 또는 Argon `think-argon` 으로 상의), 두 에이전트가 파일로 대화하고 그 기록을 로컬 웹 대시보드에서 봅니다.
+Claude Code 와 Antigravity(agy) 를 함께 쓰기 위한 스킬 모음과 부속 도구입니다. 대화 문맥이 필요하거나 한두 줄 수정은 Claude 가 직접 하고, 명세가 분명한 구현·수정·리팩터링·시험·UI 작업과 양이 많은 단순 작업은 agy 의 Gemini 4 Hydrogen/Neon/Carbon 단계와 실행 슬래시 명령(`@cmd: goal · swarm · run-workflow · boost · browser · plan`)에 맡기며(매우 복잡한 결정 전에는 Neon `think` 또는 Carbon `think-carbon` 으로 상의), 두 에이전트가 파일로 대화하고 그 기록을 로컬 웹 대시보드에서 봅니다.
 [skills.sh](https://skills.sh) 에이전트 스킬 규약(Agent Skills Specification)을 따릅니다. **Windows(PowerShell 5.1) 전용**입니다.
 
 ## Quick start (English)
@@ -13,7 +13,7 @@ Hand bulky, simple, easy-to-verify work (log and document reading, translation, 
 2. Unzip this pack (or clone the repo) and **double-click `Install.cmd`**. It copies the skills to `~/.claude/skills`, the tools to `~/.samjil`, checks `agy`, and starts the background watcher.
 3. In Claude Code say: `ask agy to say hello`.
 
-- Claude does work itself when the conversation context is needed or for one/two-line fixes; it delegates spec-able implementation, fixes, refactors, tests and UI work plus bulky simple jobs to Gemini 4 Hydrogen/Neon/Argon tiers with slash-command optimization (`@cmd`/`@mode`), consults Neon (`think`) or Argon (`think-argon`) once before very complex decisions, and waits only up to the tier limit (3–20 minutes) before cancelling and doing it directly. The installer registers a SessionStart hook that starts the watcher and puts a one-line rule into each session. To skip the hook, install with `Install.cmd -AlwaysOff`; running it again with `-AlwaysOff` also removes an earlier hook.
+- Claude does work itself when the conversation context is needed or for one/two-line fixes; it delegates spec-able implementation, fixes, refactors, tests and UI work plus bulky simple jobs to Gemini 4 Hydrogen/Neon/Carbon tiers with slash-command optimization (`@cmd`/`@mode`), consults Neon (`think`) or Carbon (`think-carbon`) once before very complex decisions, and waits only up to the tier limit (3–20 minutes) before cancelling and doing it directly. The installer registers a SessionStart hook that starts the watcher and puts a one-line rule into each session. To skip the hook, install with `Install.cmd -AlwaysOff`; running it again with `-AlwaysOff` also removes an earlier hook.
 - agy answers in the language of your Windows region setting (Settings > Time & language > Region, "Regional format"; `auto`). To fix a language instead, write its English name (for example `English`) into `~/.samjil/delegate-agy/reply-language.txt`, or install with `-ReplyLanguage English`.
 - Remove with `Uninstall.cmd`. It removes the skills, tools and hooks; your delegated-task history and handoff chats are kept on purpose (see "제거" below). To delete those too, remove `~/.samjil` by hand afterwards.
 - The default install copies files into `~/.claude/skills` and `~/.samjil` and adds one SessionStart hook entry to `~/.claude/settings.json` (backed up first to `settings.json.bak-*`; `-AlwaysOff` skips it). It also tidies leftovers of older samjil installs if it finds them (an old Antigravity plugin entry in `~/.gemini/config`, old folders under `~/.samjil`); on a fresh PC there is nothing to tidy. `-Full` is the author's complete setup (junction `~/.claude/skills` -> `~/.agents/skills`, Antigravity `skills.json`).
@@ -112,7 +112,7 @@ EOF
 |---|---|
 | `@cwd: <폴더>` | agy 가 읽고 쓸 폴더를 허용합니다(agy 의 `--add-dir`). agy 의 작업 폴더를 바꾸지는 않습니다. 폴더마다 한 줄씩 여러 줄 가능하고, 없는 폴더가 있으면 agy 를 부르지 않고 실패합니다. `@session` 으로 이어갈 때는 생략하면 세션에 저장된 목록을 씁니다. |
 | `@session: <이름>` | 같은 이름으로 다시 보내면 agy 의 이전 대화를 이어갑니다. |
-| `@model: <단계\|ID>` | 이번 호출에 쓸 단계(`quick` · `build` · `build-hard` · `feature` · `feature-argon` · `think` · `think-argon` · `deep`, 권장)나 `allowed` 에 있는 모델 이름(지정한 모델 하나만 쓰고 대체 없음). 옛 별칭 `low`/`medium`/`high` 는 `quick`/`build`/`build-hard` 로 매핑됩니다. 쓰지 않으면 `quick`·`build` 중 자동 선택하며, 이어가는 세션에 다른 모델을 지정하면 오류입니다. |
+| `@model: <단계\|ID>` | 이번 호출에 쓸 단계(`quick` · `build` · `build-hard` · `feature` · `feature-carbon` · `think` · `think-carbon` · `deep`, 권장)나 `allowed` 에 있는 모델 이름(지정한 모델 하나만 쓰고 대체 없음). 옛 별칭 `low`/`medium`/`high` → `quick`/`build`/`build-hard`, `think-argon`/`feature-argon` → `think-carbon`/`feature-carbon` 으로 매핑됩니다. 쓰지 않으면 `quick`·`build` 중 자동 선택하며, 이어가는 세션에 다른 모델을 지정하면 오류입니다. |
 | `@cmd: <명령>` | 워처 실행 슬래시 명령(`goal` · `swarm` · `run-workflow` · `boost` · `browser` · `plan`). 파일 참조 전달이나 `@upgrade` 시에도 명령이 유지·확장되며, 대화형 TUI 전용 명령(`teamwork` · `grill-me` 등)은 차단합니다. |
 | `@mode: <모드>` | agy 실행 권한 모드(`plan` · `accept-edits` · `auto` → `--mode <값>`). |
 | `@upgrade: true` | 이어가던 세션의 모델을 올릴 때 함께 씁니다. 새 대화를 시작하며 직전 질문·답 2쌍을 지시문 위에 붙입니다(이전에 읽은 파일·도구 기록은 이어지지 않음). |
@@ -126,17 +126,17 @@ EOF
 - **지시문 전달**: 짧은 지시문은 agy 호출 인자로 직접 넘기고, 긴 것(8000자 초과)이나 파일 참조(`@파일`)가 필요하면 파일로 넘깁니다.
 - **표준 규칙 자동 추가**: `@cwd` 작업에는 `DO NOT COMMIT` · 포그라운드 실행 · 필요한 파일만 수정 · 한글 답변 규칙을 프롬프트 끝에 붙입니다(이미 있는 규칙은 건너뜀, 위임 기록의 질문에는 원본만 남음).
 - **git 안전장치**: `@cwd` 가 git 저장소면 agy 호출 전후의 HEAD·브랜치·stash 를 비교해 바뀌었으면 응답 맨 위에 경고와 복구 명령을 붙입니다(자동으로 되돌리지는 않음). 커밋하지 않은 변경은 `refs/samjil/snapshots/<작업 ID>` 에 보관합니다(최근 20개, 추적 파일만). `AGY_GIT_GUARD=off` 로 끕니다.
-- **모델 단계와 기본값**: 빠른 일반 작업은 **Hydrogen**, 코딩·추론 중심 고난도 작업은 **Neon**, 별도 주간 한도 분산·교차 검토·장문 분석은 **Argon** 을 일급 단계로 함께 쓰며, 3.8 Flash 는 마지막 대체(fallback)로만 씁니다(Claude·GPT-OSS 모델은 쓰지 않음). 단계·모델·대기 한도는 설정 파일(`runtime\delegate-agy\config\models.json`, 설치본 `~\.samjil\delegate-agy\config\models.json`)에 두며, 동기화·설치 시 `models.json` 은 항상 덮어쓰고 그 옆 `models.local.json` 에 단계별로 덮어쓸 수 있습니다(동기화·설치가 만들거나 지우지 않음). 쿼터 초과·과부하 때만 `models.json` 순서대로 대체하며, 3.8 Flash 로 처리된 결과에는 상단에 `[알림]` 배너가 붙고 뷰어에 `3.8 대체` 배지가 뜹니다. 워처는 시작할 때 `agy models` 를 한 번 확인하고(20초 제한), 없는 모델은 건너뛰고(단계의 다음 모델 사용) 로그에 남깁니다.
+- **모델 단계와 기본값**: 모든 Gemini 모델이 하나의 공용 한도를 씁니다. 보일러플레이트·단위 테스트·단순 UI·반복 작업은 **Hydrogen**, 실무 개발 80%+의 주력(다중 파일 수정·리팩터링·디버깅)은 **Neon**, 아키텍처·초기 설계·원인 불명 다중 서비스 버그·난해한 레거시·대규모 변경 최종 검토처럼 Neon 으로 풀지 못한 최난도만 **Carbon** 을 씁니다(Claude·GPT-OSS 모델은 쓰지 않음). 단계·모델·대기 한도는 설정 파일(`runtime\delegate-agy\config\models.json`, 설치본 `~\.samjil\delegate-agy\config\models.json`)에 두며, 동기화·설치 시 `models.json` 은 항상 덮어쓰고 그 옆 `models.local.json` 에 단계별로 덮어쓸 수 있습니다(동기화·설치가 만들거나 지우지 않음). 쿼터 초과·과부하(또는 `-xhigh` 의 effort 관련 HTTP 400) 때만 `models.json` 순서대로 대체합니다. 워처는 시작할 때 `agy models` 를 한 번 확인하고(20초 제한), 없는 모델은 건너뛰고(단계의 다음 모델 사용) 로그에 남깁니다.
 
   | 단계 | 쓰는 때 | 모델 | 대기 한도 |
   |---|---|---|---|
-  | `quick` | 조회 · 요약 · 번역 · 형식 변환 · 짧은 질문 | gemini-4-hydrogen-low | 3분 |
-  | `build` | 명세가 분명한 구현 · 몇 개 파일 수정 · 시험 작성 | gemini-4-hydrogen-medium | 8분 |
-  | `build-hard` | build 인데 경계 조건이 많거나 복잡한 다중 파일 수정, 한 번 실패한 일 | gemini-4-neon-medium | 12분 |
-  | `feature` | 작업 나누기 · 하위 계획까지 맡기는 여러 파일 새 기능 (공용 풀 · 코딩 우선) | gemini-pro-orchestrator-neon | 20분 |
-  | `feature-argon` | 같은 다중 파일 분할 · 실행을 Argon 별도 주간 풀이나 Argon 관점으로 진행 | gemini-pro-orchestrator-g1-pro | 20분 |
-  | `think` | 설계 검토 · 난해한 버그 원인 분석 · 상의(협의 기본, 코딩/추론 최우선) | gemini-4-neon-high | 20분 |
-  | `think-argon` | Argon 관점의 설계 검토 · 교차 검토(세컨드 오피니언) · 장문/도메인 분석 · Argon 별도 주간 풀 | gemini-4-argon-high | 20분 |
+  | `quick` | 조회 · 요약 · 번역 · 형식 변환 · 짧은 질문 (가장 빠르고 한도 최소) | gemini-4-hydrogen-low | 3분 |
+  | `build` | 보일러플레이트 · 단위 테스트 · 단순 UI · 명세가 분명한 반복 수정 (Carbon 대비 한도 50%+ 절감) | gemini-4-hydrogen-medium | 8분 |
+  | `build-hard` | 다중 파일 수정 · 리팩터링 · 디버깅 · 경계 조건이 많은 실무 구현 · build 재시도 (Carbon 대비 한도 ~30% 절감) | gemini-4-neon-medium | 12분 |
+  | `feature` | 작업 나누기 · 하위 계획까지 맡기는 여러 파일 새 기능 (Neon 계획/검토 + Hydrogen 실행) | gemini-pro-orchestrator-neon | 20분 |
+  | `feature-carbon` | 아키텍처·초기 설계가 까다로운 다중 파일 기능 (Carbon 읽기 전용 설계 + Hydrogen 실행, 단독 Carbon 대비 한도 ~24% 절감) | gemini-pro-orchestrator | 20분 |
+  | `think` | 설계 검토 · 난해한 버그 원인 분석 · 상의 (협의 기본, 주력 Neon) | gemini-4-neon-high | 20분 |
+  | `think-carbon` | 아키텍처·초기 설계, 원인 불명 다중 서비스 버그, 난해한 레거시, 대규모 변경 최종 검토 — Neon 으로 못 푼 일 | gemini-4-carbon-high | 20분 |
   | `deep` | 논리가 까다로운 구현(알고리즘 · 동시성 · 파서 · 수치 · 성능 목표), build-hard 실패의 다시 보내기 | gemini-4-neon-xhigh (Extra) | 20분 |
 
 - **슬래시 명령어·모드 최적화 (`@cmd` / `@mode`)**: 작업 성격에 맞춰 `@cmd: goal`(완주 자율 실행), `swarm`(파일 비충돌 병렬+검증자, `workspace:"inherit"` 자동 강제), `run-workflow`(정형 팬아웃/파이프라인), `boost`(극한 버그·알고리즘), `browser`(로컬 UI 실측), `plan`/`@mode: plan`(읽기 전용 계획)을 조합해 위임할 수 있습니다. `swarm` · `run-workflow` · `boost` 는 agy 사용량이 커서 작업 모양이 맞을 때만 쓰고, `/teamwork` · `/grill-me` 같은 대화형 TUI 전용 명령은 `@파일명` 명세 저장 방식으로 직접 세션에서 실행합니다.
@@ -176,13 +176,14 @@ EOF
 - **대시보드**: agy 의 현재 상태(작업 중·대기·워처 꺼짐), 최근 위임 결과 띠, **확인 필요**(처리 대기 중인 메시지·최근 24시간의 실패), 위임과 협의를 합친 최근 활동, 누적 건수·성공률·평균 소요·모델 분포.
 - **에이전트 위임**: 질문·답변 카드(모델·상태 필터, 검색). 진행 중인 카드는 지금 하는 일, 최근 생각, 실시간 토큰, 상태(진행 중·조용함·멈춤)를 보입니다. 긴 질문·답변은 일반적인 길이까지만 보이고 **전체 보기**(렌더링/Raw)로 원본을 엽니다.
 - **에이전트 협의**: 채널별 메시지 타임라인, 방향·상태 필터(보냄→읽음→처리됨→확인함 진행 표시), `BRIEF.md` 열람, 채널 상단의 자동 이어가기 상태와 켜기/끄기/한도 초기화. 방향은 메시지 머리말의 모델로 `Claude Sonnet 5.5 (Medium) → Gemini 4 Neon (High)` 처럼 보입니다.
-- **실측 통계**(`#/stats`): Claude 에게 한 질문마다 직접 처리인지 위임인지, 모델 조합(`opus-5-5 (high) → hydrogen-medium` 처럼 Claude 는 노력 단계까지, agy 는 짧은 모델명: `hydrogen-medium` · `neon-medium` · `neon-high` · `neon-extra` · `argon-high` · `orchestrator-neon` · `orchestrator` · `flash-medium`), 소요 시간, 총 토큰(입력 + 캐시 쓰기 + 출력, 캐시 읽기는 따로), 사유를 보이고 기간(7 · 30 · 90일)별로 요약합니다. 대화 기록(`~/.claude/projects`)과 위임 기록에서 측정된 값만 모으며 예상치는 없습니다. 화면을 열 때 수집하고(`sub\usage-stats.ps1`), 질문 원문은 앞 60자만 저장하며 90일 지나면 지웁니다. 사유는 Claude 가 `note-choice.ps1`(직접) · `@reason`(위임)으로 남긴 것만 보이고, 없으면 "기록 없음"입니다.
+- **실측 통계**(`#/stats`): Claude 에게 한 질문마다 직접 처리인지 위임인지, 모델 조합(`opus-5-5 (high) → hydrogen-medium` 처럼 Claude 는 노력 단계까지, agy 는 짧은 모델명: `hydrogen-medium` · `neon-medium` · `neon-high` · `neon-extra` · `carbon-high` · `orchestrator-neon` · `orchestrator-carbon`), 소요 시간, 총 토큰(입력 + 캐시 쓰기 + 출력, 캐시 읽기는 따로), 사유를 보이고 기간(7 · 30 · 90일)별로 요약합니다. 대화 기록(`~/.claude/projects`)과 위임 기록에서 측정된 값만 모으며 예상치는 없습니다. 화면을 열 때 수집하고(`sub\usage-stats.ps1`), 질문 원문은 앞 60자만 저장하며 90일 지나면 지웁니다. 사유는 Claude 가 `note-choice.ps1`(직접) · `@reason`(위임)으로 남긴 것만 보이고, 없으면 "기록 없음"입니다.
 - 사이드바는 **Claude Desktop 의 프로젝트 그룹 → 대화 세션** 트리이고(정렬 선택·펼침 상태 기억), 라이트/다크/시스템 테마를 고를 수 있습니다. 색은 보낸 쪽을 뜻합니다: Claude 는 황토, agy 는 청록, 초록/빨강은 성공/실패에만 씁니다.
 
 **과정 창**: 카드의 **과정 N** 버튼을 누르면 agy 가 질문과 답변 사이에 한 일(도구 호출 목록: 번호·시각·한글 설명·대상·생각·진행 설명)이 열립니다. 진행 중에는 새 단계가 이어 붙습니다. 영어로 나온 생각·설명은 **agy 로 번역**(서버가 agy 에게 읽기 전용으로 시켜 캐시, 사용량을 씀)과 **브라우저로 번역**(Chrome 계열의 내장 번역, 무료·품질 낮을 수 있음)으로 한글로 볼 수 있습니다. 과정은 워처가 작업을 마칠 때 `agy.db` 에 저장하고, 예전 기록은 창을 열 때만 agy 대화 기록에서 읽어 옵니다.
 
 **토큰 표시**
 - 카드의 토큰 줄은 `agy 토큰 보기` 버튼 하나이고, 펼치면 `총 토큰 = 누적 입력 + 누적 출력` 이고 입력에는 캐시에서 읽은 양(`캐시`), 출력에는 `응답 · 사고` 가 덧붙고, `현재 컨텍스트`(마지막 턴이 모델에 보낸 입력 크기)가 따로 있습니다. 진행 중과 끝난 뒤가 같은 기준입니다. 이어 쓰는 세션은 대화 누적값이라 앞 호출과의 차이를 "이번 호출이 쓴 양"으로 봅니다.
+- 카드 펼침 영역의 **Claude** 줄은 해당 위임(제출·대기·검토)에 쓰인 Claude 본 세션(및 서브에이전트 위임 시 서브에이전트)의 토큰과 호출 횟수 합계입니다(진행 중 카드도 지금까지 쓰인 본 세션 양이 표시됩니다). agy 토큰 줄과 Claude 줄 끝에 붙는 `/ 5시간 ≈… · 주간 ≈…` 는 5시간·주간 한도 크기가 공개돼 있지 않아 현재 구간 사용량 ÷ 사용 % 로 역산한 **추정치**이며(다른 기기나 대화의 사용분이 섞일 수 있고, 사용률 3% 미만이거나 데이터가 6시간 넘게 오래되면 표시하지 않습니다), Claude 사용률 수집을 위해 `install.ps1` 이 `~/.claude/settings.json` 에 `statusLine`(`claude-statusline.js`)을 **기존 `statusLine` 이 없을 때(또는 우리 이전 설정일 때)만** 등록합니다(기존 사용자 설정은 덮어쓰지 않고, `uninstall.ps1` 도 우리 항목만 제거). Claude 데스크톱 앱에서는 `statusLine` 이 돌지 않으므로, 위임 확인 명령 앞에 `note-claude-limits.ps1` 을 붙여 같은 파일(`claude-limits.json`)에 사용률을 남깁니다.
 - 예전에 있던 Claude 토큰 예상 · 보정 · 환산 · 손익 비교는 없앴습니다(예상이 실제와 너무 어긋나 의미가 없었습니다). 지금의 실측 통계는 측정값만 보입니다. 위임 카드에는 실행 시각 · 상태 · agy 모델 · 위임을 보낸 Claude 모델(`claude-meta` 파일) · 소요 시간 · 대기 시간 · 과정 · 질문 · 답변 · 식별 줄이 남습니다.
 - 협의 카드의 Claude 쪽 사용량은 해당 Claude 세션의 기록(`~/.claude/projects/*/<세션>.jsonl`)에서 읽는 근사치입니다.
 

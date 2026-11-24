@@ -132,6 +132,68 @@ function Remove-AgyGoalMarkers([string]$Text) {
     return $s.TrimEnd("`r", "`n")
 }
 
+# 대화 기록(transcript_full.jsonl)에서 비어 있지 않은 PLANNER_RESPONSE 본문을 차례대로 꺼낸다.
+#   $Since([datetime], UTC·로컬 무관)를 주면 그보다 이른 created_at 은 건너뛴다.
+function Get-AgyPlannerTexts([string]$TranscriptPath, $Since = $null) {
+    $texts = New-Object System.Collections.ArrayList
+    if (-not $TranscriptPath -or -not (Test-Path -LiteralPath $TranscriptPath)) { return @() }
+    $sinceUtc = $null
+    if ($null -ne $Since) {
+        try {
+            $dt = if ($Since -is [datetime]) { $Since } else { [datetime]::Parse([string]$Since, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind) }
+            $sinceUtc = $dt.ToUniversalTime()
+        } catch { $sinceUtc = $null }
+    }
+    $fs = $null
+    $sr = $null
+    try {
+        $fs = [System.IO.FileStream]::new($TranscriptPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
+        $sr = [System.IO.StreamReader]::new($fs, [System.Text.Encoding]::UTF8, $true)
+        while ($null -ne ($line = $sr.ReadLine())) {
+            if (-not $line -or $line.IndexOf('PLANNER_RESPONSE', [System.StringComparison]::Ordinal) -lt 0) { continue }
+            $o = $null
+            try { $o = $line.TrimStart([char]0xFEFF) | ConvertFrom-Json } catch { continue }
+            if ($null -eq $o -or [string]$o.type -ne 'PLANNER_RESPONSE') { continue }
+            if ($null -ne $sinceUtc -and $o.created_at) {
+                try {
+                    $parsed = [datetime]::Parse([string]$o.created_at, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::RoundtripKind)
+                    if ($parsed.ToUniversalTime() -lt $sinceUtc) { continue }
+                } catch {}
+            }
+            $content = if ($null -ne $o.content) { [string]$o.content } else { "" }
+            if (-not [string]::IsNullOrWhiteSpace($content)) {
+                [void]$texts.Add($content)
+            }
+        }
+    } catch {
+        return @()
+    } finally {
+        if ($sr) { $sr.Dispose() }
+        elseif ($fs) { $fs.Dispose() }
+    }
+    return @($texts.ToArray())
+}
+
+# agy 답변 맨 앞에 이어 붙은 중간 안내(PLANNER_RESPONSE) 문장을 대화 기록 기준으로 떼어 낸다.
+#   마지막(최종) 글은 절대 떼지 않으며, 떼어 낸 뒤 공백뿐이면 원래 답변을 그대로 돌려준다.
+function Remove-AgyInterimMessages([string]$Response, [string[]]$PlannerTexts, [int]$MaxInterimChars = 400) {
+    if ([string]::IsNullOrEmpty($Response) -or $null -eq $PlannerTexts -or $PlannerTexts.Count -lt 2) { return $Response }
+    $hadCrlf = $Response.Contains("`r`n")
+    $work = $Response.Replace("`r`n", "`n")
+    $removed = 0
+    for ($i = 0; $i -lt ($PlannerTexts.Count - 1); $i++) {
+        $cand = ([string]$PlannerTexts[$i]).Trim().Replace("`r`n", "`n")
+        if (-not $cand -or $cand.Length -gt $MaxInterimChars) { break }
+        $trimmed = $work.TrimStart()
+        if (-not $trimmed.StartsWith($cand, [System.StringComparison]::Ordinal)) { break }
+        $work = $trimmed.Substring($cand.Length).TrimStart()
+        $removed++
+    }
+    if ($removed -eq 0 -or [string]::IsNullOrWhiteSpace($work)) { return $Response }
+    if ($hadCrlf) { $work = $work.Replace("`n", "`r`n") }
+    return $work
+}
+
 # 표준 규칙을 붙인 프롬프트를 만든다.
 #   $Prompt       지시어 줄을 뺀 지시문 본문
 #   $HasFolder    @cwd 로 열리는 폴더가 있는가

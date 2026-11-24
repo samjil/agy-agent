@@ -35,7 +35,7 @@ if (-not (Get-Command Resolve-AgySlashCommand -ErrorAction SilentlyContinue)) {
     if (Test-Path -LiteralPath $hpRulesLib) { . $hpRulesLib }
 }
 
-# 메시지 머리말의 `위임모델:` 값을 해석한다. 단계 이름(quick · build · build-hard · feature · feature-argon · think · think-argon · deep, 옛 별칭 low · medium · high)
+# 메시지 머리말의 `위임모델:` 값을 해석한다. 단계 이름(quick · build · build-hard · feature · feature-carbon · think · think-carbon · deep, 옛 별칭 low · medium · high · think-argon · feature-argon)
 # 또는 모델 이름(config\models.json 의 allowed)을 받는다. 값이 없거나 모르는 값이면 $null(협의 기본 단계로 넘어간다).
 # 반환: @{ Tier; Model; Spec; Reason } ($Auto 와 같은 모양). Spec 은 지시파일의 @model 에 그대로 쓸 값(단계 이름 또는 모델 이름).
 function Get-HandoffModelOverride([string]$Value) {
@@ -334,7 +334,7 @@ function Invoke-HandoffPumpChannel([string]$ChannelDir, $Ctx) {
                 $fm = Read-HandoffFrontMatter $msgFile.FullName
                 $overrideRaw = [string]$fm["위임모델"]
                 $auto = Get-HandoffModelOverride $overrideRaw
-                if (-not $auto -and $overrideRaw.Trim()) { Write-HandoffLog "핸드오프 [$name] #$($row.Num) 머리말의 위임모델 '$overrideRaw' 은(는) 단계 이름(quick · build · build-hard · feature · feature-argon · think · think-argon · deep)이나 허용된 모델 이름이 아니라서 무시하고 협의 기본 단계를 씁니다" }
+                if (-not $auto -and $overrideRaw.Trim()) { Write-HandoffLog "핸드오프 [$name] #$($row.Num) 머리말의 위임모델 '$overrideRaw' 은(는) 단계 이름(quick · build · build-hard · feature · feature-carbon · think · think-carbon · deep)이나 허용된 모델 이름이 아니라서 무시하고 협의 기본 단계를 씁니다" }
                 $cmdRaw = [string]$fm["위임명령"]
                 $cmdOverride = Get-HandoffCmdOverride $cmdRaw
                 if (-not $cmdOverride -and $cmdRaw.Trim()) { Write-HandoffLog "핸드오프 [$name] #$($row.Num) 머리말의 위임명령 '$cmdRaw' 은(는) 워처 지원 명령(goal · swarm · run-workflow · boost · browser · plan)이 아니라서 무시합니다" }

@@ -5,13 +5,15 @@
 #   - 사용자가 stop-agy 로 일부러 끈 상태(manual_stop.flag)면 켜지 않습니다.
 #   - 켜는 일은 기다리지 않고 CREATE_NO_WINDOW 무창 분리 실행으로 백그라운드에 맡겨, 세션 시작을 늦추거나 창을 깜빡이지 않습니다.
 # 어떤 경우에도 오류로 세션 시작을 막지 않도록 항상 종료 코드 0 으로 끝납니다.
-# -Event UserPromptSubmit: 질문을 보낼 때마다, 컨텍스트가 기준을 넘었으면 "위임하면 처음부터 서브에이전트에" 한 줄만 출력한다
+# -Event UserPromptSubmit: 질문을 보낼 때마다, 컨텍스트가 기준을 넘었으면 "위임하면 agy 제출을 서브에이전트에" 한 줄만 출력한다
 #   (표준 입력 JSON 의 transcript_path 로 크기를 읽는다). Node 가 있으면 같은 일을 하는 prompt-hook.js 가 대신 등록된다.
+# -Event PreToolUse: Agent/Task 도구 호출 시 세션마다 처음 한 번 agy 위임 관문(deny), 두 번째부터는 참고 안내(additionalContext).
 param(
     [string]$RuntimeDir = "",
     [string]$EnsureScript = "",
     [string]$Event = "SessionStart",
-    [string]$TranscriptPath = ""      # 시험용. 없으면 Claude Code 가 표준 입력으로 주는 JSON 의 transcript_path 를 쓴다
+    [string]$TranscriptPath = "",     # 시험용. 없으면 Claude Code 가 표준 입력으로 주는 JSON 의 transcript_path 를 쓴다
+    [string]$HookInputPath = ""       # 시험용. PreToolUse 에서 표준 입력 대신 읽을 JSON 파일 경로
 )
 
 # 창과 파이프 상속 없이 백그라운드 PowerShell 을 띄운다(agy-spawn.ps1 없으면 WScript.Shell 로 폴백).
@@ -33,13 +35,24 @@ function Start-HookHiddenPowerShell([string[]]$ArgumentList) {
     } catch {}
 }
 
+# 표준 입력을 한도 시간 안에 끝까지 읽어 UTF-8 문자열로 돌려준다(BOM 제거).
+# Windows PowerShell 5.1 의 [Console]::In 은 SyncTextReader 라 ReadToEndAsync 가 동기로 막힌다.
+# 대신 OpenStandardInput 스트림을 CopyToAsync 로 비동기 복사해, 입력이 닫히지 않아도 한도에서 빠져나온다.
+function Read-HookStdinText([int]$TimeoutMs = 2000) {
+    try {
+        if (-not [Console]::IsInputRedirected) { return "" }
+        $in = [Console]::OpenStandardInput()
+        $ms = New-Object System.IO.MemoryStream
+        $t = $in.CopyToAsync($ms)
+        if (-not $t.Wait($TimeoutMs)) { return "" }
+        return ([System.Text.Encoding]::UTF8.GetString($ms.ToArray())).TrimStart([char]0xFEFF)
+    } catch { return "" }
+}
+
 # Claude Code 가 훅에 표준 입력으로 주는 JSON(session_id · transcript_path 등). 입력이 없으면(손으로 실행 · 시험) 기다리지 않고 $null.
 function Read-HookInput {
     try {
-        if (-not [Console]::IsInputRedirected) { return $null }
-        $task = [Console]::In.ReadToEndAsync()
-        if (-not $task.Wait(2000)) { return $null }
-        $text = [string]$task.Result
+        $text = Read-HookStdinText 2000
         if (-not $text.Trim()) { return $null }
         # 필요한 칸(transcript_path)만 정규식으로 꺼낸다(ConvertFrom-Json 은 PowerShell 5.1 에서 처음 쓸 때 0.2초쯤 든다). JSON 이스케이프는 [regex]::Unescape 로 푼다.
         $m = [regex]::Match($text, '"transcript_path"\s*:\s*"((?:[^"\\]|\\.)*)"')
@@ -48,7 +61,7 @@ function Read-HookInput {
     } catch { return $null }
 }
 
-# 컨텍스트가 크면 "이번 질문에서 위임하면 처음부터 서브에이전트에 맡긴다"는 한 줄. 제출한 뒤에 알면 늦어서, 질문을 보낼 때 미리 알린다.
+# 컨텍스트가 크면 "이번 작업을 위임하면 agy 제출을 서브에이전트에 맡긴다"는 한 줄. 제출한 뒤에 알면 늦어서, 질문을 보낼 때 미리 알린다.
 # 기준: AGY_CTX_SUBAGENT_THRESHOLD > 200k (submit-task.ps1 과 같은 규칙)
 function Write-ContextLine([string]$TranscriptPath) {
     try {
@@ -61,7 +74,78 @@ function Write-ContextLine([string]$TranscriptPath) {
         $threshold = 200000
         if ($env:AGY_CTX_SUBAGENT_THRESHOLD -match '^\d+$') { $threshold = [int]$env:AGY_CTX_SUBAGENT_THRESHOLD }
         if ([long]$u.ctx -le $threshold) { return }
-        Write-Output ("[컨텍스트 {0}k] 기준 {1}k 를 넘었다: 이번 질문에서 위임하게 되면 처음부터 서브에이전트 하나(저렴한 모델)에 브리프를 넘겨 제출 · 대기 · diff 검토 · 시험까지 맡기고, 본 세션은 5줄 보고(통과 여부 · 바뀐 파일 · 걱정)만 받는다." -f [int][math]::Round([long]$u.ctx / 1000.0), [int]($threshold / 1000))
+        Write-Output ("[컨텍스트 {0}k] 기준 {1}k 를 넘었다: 이번 작업을 위임하면 samjil-delegate-agy 로 agy 에 제출한다. 제출 · 대기 · diff 검토 · 시험은 서브에이전트 하나(저렴한 모델)가 대신 맡고, 본 세션은 5줄 보고(통과 여부 · 바뀐 파일 · 걱정)만 받는다. agy 로 못 하는 일(DB · VPN · 브라우저 · 메일)만 서브에이전트가 직접 하고, 대화 맥락이 필요한 판단은 본 세션이 한다." -f [int][math]::Round([long]$u.ctx / 1000.0), [int]($threshold / 1000))
+    } catch {}
+}
+
+# PreToolUse(Agent/Task 도구) 관문: 세션마다 처음 한 번은 deny 로 agy 위임을 알리고, 두 번째부터는 additionalContext 만 붙인다.
+function Invoke-PreToolUseGate([string]$InputFilePath) {
+    try {
+        $mode = if ($env:AGY_AGENT_GATE) { $env:AGY_AGENT_GATE.Trim().ToLowerInvariant() } else { "" }
+        if ($mode -eq "off") { return }
+
+        $raw = ""
+        if ($InputFilePath) {
+            if (-not (Test-Path -LiteralPath $InputFilePath -PathType Leaf)) { return }
+            $raw = [System.IO.File]::ReadAllText($InputFilePath, [System.Text.Encoding]::UTF8)
+        } else {
+            $raw = Read-HookStdinText 2000
+        }
+        $raw = $raw.TrimStart([char]0xFEFF).Trim()
+        if (-not $raw) { return }
+
+        $j = $null
+        try { $j = $raw | ConvertFrom-Json } catch { return }
+        if (-not $j) { return }
+
+        $tool = if ($j.PSObject.Properties["tool_name"]) { [string]$j.tool_name } else { "" }
+        if ($tool -ne "Agent" -and $tool -ne "Task") { return }
+
+        $ti = if ($j.PSObject.Properties["tool_input"]) { $j.tool_input } else { $null }
+        $sub = if ($ti -and $ti.PSObject.Properties["subagent_type"]) { ([string]$ti.subagent_type).Trim() } else { "" }
+        $roSet = @("explore", "plan", "claude-code-guide", "web-fetch", "statusline-setup")
+        if ($sub -and (($roSet -contains $sub.ToLowerInvariant()) -or ($sub -match '(?i)explor|review|analyz|guide'))) { return }
+
+        $prompt = if ($ti -and $ti.PSObject.Properties["prompt"]) { [string]$ti.prompt } else { "" }
+        $desc = if ($ti -and $ti.PSObject.Properties["description"]) { [string]$ti.description } else { "" }
+        $passRe = '(?i)submit-task|samjil-delegate-agy|\bagy\b'
+        if (($prompt -match $passRe) -or ($desc -match $passRe)) { return }
+
+        $denyMsg = "[samjil-delegate-agy] Agent 도구 관문(세션마다 처음 한 번): 코드 · 문서 · 설정 파일 · xlsx/pptx 를 고치거나 만드는 일은 samjil-delegate-agy 규칙상 agy 위임이 먼저다. agy 대상이면 samjil-delegate-agy 스킬을 불러와 submit-task 로 제출한다(컨텍스트가 크면 서브에이전트에게 agy 제출 · 대기 · 검토를 맡긴다). agy 로 못 하는 일(DB 조회 · VPN · 브라우저 · 메일 · 대화 맥락 판단)이거나 agy 가 실패 · 시간 초과했으면 같은 Agent 호출을 다시 하면 통과한다."
+        $noteMsg = "[samjil-delegate-agy] 참고: 파일을 고치거나 만드는 일은 Agent 도구보다 agy 위임(samjil-delegate-agy)이 먼저다. Agent 도구는 agy 로 못 하는 일이거나 agy 가 실패 · 시간 초과했을 때만 쓴다."
+
+        $outObj = $null
+        if ($mode -eq "note") {
+            $outObj = [ordered]@{ hookSpecificOutput = [ordered]@{ hookEventName = "PreToolUse"; additionalContext = $noteMsg } }
+        } else {
+            $rawSid = if ($j.PSObject.Properties["session_id"]) { [string]$j.session_id } else { "" }
+            $sid = $rawSid -replace '[^A-Za-z0-9_-]', ''
+            if (-not $sid) {
+                $outObj = [ordered]@{ hookSpecificOutput = [ordered]@{ hookEventName = "PreToolUse"; additionalContext = $noteMsg } }
+            } else {
+                $dir = if ($env:AGY_AGENT_GATE_DIR) { $env:AGY_AGENT_GATE_DIR } else { Join-Path ([IO.Path]::GetTempPath()) "samjil-agent-gate" }
+                $marker = Join-Path $dir $sid
+                if (Test-Path -LiteralPath $marker -PathType Leaf) {
+                    $outObj = [ordered]@{ hookSpecificOutput = [ordered]@{ hookEventName = "PreToolUse"; additionalContext = $noteMsg } }
+                } else {
+                    try {
+                        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+                        $cutoff = (Get-Date).AddDays(-7)
+                        foreach ($f in @(Get-ChildItem -LiteralPath $dir -File -ErrorAction SilentlyContinue)) {
+                            if ($f.LastWriteTime -lt $cutoff) { Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue }
+                        }
+                        [System.IO.File]::WriteAllText($marker, "", (New-Object System.Text.UTF8Encoding($false)))
+                    } catch {}
+                    $outObj = [ordered]@{ hookSpecificOutput = [ordered]@{ hookEventName = "PreToolUse"; permissionDecision = "deny"; permissionDecisionReason = $denyMsg } }
+                }
+            }
+        }
+
+        $json = $outObj | ConvertTo-Json -Depth 5 -Compress
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($json + "`n")
+        $stdout = [Console]::OpenStandardOutput()
+        $stdout.Write($bytes, 0, $bytes.Length)
+        $stdout.Flush()
     } catch {}
 }
 
@@ -69,6 +153,10 @@ try {
     $home_ = if ($env:USERPROFILE) { $env:USERPROFILE } else { $HOME }
     if (-not $RuntimeDir) { $RuntimeDir = Join-Path $home_ ".samjil\delegate-agy\runtime" }
     if (-not $EnsureScript) { $EnsureScript = Join-Path $PSScriptRoot "ensure-agy-running.ps1" }
+    if ($Event -eq "PreToolUse") {
+        Invoke-PreToolUseGate $HookInputPath
+        exit 0
+    }
     if ($Event -eq "UserPromptSubmit") {
         # 질문마다 도는 길이라 빠르게: [Console]::OutputEncoding 을 바꾸면 0.15초쯤 더 들어서, 줄을 모아 UTF-8 바이트로 표준 출력에 바로 쓴다.
         $hookInput = Read-HookInput
@@ -102,7 +190,7 @@ try {
         default       { "agy 워처: 상태를 확인하지 못했다(런타임이 설치돼 있지 않을 수 있다). 위임 없이 직접 처리하고 install.ps1 실행을 안내한다." }
     }
 
-    Write-Output "[samjil-delegate-agy] 명세를 정할 수 있는 구현 · 수정 · 시험과 양 많은 단순 작업은 Hydrogen/Neon/Argon 단계(@model: quick · build · build-hard · feature · feature-argon · deep, 필요 시 @cmd: goal · swarm · run-workflow · boost · browser · plan)로 위임하고, 맥락이 필요한 일 · 한두 줄 수정은 직접 처리. 매우 복잡한 결정은 Neon(think) 또는 Argon(think-argon)과 상의한다(스킬 참고)."
+    Write-Output "[samjil-delegate-agy] 명세를 정할 수 있는 구현 · 수정 · 시험과 양 많은 단순 작업은 Hydrogen/Neon/Carbon 단계(@model: quick · build · build-hard · feature · feature-carbon · deep, 필요 시 @cmd: goal · swarm · run-workflow · boost · browser · plan)로 위임하고, 맥락이 필요한 일 · 한두 줄 수정은 직접 처리. 매우 복잡한 결정은 Neon(think) 또는 Carbon(think-carbon)과 상의한다(스킬 참고). 코드 · 문서 · 설정 파일 · xlsx/pptx 를 고치거나 만드는 일은 사용자가 위임이라고 말하지 않아도, 직접 시작하거나 Agent 도구로 넘기기 전에 samjil-delegate-agy 스킬을 먼저 불러온다. Agent 도구(Claude 서브에이전트)는 agy 로 못 하는 일(DB 조회 · VPN · 브라우저 · 메일 · 대화 맥락 판단)이거나 agy 가 실패 · 시간 초과했을 때만 쓴다."
     Write-Output $watcherLine
 } catch {
     # 훅 오류가 세션 시작을 막으면 안 된다.

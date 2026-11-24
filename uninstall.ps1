@@ -134,6 +134,17 @@ if (Test-Path $regGuardScript) {
     }
 }
 
+# 2-4. Claude statusLine 제거 (우리 것일 때만)
+$regStatusScript = Join-Path $env:USERPROFILE ".samjil\delegate-agy\scripts\sub\register-statusline.ps1"
+if (Test-Path $regStatusScript) {
+    try {
+        $slRes = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $regStatusScript -Remove 2>&1 | Out-String).Trim()
+        if ($slRes -eq "REMOVED") { Write-Host "[+] Claude statusLine 제거 (~/.claude/settings.json, 백업: settings.json.bak-*)" -ForegroundColor Green }
+    } catch {
+        Write-Warning "Claude statusLine 제거 중 오류: $_"
+    }
+}
+
 # -----------------------------------------------------------------------------
 # 3. Antigravity 설정 정리 (~/.gemini/config/skills.json)
 # -----------------------------------------------------------------------------

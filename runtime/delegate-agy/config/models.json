@@ -4,51 +4,51 @@
   "tiers": {
     "quick": {
       "model": "gemini-4-hydrogen-low",
-      "fallback": ["gemini-4-hydrogen-medium", "gemini-4-neon-low", "gemini-3.8-flash-low"],
+      "fallback": ["gemini-4-hydrogen-medium", "gemini-4-neon-low"],
       "wait_sec": 180,
-      "use": "조회 · 요약 · 번역 · 형식 변환 · 짧은 질문"
+      "use": "조회 · 요약 · 번역 · 형식 변환 · 짧은 질문 (가장 빠르고 한도 최소)"
     },
     "build": {
       "model": "gemini-4-hydrogen-medium",
-      "fallback": ["gemini-4-hydrogen-high", "gemini-4-neon-low", "gemini-3.8-flash-medium"],
+      "fallback": ["gemini-4-hydrogen-high", "gemini-4-neon-low"],
       "wait_sec": 480,
-      "use": "명세가 분명한 구현 · 몇 개 파일 수정 · 시험 작성 · 반복 수정"
+      "use": "보일러플레이트 · 단위 테스트 · 단순 UI · 명세가 분명한 반복 수정 (빠르고 Carbon 대비 한도 50%+ 절감)"
     },
     "build-hard": {
       "model": "gemini-4-neon-medium",
-      "fallback": ["gemini-4-hydrogen-high", "gemini-4-neon-high", "gemini-4-argon-medium", "gemini-3.8-flash-medium"],
+      "fallback": ["gemini-4-neon-high", "gemini-4-hydrogen-xhigh", "gemini-4-carbon-medium"],
       "wait_sec": 720,
-      "use": "build 인데 경계 조건이 많거나 복잡한 다중 파일 수정, 또는 build 가 한 번 실패한 일"
+      "use": "다중 파일 수정 · 리팩터링 · 디버깅 · 경계 조건이 많은 일반 실무 구현 (주력 Neon, Carbon 대비 한도 ~30% 절감)"
     },
     "feature": {
       "model": "gemini-pro-orchestrator-neon",
-      "fallback": ["gemini-4-neon-high", "gemini-pro-orchestrator-g1-pro", "gemini-4-hydrogen-high", "gemini-3.8-flash-medium"],
+      "fallback": ["gemini-4-neon-high", "gemini-pro-orchestrator", "gemini-4-hydrogen-high"],
       "wait_sec": 1200,
-      "use": "작업 나누기 · 하위 계획까지 맡기는 여러 파일 새 기능 · 중대형 리팩터링 (Neon 계획/검토 + Hydrogen 실행)"
+      "use": "작업 분할 · 하위 계획까지 맡기는 여러 파일 새 기능 · 중대형 리팩터링 (Neon 계획/검토 + Hydrogen 실행)"
     },
-    "feature-argon": {
-      "model": "gemini-pro-orchestrator-g1-pro",
-      "fallback": ["gemini-4-argon-high", "gemini-pro-orchestrator-neon", "gemini-4-hydrogen-high", "gemini-3.8-flash-medium"],
+    "feature-carbon": {
+      "model": "gemini-pro-orchestrator",
+      "fallback": ["gemini-4-carbon-high", "gemini-pro-orchestrator-neon", "gemini-4-neon-high"],
       "wait_sec": 1200,
-      "use": "Argon 관점으로 작업 나누기 · 새 기능을 진행할 때 (Argon 계획/검토 + Hydrogen 실행)"
+      "use": "아키텍처·초기 설계가 까다로운 다중 파일 기능 (Carbon 읽기 전용 설계 + Hydrogen 실행, 단독 Carbon 대비 한도 ~24% 절감·~19% 빠름)"
     },
     "think": {
       "model": "gemini-4-neon-high",
-      "fallback": ["gemini-4-argon-high", "gemini-4-neon-medium", "gemini-4-argon-medium", "gemini-4-hydrogen-high"],
+      "fallback": ["gemini-4-neon-medium", "gemini-4-carbon-high", "gemini-4-hydrogen-high"],
       "wait_sec": 1200,
-      "use": "설계 검토 · 난해한 버그 원인 분석 · 상의(협의 기본, 코딩/추론 최우선)"
+      "use": "설계 검토 · 난해한 버그 원인 분석 · 상의 (협의 기본, 주력 Neon)"
     },
-    "think-argon": {
-      "model": "gemini-4-argon-high",
-      "fallback": ["gemini-4-argon-medium", "gemini-4-neon-high", "gemini-4-hydrogen-high"],
+    "think-carbon": {
+      "model": "gemini-4-carbon-high",
+      "fallback": ["gemini-4-carbon-medium", "gemini-4-neon-high", "gemini-4-neon-xhigh"],
       "wait_sec": 1200,
-      "use": "Argon 관점의 설계 검토 · 교차 검토(세컨드 오피니언) · 장문/도메인 분석 · Argon 별도 주간 한도 활용"
+      "use": "아키텍처·초기 설계, 원인 불명 다중 서비스 버그, 난해한 레거시, 대규모 변경 최종 검토 — Neon 으로 풀지 못한 일 (한도 소모 최대)"
     },
     "deep": {
       "model": "gemini-4-neon-xhigh",
-      "fallback": ["gemini-4-neon-high", "gemini-4-hydrogen-xhigh", "gemini-4-argon-high", "gemini-3.8-flash-medium"],
+      "fallback": ["gemini-4-neon-high", "gemini-4-carbon-high", "gemini-4-hydrogen-xhigh"],
       "wait_sec": 1200,
-      "use": "논리가 극도로 까다로운 구현(알고리즘 · 동시성 · 파서/상태 기계 · 수치 정밀도 · 성능 목표), think 가 원인을 짚은 버그 수정, build-hard 실패의 다시 보내기"
+      "use": "논리가 극도로 까다로운 구현(알고리즘 · 동시성 · 파서 · 수치 · 성능), think 진단 버그 수정, build-hard 실패 재시도"
     }
   },
   "escalate": {
@@ -62,7 +62,9 @@
   "aliases": {
     "low": "quick",
     "medium": "build",
-    "high": "build-hard"
+    "high": "build-hard",
+    "think-argon": "think-carbon",
+    "feature-argon": "feature-carbon"
   },
   "handoff_default": "think",
   "translate": "quick",
@@ -75,12 +77,10 @@
     "gemini-4-neon-medium",
     "gemini-4-neon-high",
     "gemini-4-neon-xhigh",
-    "gemini-4-argon-low",
-    "gemini-4-argon-medium",
-    "gemini-4-argon-high",
+    "gemini-4-carbon-low",
+    "gemini-4-carbon-medium",
+    "gemini-4-carbon-high",
     "gemini-pro-orchestrator-neon",
-    "gemini-pro-orchestrator-g1-pro",
-    "gemini-3.8-flash-low",
-    "gemini-3.8-flash-medium"
+    "gemini-pro-orchestrator"
   ]
 }

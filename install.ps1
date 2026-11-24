@@ -346,6 +346,21 @@ if (Test-Path $srcRuntime) {
                 Write-Warning "옛 예상 기록 강제 훅 제거 중 오류: $_"
             }
         }
+
+        # 3-1c. Claude 한도 사용률 수집용 statusLine 등록: 기존 statusLine 이 없거나 우리 것(claude-statusline.js / statusline-probe.js)일 때만 등록한다.
+        $regStatus = Join-Path $destDelegate "scripts\sub\register-statusline.ps1"
+        if (Test-Path $regStatus) {
+            try {
+                $slOut = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $regStatus 2>&1 | Out-String).Trim()
+                if ($slOut -in @("ADDED", "UPDATED", "UNCHANGED")) {
+                    Write-Host "[+] Claude statusLine 등록: $slOut (~/.claude/settings.json)" -ForegroundColor Green
+                } elseif ($slOut -eq "SKIPPED") {
+                    Write-Host "[i] statusLine 이 이미 다른 설정으로 등록돼 있어 건너뜁니다 (~/.claude/settings.json)" -ForegroundColor Gray
+                }
+            } catch {
+                Write-Warning "Claude statusLine 등록 중 오류: $_"
+            }
+        }
     }
 
     $srcHandoff = Join-Path $srcRuntime "handoff"

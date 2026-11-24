@@ -1172,17 +1172,19 @@ code { font-family: var(--font-mono); font-size: 0.92em; }
 .pg-token-detail { color: var(--ink-3); font-size: var(--fs-xs); }
 /* 진행 중 카드의 토큰 세부(입력 · 출력 · 현재 컨텍스트) */
 
-/* 위임 카드의 토큰 줄: 진행 중 카드의 토큰 줄과 같은 모양. 항목을 "·" 로 이어 한 줄로 흘리고(폭이 모자라면 줄바꿈),
-   총 토큰만 진하게, 나머지는 흐린 작은 글씨로 둔다.  */
-.meta.token-meta { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 0; row-gap: 2px; margin-top: 4px; font-size: var(--fs-xs); color: var(--ink-3); }
-.meta.token-meta .meta-head { margin-right: 14px; }   /* 항목 사이는 "·" 라 줄 간격(column-gap)을 0 으로 두므로, 머리말 뒤 간격만 다른 줄(.meta 의 14px)과 맞춘다 */
-.tok-item { display: inline-flex; align-items: baseline; gap: 4px; white-space: nowrap; line-height: 1.6; }
-.tok-item + .tok-item::before { content: "·"; color: var(--ink-3); margin: 0 7px; }
-.tok-label, .tok-val, .tok-sub { color: var(--ink-3); font-family: inherit; font-size: var(--fs-xs); font-weight: 400; font-variant-numeric: tabular-nums; }
-.tok-sub:empty { display: none; }
-.tok-sub { margin-left: 2px; }
-.tok-total .tok-label::before { content: "\26A1"; margin-right: 3px; font-weight: 400; }
-.tok-total .tok-label, .tok-total .tok-val { color: var(--ink); font-weight: 500; }
+/* 위임 카드의 토큰 블록: agy · Claude 소스별 2줄(총합 + 한도 추정, 세부 내역)을 왼쪽 정렬 흐름으로 둔다. */
+.meta.token-meta { display: flex; flex-wrap: nowrap; align-items: baseline; column-gap: 0; row-gap: 2px; margin-top: 4px; font-size: var(--fs-xs); color: var(--ink-3); }
+.meta.token-meta .meta-head { margin-right: 14px; flex: 0 0 auto; }
+.tok-list { display: flex; flex-direction: column; gap: 4px; flex: 1 1 auto; min-width: 0; }
+.tok-source { display: flex; align-items: baseline; min-width: 0; }
+.tok-src { flex: 0 0 auto; min-width: 4.5em; color: var(--ink-3); white-space: nowrap; }
+.tok-body { flex: 1 1 auto; min-width: 0; }
+.tok-main { line-height: 1.5; font-variant-numeric: tabular-nums; white-space: normal; overflow-wrap: anywhere; }
+.tok-total-num { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
+.tok-limits { color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.tok-share { color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.tok-share.tok-share-hi { color: var(--ink); }
+.tok-detail { color: var(--ink-3); font-size: 0.9em; font-variant-numeric: tabular-nums; line-height: 1.5; min-width: 0; white-space: normal; overflow-wrap: anywhere; }
 .party-legend { display: inline-flex; align-items: center; gap: 6px; }
 
 .qa-session-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
@@ -1313,8 +1315,6 @@ code { font-family: var(--font-mono); font-size: 0.92em; }
 .badge.status-pending-queued { background: var(--raised); color: var(--ink-2); font-weight: 500; }
 .badge.status-pending-quiet { background: var(--warn-soft); color: var(--warn); }
 .badge.status-pending-stalled { background: var(--err-soft); color: var(--err); }
-/* 단계의 앞 모델이 막혀 맨 마지막 대안(3.8 Flash)으로 처리한 기록: 모델 이름 옆 작은 경고 배지 */
-.badge.model-fallback { background: var(--warn-soft); color: var(--warn); margin-left: 4px; }
 /* 한도 · 과부하로 실패해 다음 모델로 넘어간 앞 모델 표시 */
 .agy-failed { color: var(--ink-3); text-decoration: line-through; }
 
@@ -2898,6 +2898,8 @@ span.task-more {
 .usage-table td.usage-reason .usage-clip { max-width: 12em; }
 /* 모델 칸: 위임 모델이 여럿이면 길어지므로 말줄임 + 툴팁(전체) */
 .usage-table td.usage-model { max-width: 17em; overflow: hidden; text-overflow: ellipsis; }
+/* 모델 조합 표: 긴 조합은 줄바꿈해 숫자 열이 화면 밖으로 밀리지 않게 한다. */
+#usage-models th.usage-model { width: 100%; min-width: 16em; white-space: normal; overflow-wrap: anywhere; }
 .usage-model-line { display: block; overflow: hidden; text-overflow: ellipsis; }
 .usage-model-agy { color: var(--ink-3); }
 .usage-task-more { margin-left: 8px; padding: 0 7px; border: 1px solid var(--line); border-radius: 999px; background: transparent; color: var(--agy); font: inherit; font-size: var(--fs-xs); line-height: 1.5; cursor: pointer; }

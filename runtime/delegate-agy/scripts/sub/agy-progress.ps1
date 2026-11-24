@@ -984,3 +984,142 @@ function Get-AgyUsageSummary($State, [int]$MaxStep = 0, $Since = $null) {
     }
     return @{ Input = $in; Cache = $cache; Output = $out; Thinking = $think; Total = ($in + $out); Context = $ctx; Turns = $turns }
 }
+
+# 취소(또는 작업자 비정상 종료) 직전까지 agy 가 진행한 내용을 마크다운 요약으로 만듭니다.
+# 대화 기록을 읽을 수 없거나, 단계도 남긴 말도 없으면 빈 문자열("")을 돌려줍니다.
+function Get-AgyCancelledWorkText([string]$AgyHome, [string]$ConversationId, $Since = $null) {
+    $tp = Get-AgyTranscriptPath $AgyHome $ConversationId
+    if (-not $tp -or -not (Test-Path -LiteralPath $tp -PathType Leaf)) { return "" }
+
+    $sinceDt = $null
+    if ($Since) {
+        try {
+            if ($Since -is [datetime]) { $sinceDt = $Since }
+            elseif ($Since -is [DateTimeOffset]) { $sinceDt = $Since.LocalDateTime }
+            else { $sinceDt = [datetime]::Parse([string]$Since, [System.Globalization.CultureInfo]::InvariantCulture) }
+        } catch {}
+    }
+
+    # 1) 진행 단계 요약 (생략 표지 { skipped = N } 는 제외)
+    $rawSteps = @((Read-AgyProcessSteps $tp 0 1500 500 300 $Since).Steps)
+    $steps = New-Object System.Collections.ArrayList
+    foreach ($s in $rawSteps) {
+        if ($null -eq $s) { continue }
+        if ($s -is [System.Collections.IDictionary]) {
+            if ($s.Contains('skipped')) { continue }
+        } elseif ($null -ne $s.PSObject.Properties['skipped']) {
+            continue
+        }
+        [void]$steps.Add($s)
+    }
+
+    $bullets = New-Object System.Collections.ArrayList
+    if ($steps.Count -gt 0) {
+        $lastStep = $steps[$steps.Count - 1]
+        $lastAt = if ($lastStep.at) { [string]$lastStep.at } else { "" }
+        if ($lastAt) {
+            [void]$bullets.Add(("- 단계 {0}개, 마지막 단계 {1}" -f $steps.Count, $lastAt))
+        } else {
+            [void]$bullets.Add(("- 단계 {0}개" -f $steps.Count))
+        }
+
+        $editedFiles = New-Object System.Collections.ArrayList
+        $seenFiles = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($st in $steps) {
+            $toolName = [string]$st.tool
+            $hasEdits = $false
+            $bodyObj = if ($st -is [System.Collections.IDictionary]) { if ($st.Contains('body')) { $st['body'] } else { $null } } else { $st.body }
+            if ($null -ne $bodyObj) {
+                if ($bodyObj -is [System.Collections.IDictionary]) {
+                    $hasEdits = ($bodyObj.Contains('edits') -and @($bodyObj['edits']).Count -gt 0)
+                } elseif ($null -ne $bodyObj.PSObject.Properties['edits']) {
+                    $hasEdits = (@($bodyObj.edits).Count -gt 0)
+                }
+            }
+            $isEdit = ($toolName -match '(?i)write|replace|edit|create_file|delete') -or $hasEdits
+            if (-not $isEdit) { continue }
+            $p = if ($st -is [System.Collections.IDictionary]) { if ($st.Contains('path')) { [string]$st['path'] } else { "" } } else { [string]$st.path }
+            $p = $p.Trim()
+            if ($p -and $seenFiles.Add($p)) {
+                [void]$editedFiles.Add($p)
+            }
+        }
+        if ($editedFiles.Count -gt 0) {
+            $shownCount = [Math]::Min(20, $editedFiles.Count)
+            $shown = New-Object System.Collections.ArrayList
+            for ($i = 0; $i -lt $shownCount; $i++) {
+                [void]$shown.Add(('`{0}`' -f $editedFiles[$i]))
+            }
+            $fileList = ($shown.ToArray() -join ', ')
+            if ($editedFiles.Count -gt 20) {
+                $fileList += (" 외 {0}개" -f ($editedFiles.Count - 20))
+            }
+            [void]$bullets.Add(("- 고친 파일 {0}개: {1}" -f $editedFiles.Count, $fileList))
+        }
+
+        $lastLabel = if ($lastStep.label) { ([string]$lastStep.label).Trim() } else { "" }
+        $lastWork = if ($lastLabel) { $lastLabel } else { (([string]$lastStep.tool) + " " + ([string]$lastStep.detail)).Trim() }
+        if ($lastWork) {
+            [void]$bullets.Add(("- 마지막으로 하던 일: {0}" -f $lastWork))
+        }
+    }
+
+    # 2) agy 가 마지막으로 남긴 말 (끝에서 최대 4MB 만 읽어 역순 탐색)
+    $lastText = ""
+    $tailText = $null
+    try {
+        $fs = New-Object System.IO.FileStream($tp, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        try {
+            $len = $fs.Length
+            if ($len -gt 0) {
+                $take = [int][Math]::Min([long]4194304, $len)
+                [void]$fs.Seek($len - $take, [System.IO.SeekOrigin]::Begin)
+                $buf = New-Object byte[] $take
+                $got = 0
+                while ($got -lt $take) {
+                    $n = $fs.Read($buf, $got, $take - $got)
+                    if ($n -le 0) { break }
+                    $got += $n
+                }
+                $tailText = [System.Text.Encoding]::UTF8.GetString($buf, 0, $got)
+            }
+        } finally { $fs.Dispose() }
+    } catch { $tailText = $null }
+
+    if ($tailText) {
+        $lines = @($tailText -split "\r?\n")
+        for ($i = $lines.Count - 1; $i -ge 0; $i--) {
+            $line = $lines[$i]
+            if (-not $line -or $line.IndexOf('PLANNER_RESPONSE', [System.StringComparison]::Ordinal) -lt 0) { continue }
+            $o = $null
+            try { $o = $line.TrimStart([char]0xFEFF) | ConvertFrom-Json } catch { continue }
+            if ($null -eq $o -or [string]$o.type -ne 'PLANNER_RESPONSE') { continue }
+            if ($sinceDt -and $o.created_at) {
+                $stepDt = $null
+                try {
+                    $parsed = [datetime]::Parse([string]$o.created_at, [System.Globalization.CultureInfo]::InvariantCulture,
+                        [System.Globalization.DateTimeStyles]::RoundtripKind)
+                    $stepDt = $parsed.ToLocalTime()
+                } catch {}
+                if ($stepDt -and $stepDt -lt $sinceDt) { continue }
+            }
+            $content = if ($null -ne $o.content) { [string]$o.content } else { "" }
+            if ([string]::IsNullOrWhiteSpace($content)) { continue }
+            if ($content.Length -gt 2000) { $content = $content.Substring(0, 2000) + "…" }
+            $lastText = $content
+            break
+        }
+    }
+
+    if ($bullets.Count -eq 0 -and -not $lastText) { return "" }
+
+    $out = New-Object System.Collections.ArrayList
+    [void]$out.Add("## 취소 전까지 한 일")
+    foreach ($b in $bullets) { [void]$out.Add($b) }
+    if ($lastText) {
+        [void]$out.Add("")
+        [void]$out.Add("### agy 가 마지막으로 남긴 말")
+        [void]$out.Add($lastText)
+    }
+    return ($out.ToArray() -join "`n")
+}

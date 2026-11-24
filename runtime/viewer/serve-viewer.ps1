@@ -721,6 +721,13 @@ if ($processTranslateLib) { . $processTranslateLib }
 # 실측 통계 수집기(usage-stats.ps1): 인자 없이 불러 함수만 정의한다. 수집 자체는 /api/usage-stats 요청 때 창 없는 별도 프로세스로 돌린다.
 $usageStatsLib = Find-DelegateScript "sub\usage-stats.ps1"
 if ($usageStatsLib) { try { . $usageStatsLib } catch { $usageStatsLib = $null } }
+# 위임별 Claude 토큰 집계 및 5시간/주간 한도 추정 헬퍼
+$claudeTranscriptLib = Find-DelegateScript "sub\claude-transcript.ps1"
+if ($claudeTranscriptLib) { try { . $claudeTranscriptLib } catch {} }
+$agyQuotaLib = Find-DelegateScript "sub\agy-quota.ps1"
+if ($agyQuotaLib) { try { . $agyQuotaLib } catch {} }
+$limitsEstimateLib = Join-Path $PSScriptRoot "limits-estimate.ps1"
+if (Test-Path -LiteralPath $limitsEstimateLib) { try { . $limitsEstimateLib } catch {} }
 # 핸드오프 채널 공용 함수(handoff-lib.ps1): 메시지 머리말의 모델과 "자동 이어가기" 상태를 읽는다. 못 찾으면 그 정보만 빠진다.
 $script:HandoffMetaCache = @{}
 $handoffLibLoaded = $false
@@ -742,9 +749,188 @@ function Get-ViewerDataStamp([string]$DbPath, [string]$DataDir) {
     } catch { return "" }
 }
 
-# 위임 기록 API 의 본문: Get-QaRecordsJson 이 만든 기록에 Claude 모델(claude-meta 파일)과 큐 대기 시간(wait_sec)을 덧붙인다.
-function Get-ViewerQaRecordsJson([string]$DbPath, [string]$DataDir = "", [long]$Since = 0) {
-    if (-not (Test-Path -LiteralPath $DbPath)) { return ('{{"records":[],"seq":{0},"total":0}}' -f $Since) }
+# 한도 추정 스냅샷(Claude / Gemini)을 60초 간격으로 캐시해 돌려준다.
+# agy-quota.json 이 10분 넘게 지났으면 요청을 막지 않고 백그라운드에서 한 번만 갱신한다(-NoAgent 일 때는 생략).
+function Get-ViewerLimitsCached([string]$TargetRuntime, [string]$DbPath, [string]$ProjectsDir) {
+    $empty = @{ Stamp = ""; Json = "" }
+    if (-not (Get-Command Get-LimitsEstimateSnapshot -ErrorAction SilentlyContinue)) { return $empty }
+
+    $now = [datetime]::UtcNow
+    if ($null -ne $ViewerShared) {
+        [System.Threading.Monitor]::Enter($ViewerShared.SyncRoot)
+        try {
+            $cached = $ViewerShared['LimitsCache']
+            if ($cached -and ($now - $cached.ComputedAt).TotalSeconds -lt 60) {
+                return $cached
+            }
+        } finally {
+            [System.Threading.Monitor]::Exit($ViewerShared.SyncRoot)
+        }
+    }
+
+    if (-not $NoAgent -and $TargetRuntime -and $agyQuotaLib -and (Get-Command Get-AgyQuotaSnapshot -ErrorAction SilentlyContinue)) {
+        $quotaFile = Join-Path $TargetRuntime "agy-quota.json"
+        $needRefresh = $true
+        if (Test-Path -LiteralPath $quotaFile -PathType Leaf) {
+            try {
+                $qItem = Get-Item -LiteralPath $quotaFile -ErrorAction SilentlyContinue
+                if ($qItem -and ($now - $qItem.LastWriteTimeUtc).TotalSeconds -lt 600) { $needRefresh = $false }
+            } catch {}
+        }
+        if ($needRefresh -and $null -ne $ViewerShared) {
+            $shouldLaunch = $false
+            [System.Threading.Monitor]::Enter($ViewerShared.SyncRoot)
+            try {
+                $lastTry = $ViewerShared['QuotaRefreshAt']
+                if (-not $lastTry -or ($now - $lastTry).TotalSeconds -ge 60) {
+                    $ViewerShared['QuotaRefreshAt'] = $now
+                    $shouldLaunch = $true
+                }
+            } finally {
+                [System.Threading.Monitor]::Exit($ViewerShared.SyncRoot)
+            }
+            if ($shouldLaunch) {
+                try {
+                    $psi = New-Object System.Diagnostics.ProcessStartInfo
+                    $psi.FileName = "powershell.exe"
+                    $psi.Arguments = ('-NoProfile -ExecutionPolicy Bypass -Command ". ''{0}''; [void](Get-AgyQuotaSnapshot ''{1}'')"' -f ($agyQuotaLib -replace "'", "''"), ($quotaFile -replace "'", "''"))
+                    $psi.UseShellExecute = $false
+                    $psi.CreateNoWindow = $true
+                    $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+                    [void][System.Diagnostics.Process]::Start($psi)
+                } catch {}
+            }
+        }
+    }
+
+    $obj = $null
+    try {
+        $obj = Get-LimitsEstimateSnapshot $TargetRuntime $DbPath $ProjectsDir $now
+    } catch { $obj = $null }
+
+    $json = if ($obj -and $obj.Count -gt 0) { ConvertTo-Json -InputObject $obj -Depth 6 -Compress } else { "" }
+    $entry = @{ ComputedAt = $now; Stamp = $json; Json = $json }
+    if ($null -ne $ViewerShared) {
+        [System.Threading.Monitor]::Enter($ViewerShared.SyncRoot)
+        try { $ViewerShared['LimitsCache'] = $entry } finally { [System.Threading.Monitor]::Exit($ViewerShared.SyncRoot) }
+    }
+    return $entry
+}
+
+function Get-TaskClaudeUsageCached($Db, $CacheMap, [string]$TaskId, $MetaObj, [string]$EndTimestamp, [string]$ProjectsDir) {
+    if (-not $MetaObj -or -not $MetaObj.PSObject.Properties['session'] -or -not $MetaObj.session) { return "" }
+    if (-not (Get-Command Get-ClaudeDelegationUsage -ErrorAction SilentlyContinue)) { return "" }
+
+    $sessId = [string]$MetaObj.session
+    $agentId = if ($MetaObj.PSObject.Properties['agent_id'] -and $MetaObj.agent_id) { [string]$MetaObj.agent_id } else { "" }
+    $mainPath = Resolve-ClaudeTranscriptPath -SessionId $sessId -ProjectsDir $ProjectsDir
+    $subPath = if ($agentId -and $mainPath) { Get-ClaudeSubagentTranscriptPath -MainTranscriptPath $mainPath -AgentId $agentId } else { "" }
+
+    $mainTicks = 0L
+    if ($mainPath -and (Test-Path -LiteralPath $mainPath -PathType Leaf)) {
+        try { $mainTicks = (Get-Item -LiteralPath $mainPath).LastWriteTimeUtc.Ticks } catch {}
+    }
+    $subTicks = 0L
+    if ($subPath -and (Test-Path -LiteralPath $subPath -PathType Leaf)) {
+        try { $subTicks = (Get-Item -LiteralPath $subPath).LastWriteTimeUtc.Ticks } catch {}
+    }
+    $srcMtime = "{0}|{1}" -f $mainTicks, $subTicks
+
+    $cached = if ($CacheMap -and $CacheMap.ContainsKey($TaskId)) { $CacheMap.Item($TaskId) } else { $null }
+    if ($cached) {
+        if ($cached.src_mtime -eq $srcMtime) { return [string]$cached.json }
+        $within24h = $false
+        if ($EndTimestamp) {
+            $dtEnd = [datetime]::MinValue
+            if ([datetime]::TryParse($EndTimestamp, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeLocal, [ref]$dtEnd)) {
+                if (([datetime]::Now - $dtEnd).TotalHours -lt 24.0) { $within24h = $true }
+            }
+        }
+        if (-not $within24h) { return [string]$cached.json }
+    }
+
+    if ($mainTicks -eq 0 -and $subTicks -eq 0) { return "" }
+    $u = Get-ClaudeDelegationUsage -MainTranscriptPath $mainPath -TaskId $TaskId -AgentId $agentId
+    $uJson = if ($null -ne $u) { ConvertTo-Json -InputObject $u -Depth 5 -Compress } else { "" }
+    if (Get-Command Set-ClaudeUsageCache -ErrorAction SilentlyContinue) {
+        try {
+            Set-ClaudeUsageCache $Db $TaskId $uJson $srcMtime ([datetime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"))
+        } catch {}
+    }
+    return $uJson
+}
+
+function Get-PendingClaudeUsageCached([string]$TaskId, $MetaObj, [string]$ProjectsDir) {
+    if (-not $MetaObj -or -not $MetaObj.PSObject.Properties['session'] -or -not $MetaObj.session) { return $null }
+    if (-not (Get-Command Get-ClaudeDelegationUsage -ErrorAction SilentlyContinue)) { return $null }
+
+    $sessId = [string]$MetaObj.session
+    $agentId = if ($MetaObj.PSObject.Properties['agent_id'] -and $MetaObj.agent_id) { [string]$MetaObj.agent_id } else { "" }
+    $mainPath = Resolve-ClaudeTranscriptPath -SessionId $sessId -ProjectsDir $ProjectsDir
+    $subPath = if ($agentId -and $mainPath) { Get-ClaudeSubagentTranscriptPath -MainTranscriptPath $mainPath -AgentId $agentId } else { "" }
+
+    # 진행 중에는 대화 기록이 계속 자라 mtime 이 매번 바뀐다. 5초 갱신마다 전체를 다시 읽지 않도록 10초 동안은 이전 계산을 그대로 쓴다.
+    $nowTicks = [datetime]::UtcNow.Ticks
+    if ($null -ne $ViewerShared) {
+        $pc0 = $ViewerShared['PendingClaudeUsageCache']
+        if ($pc0) {
+            [System.Threading.Monitor]::Enter($ViewerShared.SyncRoot)
+            try {
+                if ($pc0.ContainsKey($TaskId) -and $pc0[$TaskId].ComputedTicks -and (($nowTicks - [int64]$pc0[$TaskId].ComputedTicks) -lt 100000000L)) {
+                    return $pc0[$TaskId].Usage
+                }
+            } finally {
+                [System.Threading.Monitor]::Exit($ViewerShared.SyncRoot)
+            }
+        }
+    }
+
+    $mainTicks = 0L
+    if ($mainPath -and (Test-Path -LiteralPath $mainPath -PathType Leaf)) {
+        try { $mainTicks = (Get-Item -LiteralPath $mainPath).LastWriteTimeUtc.Ticks } catch {}
+    }
+    $subTicks = 0L
+    if ($subPath -and (Test-Path -LiteralPath $subPath -PathType Leaf)) {
+        try { $subTicks = (Get-Item -LiteralPath $subPath).LastWriteTimeUtc.Ticks } catch {}
+    }
+    if ($mainTicks -eq 0 -and $subTicks -eq 0) { return $null }
+    $srcMtime = "{0}|{1}" -f $mainTicks, $subTicks
+
+    if ($null -ne $ViewerShared) {
+        $pCache = $ViewerShared['PendingClaudeUsageCache']
+        if ($pCache) {
+            [System.Threading.Monitor]::Enter($ViewerShared.SyncRoot)
+            try {
+                if ($pCache.ContainsKey($TaskId) -and $pCache[$TaskId].SrcMtime -eq $srcMtime) {
+                    $pCache[$TaskId].ComputedTicks = $nowTicks
+                    return $pCache[$TaskId].Usage
+                }
+            } finally {
+                [System.Threading.Monitor]::Exit($ViewerShared.SyncRoot)
+            }
+        }
+    }
+
+    $u = Get-ClaudeDelegationUsage -MainTranscriptPath $mainPath -TaskId $TaskId -AgentId $agentId
+    if ($null -ne $ViewerShared) {
+        $pCache = $ViewerShared['PendingClaudeUsageCache']
+        if ($pCache) {
+            [System.Threading.Monitor]::Enter($ViewerShared.SyncRoot)
+            try {
+                if ($pCache.Count -gt 32) { $pCache.Clear() }
+                $pCache[$TaskId] = @{ SrcMtime = $srcMtime; Usage = $u; ComputedTicks = [datetime]::UtcNow.Ticks }
+            } finally {
+                [System.Threading.Monitor]::Exit($ViewerShared.SyncRoot)
+            }
+        }
+    }
+    return $u
+}
+
+# 위임 기록 API 의 본문: Get-QaRecordsJson 이 만든 기록에 Claude 모델(claude-meta 파일), Claude 토큰(claude_usage), 대기 시간(wait_sec), 한도 추정치(limits)를 덧붙인다.
+function Get-ViewerQaRecordsJson([string]$DbPath, [string]$DataDir = "", [long]$Since = 0, [string]$LimitsJson = "", [string]$ProjectsDir = "") {
+    $limTail = if ($LimitsJson) { ',"limits":' + $LimitsJson } else { '' }
+    if (-not (Test-Path -LiteralPath $DbPath)) { return ('{{"records":[],"seq":{0},"total":0{1}}}' -f $Since, $limTail) }
     if (-not (Get-Command Open-AgyDb -ErrorAction SilentlyContinue)) {
         return (Get-QaRecordsJson $DbPath $Since)
     }
@@ -754,8 +940,11 @@ function Get-ViewerQaRecordsJson([string]$DbPath, [string]$DataDir = "", [long]$
         $total = [int64]($db.Query('SELECT COUNT(*) AS n FROM tasks WHERE answer IS NOT NULL', $null))[0]['n']
         $rows = $db.Query('SELECT * FROM tasks WHERE answer IS NOT NULL AND updated_seq > ? ORDER BY updated_seq', [object[]]@($Since))
         if ($rows.Count -eq 0) {
-            return ('{{"records":[],"seq":{0},"total":{1}}}' -f $Since, $total)
+            return ('{{"records":[],"seq":{0},"total":{1}{2}}}' -f $Since, $total, $limTail)
         }
+
+        $claudeUsageMap = if (Get-Command Get-ClaudeUsageCacheMap -ErrorAction SilentlyContinue) { Get-ClaudeUsageCacheMap $db } else { @{} }
+        $effProjectsDir = if ($ProjectsDir) { $ProjectsDir } elseif ($ClaudeProjectsDir) { $ClaudeProjectsDir } else { "" }
 
         $fields = if ($script:QaRecordFields) { $script:QaRecordFields } else { @('timestamp', 'computer_name', 'task_id', 'source', 'model', 'attempts', 'tried_models', 'input_tokens', 'output_tokens', 'thinking_tokens', 'total_tokens', 'elapsed_sec', 'status', 'session', 'session_id', 'question', 'answer', 'process', 'cum_input_tokens', 'cum_output_tokens', 'cum_thinking_tokens', 'cum_total_tokens', 'usage_basis') }
         $targetRuntime = if ($RuntimeDir) { $RuntimeDir } elseif ($DataDir) { Join-Path (Split-Path $DataDir -Parent) "runtime" } elseif ($env:AGY_DELEGATE_RUNTIME) { $env:AGY_DELEGATE_RUNTIME } else { "" }
@@ -806,6 +995,12 @@ function Get-ViewerQaRecordsJson([string]$DbPath, [string]$DataDir = "", [long]$
                                         [void]$sb.Append('"').Append($ak).Append('":').Append((ConvertTo-AgyJsonString ([string]$prop.Value)))
                                     }
                                 }
+                                $cuJson = Get-TaskClaudeUsageCached $db $claudeUsageMap $tId $metaObj ([string]$r['timestamp']) $effProjectsDir
+                                if ($cuJson) {
+                                    if (-not $firstField) { [void]$sb.Append(',') }
+                                    $firstField = $false
+                                    [void]$sb.Append('"claude_usage":').Append($cuJson)
+                                }
                             }
                         }
                     } catch {}
@@ -826,7 +1021,7 @@ function Get-ViewerQaRecordsJson([string]$DbPath, [string]$DataDir = "", [long]$
 
             [void]$sb.Append('}')
         }
-        [void]$sb.Append('],"seq":').Append($seq).Append(',"total":').Append($total).Append('}')
+        [void]$sb.Append('],"seq":').Append($seq).Append(',"total":').Append($total).Append($limTail).Append('}')
         return $sb.ToString()
     } finally {
         $db.Dispose()
@@ -840,6 +1035,9 @@ if (-not $WorkerMode) {
     $ViewerShared['QaRecordsCache'] = $null
     $ViewerShared['lastClaudeScanLaunchAt'] = $null
     $ViewerShared['lastClaudeScanProc'] = $null
+    $ViewerShared['LimitsCache'] = $null
+    $ViewerShared['QuotaRefreshAt'] = $null
+    $ViewerShared['PendingClaudeUsageCache'] = @{}
 
     $listener = $null
     $prefix = $null
@@ -1403,14 +1601,18 @@ $ViewerHandleRequest = {
                 $params = Get-Utf8QueryParams $request.Url
                 $qaSince = [long]0
                 if ($params["since"]) { [void][long]::TryParse([string]$params["since"], [ref]$qaSince) }
+                $limInfo = if (Get-Command Get-ViewerLimitsCached -ErrorAction SilentlyContinue) { Get-ViewerLimitsCached $RuntimeDir $AgyDbPath $ClaudeProjectsDir } else { @{ Stamp = ""; Json = "" } }
                 $qaJson = $null
                 # 처음 전부 받는 요청(since=0)은 데이터가 그대로면 지난번에 만든 응답을 그대로 준다(만드는 데 수 초 걸린다)
-                $qaStamp = if ($qaSince -eq 0) { Get-ViewerDataStamp $AgyDbPath $DataDir } else { "" }
+                $qaStamp = if ($qaSince -eq 0) {
+                    $baseStamp = Get-ViewerDataStamp $AgyDbPath $DataDir
+                    if ($baseStamp) { "{0}|{1}" -f $baseStamp, $limInfo.Stamp } else { "" }
+                } else { "" }
                 if ($qaStamp -and $ViewerShared['QaRecordsCache'] -and $ViewerShared['QaRecordsCache'].Stamp -eq $qaStamp) {
                     $qaJson = [string]$ViewerShared['QaRecordsCache'].Json
                     $response.Headers.Add("X-Samjil-Cache", "hit")
                 } else {
-                    try { $qaJson = Get-ViewerQaRecordsJson $AgyDbPath $DataDir $qaSince } catch { try { $qaJson = Get-QaRecordsJson $AgyDbPath $qaSince } catch { $qaJson = $null } }
+                    try { $qaJson = Get-ViewerQaRecordsJson $AgyDbPath $DataDir $qaSince $limInfo.Json $ClaudeProjectsDir } catch { try { $qaJson = Get-QaRecordsJson $AgyDbPath $qaSince } catch { $qaJson = $null } }
                     if ($qaStamp -and $null -ne $qaJson) { $ViewerShared['QaRecordsCache'] = @{ Stamp = $qaStamp; Json = $qaJson } }
                 }
                 if ($null -eq $qaJson) {
@@ -1653,6 +1855,10 @@ $ViewerHandleRequest = {
                                                     $pendingObj[$ak] = [string]$prop.Value
                                                 }
                                             }
+                                            if ($metaData.PSObject.Properties['session'] -and $metaData.session -and (Get-Command Get-PendingClaudeUsageCached -ErrorAction SilentlyContinue)) {
+                                                $pCu = Get-PendingClaudeUsageCached $f.BaseName $metaData $ClaudeProjectsDir
+                                                if ($null -ne $pCu) { $pendingObj["claude_usage"] = $pCu }
+                                            }
                                         }
                                     }
                                 } catch {}
@@ -1667,9 +1873,9 @@ $ViewerHandleRequest = {
                 $json = if ($pendingList.Count -eq 0) {
                     "[]"
                 } elseif ($pendingList.Count -eq 1) {
-                    "[" + ($pendingList[0] | ConvertTo-Json -Depth 5) + "]"
+                    "[" + ($pendingList[0] | ConvertTo-Json -Depth 6) + "]"
                 } else {
-                    $pendingList | ConvertTo-Json -Depth 5
+                    $pendingList | ConvertTo-Json -Depth 6
                 }
 
                 $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)

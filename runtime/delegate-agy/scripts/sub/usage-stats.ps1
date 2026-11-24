@@ -539,7 +539,7 @@ function ConvertTo-AgyUsageClaudeLabel([string]$ShortModel, [string]$Effort) {
     return $ShortModel
 }
 
-# agy 모델 목록("gemini-4-hydrogen-medium, gemini-3.8-flash-low")을 짧은 이름으로: "hydrogen-medium, flash-low"(agy-models.ps1 의 Get-AgyModelShortName)
+# agy 모델 목록("gemini-4-hydrogen-medium, gemini-4-carbon-high")을 짧은 이름으로: "hydrogen-medium, carbon-high"(agy-models.ps1 의 Get-AgyModelShortName)
 function ConvertTo-AgyUsageAgyShort([string]$Models) {
     if (-not $Models) { return "" }
     if (-not (Get-Command Get-AgyModelShortName -ErrorAction SilentlyContinue)) {

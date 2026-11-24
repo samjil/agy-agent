@@ -1,5 +1,5 @@
 ﻿# agy-models.ps1
-# agy 위임 모델 단계(quick · build · build-hard · feature · feature-argon · think · think-argon · deep)를 설정 파일에서 읽는 공용 헬퍼입니다.
+# agy 위임 모델 단계(quick · build · build-hard · feature · feature-carbon · think · think-carbon · deep)를 설정 파일에서 읽는 공용 헬퍼입니다.
 # dot-source 해서 씁니다: `. (Join-Path $PSScriptRoot "agy-models.ps1")`
 #   (watch-agy.ps1 · agy-autotier.ps1 · handoff-pump.ps1 · process-translate.ps1 · submit-task.ps1 · 뷰어가 씁니다)
 #
@@ -19,26 +19,25 @@ $script:AgyModelsScriptDir = $PSScriptRoot
 function Get-AgyModelsBuiltinConfig {
     return @{
         tiers = [ordered]@{
-            "quick"         = @{ model = "gemini-4-hydrogen-low";          fallback = @("gemini-4-hydrogen-medium", "gemini-4-neon-low", "gemini-3.8-flash-low");                                   wait_sec = 180 }
-            "build"         = @{ model = "gemini-4-hydrogen-medium";       fallback = @("gemini-4-hydrogen-high", "gemini-4-neon-low", "gemini-3.8-flash-medium");                                  wait_sec = 480 }
-            "build-hard"    = @{ model = "gemini-4-neon-medium";           fallback = @("gemini-4-hydrogen-high", "gemini-4-neon-high", "gemini-4-argon-medium", "gemini-3.8-flash-medium");        wait_sec = 720 }
-            "feature"       = @{ model = "gemini-pro-orchestrator-neon";   fallback = @("gemini-4-neon-high", "gemini-pro-orchestrator-g1-pro", "gemini-4-hydrogen-high", "gemini-3.8-flash-medium"); wait_sec = 1200 }
-            "feature-argon" = @{ model = "gemini-pro-orchestrator-g1-pro"; fallback = @("gemini-4-argon-high", "gemini-pro-orchestrator-neon", "gemini-4-hydrogen-high", "gemini-3.8-flash-medium"); wait_sec = 1200 }
-            "think"         = @{ model = "gemini-4-neon-high";             fallback = @("gemini-4-argon-high", "gemini-4-neon-medium", "gemini-4-argon-medium", "gemini-4-hydrogen-high");           wait_sec = 1200 }
-            "think-argon"   = @{ model = "gemini-4-argon-high";            fallback = @("gemini-4-argon-medium", "gemini-4-neon-high", "gemini-4-hydrogen-high");                                   wait_sec = 1200 }
-            "deep"          = @{ model = "gemini-4-neon-xhigh";            fallback = @("gemini-4-neon-high", "gemini-4-hydrogen-xhigh", "gemini-4-argon-high", "gemini-3.8-flash-medium");         wait_sec = 1200 }
+            "quick"          = @{ model = "gemini-4-hydrogen-low";        fallback = @("gemini-4-hydrogen-medium", "gemini-4-neon-low");                               wait_sec = 180 }
+            "build"          = @{ model = "gemini-4-hydrogen-medium";     fallback = @("gemini-4-hydrogen-high", "gemini-4-neon-low");                                 wait_sec = 480 }
+            "build-hard"     = @{ model = "gemini-4-neon-medium";         fallback = @("gemini-4-neon-high", "gemini-4-hydrogen-xhigh", "gemini-4-carbon-medium");     wait_sec = 720 }
+            "feature"        = @{ model = "gemini-pro-orchestrator-neon"; fallback = @("gemini-4-neon-high", "gemini-pro-orchestrator", "gemini-4-hydrogen-high");     wait_sec = 1200 }
+            "feature-carbon" = @{ model = "gemini-pro-orchestrator";      fallback = @("gemini-4-carbon-high", "gemini-pro-orchestrator-neon", "gemini-4-neon-high");  wait_sec = 1200 }
+            "think"          = @{ model = "gemini-4-neon-high";           fallback = @("gemini-4-neon-medium", "gemini-4-carbon-high", "gemini-4-hydrogen-high");      wait_sec = 1200 }
+            "think-carbon"   = @{ model = "gemini-4-carbon-high";         fallback = @("gemini-4-carbon-medium", "gemini-4-neon-high", "gemini-4-neon-xhigh");         wait_sec = 1200 }
+            "deep"           = @{ model = "gemini-4-neon-xhigh";          fallback = @("gemini-4-neon-high", "gemini-4-carbon-high", "gemini-4-hydrogen-xhigh");       wait_sec = 1200 }
         }
         escalate        = @{ "build" = "build-hard"; "build-hard" = "deep" }
         auto            = @{ read = "quick"; write = "build" }
-        aliases         = @{ low = "quick"; medium = "build"; high = "build-hard" }
+        aliases         = @{ low = "quick"; medium = "build"; high = "build-hard"; "think-argon" = "think-carbon"; "feature-argon" = "feature-carbon" }
         handoff_default = "think"
         translate       = "quick"
         allowed         = @(
             "gemini-4-hydrogen-low", "gemini-4-hydrogen-medium", "gemini-4-hydrogen-high", "gemini-4-hydrogen-xhigh",
             "gemini-4-neon-low", "gemini-4-neon-medium", "gemini-4-neon-high", "gemini-4-neon-xhigh",
-            "gemini-4-argon-low", "gemini-4-argon-medium", "gemini-4-argon-high",
-            "gemini-pro-orchestrator-neon", "gemini-pro-orchestrator-g1-pro",
-            "gemini-3.8-flash-low", "gemini-3.8-flash-medium"
+            "gemini-4-carbon-low", "gemini-4-carbon-medium", "gemini-4-carbon-high",
+            "gemini-pro-orchestrator-neon", "gemini-pro-orchestrator"
         )
     }
 }
@@ -331,20 +330,17 @@ function Get-AgyMissingTierModels($Config, [string[]]$Available) {
     return $missing
 }
 
-# 3.8 Flash(맨 마지막 대안)인가.
-function Test-AgyLastResortModel([string]$Model) {
-    return ([string]$Model) -match '^(?i)gemini-3\.8-flash-'
-}
-
 # 화면 · 로그용 짧은 이름: gemini-4-hydrogen-xhigh -> hydrogen-extra, gemini-4-neon-xhigh -> neon-extra,
-# gemini-4-argon-high -> argon-high, gemini-4-neon-medium -> neon-medium,
-# gemini-pro-orchestrator-neon -> orchestrator-neon, gemini-pro-orchestrator-g1-pro -> orchestrator,
-# gemini-3.8-flash-medium -> flash-medium. 모르는 이름은 그대로.
+# gemini-4-carbon-high -> carbon-high, gemini-4-neon-medium -> neon-medium,
+# gemini-pro-orchestrator-neon -> orchestrator-neon, gemini-pro-orchestrator -> orchestrator-carbon,
+# gemini-pro-orchestrator-argon -> orchestrator-argon (예전 g1-pro -> orchestrator, 3.8-flash-medium -> flash-medium). 모르는 이름은 그대로.
 function Get-AgyModelShortName([string]$Model) {
     $m = ([string]$Model).Trim()
-    if ($m -match '^(?i)gemini-4-(hydrogen|neon)-xhigh$') { return ("{0}-extra" -f $Matches[1].ToLowerInvariant()) }
-    if ($m -match '^(?i)gemini-4-(hydrogen|argon|neon)-(\w+)$') { return ("{0}-{1}" -f $Matches[1].ToLowerInvariant(), $Matches[2].ToLowerInvariant()) }
+    if ($m -match '^(?i)gemini-4-(hydrogen|neon|carbon)-xhigh$') { return ("{0}-extra" -f $Matches[1].ToLowerInvariant()) }
+    if ($m -match '^(?i)gemini-4-(hydrogen|neon|carbon|argon)-(\w+)$') { return ("{0}-{1}" -f $Matches[1].ToLowerInvariant(), $Matches[2].ToLowerInvariant()) }
     if ($m -match '^(?i)gemini-pro-orchestrator-neon$') { return "orchestrator-neon" }
+    if ($m -match '^(?i)gemini-pro-orchestrator$') { return "orchestrator-carbon" }
+    if ($m -match '^(?i)gemini-pro-orchestrator-argon$') { return "orchestrator-argon" }
     if ($m -match '^(?i)gemini-pro-orchestrator') { return "orchestrator" }
     if ($m -match '^(?i)gemini-3\.8-flash-(\w+)$') { return ("flash-{0}" -f $Matches[1].ToLowerInvariant()) }
     return $m
