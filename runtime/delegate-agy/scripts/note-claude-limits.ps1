@@ -120,6 +120,16 @@ try {
     } finally {
         Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
     }
+
+    if ($fiveEntry -and $weekEntry) {
+        try {
+            $histLib = Join-Path $PSScriptRoot "sub\usage-history.ps1"
+            if (Test-Path -LiteralPath $histLib -PathType Leaf) {
+                . $histLib
+                [void](Add-UsageHistory -RuntimeDir $RuntimeDir -Src "claude" -FiveUsed $fiveEntry.used_pct -FiveReset $fiveEntry.resets_at -WeekUsed $weekEntry.used_pct -WeekReset $weekEntry.resets_at -AtUtc $nowUtc)
+            }
+        } catch {}
+    }
 } catch {
     [Console]::Error.WriteLine("note-claude-limits: 저장하지 못했습니다.")
 }

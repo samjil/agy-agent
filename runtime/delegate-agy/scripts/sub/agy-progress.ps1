@@ -339,6 +339,209 @@ function Test-AgyStalled($LastActivity, [datetime]$StartedAt, [datetime]$Now, [i
     return (($Now - $ref).TotalSeconds -ge $StallSeconds)
 }
 
+# agy 자체 로그(<AgyHome>\log\cli-*.log) 중 이번 대화/프로세스의 로그 파일을 찾습니다. 없으면 $null.
+# 대화 ID(Created conversation / conversation= / conversationID= / Streaming conversation 등)를 우선 찾고,
+# 없으면 언어 서버 PID(Starting language server process with pid <RootPid>)로 찾습니다.
+function Find-AgyCliLog($AgyHome, [string]$ConvId = "", [int]$RootPid = 0, [datetime]$StartedAt = [datetime]::MinValue) {
+    if (-not $AgyHome) { return $null }
+    $logDir = Join-Path $AgyHome "log"
+    if (-not (Test-Path -LiteralPath $logDir -PathType Container)) { return $null }
+    $files = @(Get-ChildItem -LiteralPath $logDir -Filter "cli-*.log" -File -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending)
+    if ($StartedAt -ne [datetime]::MinValue) {
+        $cutoff = $StartedAt.AddSeconds(-60)
+        $files = @($files | Where-Object { $_.LastWriteTime -ge $cutoff })
+    }
+    if ($files.Count -gt 25) { $files = @($files | Select-Object -First 25) }
+    $pidMatch = $null
+    $pidNeedle = if ($RootPid -gt 0) { "pid $RootPid" } else { "" }
+    foreach ($f in $files) {
+        $fs = $null; $sr = $null
+        try {
+            $fs = New-Object System.IO.FileStream($f.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+            $sr = New-Object System.IO.StreamReader($fs, [System.Text.Encoding]::UTF8)
+            $hasPid = $false
+            while ($null -ne ($line = $sr.ReadLine())) {
+                if ($ConvId -and $line.IndexOf($ConvId, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                    return $f.FullName
+                }
+                if ($pidNeedle -and -not $hasPid -and $line.IndexOf($pidNeedle, [System.StringComparison]::Ordinal) -ge 0) {
+                    $hasPid = $true
+                }
+            }
+            if ($hasPid -and -not $pidMatch) { $pidMatch = $f.FullName }
+        } catch {} finally {
+            if ($sr) { try { $sr.Dispose() } catch {} }
+            if ($fs) { try { $fs.Dispose() } catch {} }
+        }
+    }
+    return $pidMatch
+}
+
+# agy 자체 로그(cli-*.log)에서 "모델 요청이 진행 중인가(보냈지만 아직 응답·도구 호출·종료가 없음)"를 확인합니다.
+# - http_helpers.go 의 streamGenerateContent / generateContent 줄을 모델 요청으로 봅니다.
+# - llm_monitor.go(sir_flash_lite 안전 모니터)가 자기 고루틴에서 보내는 보조 호출은 제외합니다.
+# - 요청 이후에 Monitor agy_tool_safety FINISHED, 종료(Stopping conversation stream / Stream goroutine exited / shutting down),
+#   오류가 나오거나, 대화 기록의 마지막 활동($LastActivity)이 요청 시각보다 2초 이상 뒤면 이미 응답이 끝난 것으로 봅니다.
+# 반환: @{ InFlight = $true/$false; LogPath; RequestAt; Trace }
+function Test-AgyModelRequestInFlight($AgyHome, [string]$ConvId = "", [int]$RootPid = 0, [datetime]$StartedAt = [datetime]::MinValue, $LastActivity = $null, [string]$LogPathOverride = "") {
+    $logPath = if ($LogPathOverride) { $LogPathOverride } else { Find-AgyCliLog $AgyHome $ConvId $RootPid $StartedAt }
+    if (-not $logPath -or -not (Test-Path -LiteralPath $logPath -PathType Leaf)) {
+        return @{ InFlight = $false; LogPath = $null; RequestAt = $null; Trace = "" }
+    }
+    $refYear = if ($StartedAt -ne [datetime]::MinValue) { $StartedAt.Year } else { (Get-Date).Year }
+    $monitorGids = @{}
+    $reqActive = $false
+    $lastReqAt = $null
+    $lastReqTrace = ""
+    $fs = $null; $sr = $null
+    try {
+        $fs = New-Object System.IO.FileStream($logPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $sr = New-Object System.IO.StreamReader($fs, [System.Text.Encoding]::UTF8)
+        while ($null -ne ($line = $sr.ReadLine())) {
+            if ($line -notmatch '^[IWEF](\d{2})(\d{2})\s+(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?\s+(\d+)\s+([^\]]+)\]\s*(.*)$') { continue }
+            $mm = [int]$Matches[1]; $dd = [int]$Matches[2]
+            $hh = [int]$Matches[3]; $mi = [int]$Matches[4]; $ss = [int]$Matches[5]
+            $gid = $Matches[7]; $src = $Matches[8]; $body = $Matches[9]
+            $lineDt = $null
+            try { $lineDt = [datetime]::new($refYear, $mm, $dd, $hh, $mi, $ss) } catch { $lineDt = $null }
+
+            if ($src -like 'llm_monitor.go*') {
+                $monitorGids[$gid] = $true
+                continue
+            }
+            if ($src -like 'http_helpers.go*' -and $body -match '(?:streamGenerateContent|generateContent)') {
+                if ($monitorGids.ContainsKey($gid)) { continue }
+                $reqActive = $true
+                $lastReqAt = $lineDt
+                $lastReqTrace = if ($body -match 'Trace:\s*([0-9a-fA-Fx]+)') { $Matches[1] } else { "" }
+                continue
+            }
+            if ($reqActive) {
+                if ($body -match 'Stopping conversation stream|Stream goroutine exited|CLI store manager shutting down|Language server shutting down') {
+                    $reqActive = $false
+                } elseif ($src -like 'runner.go*' -and $body -match 'Monitor agy_tool_safety FINISHED') {
+                    $reqActive = $false
+                } elseif ($body -match '(?i)(?:streamGenerateContent|generateContent).*(?:error|failed|cancelled)|context deadline exceeded') {
+                    $reqActive = $false
+                }
+            }
+        }
+    } catch {
+        return @{ InFlight = $false; LogPath = $logPath; RequestAt = $null; Trace = "" }
+    } finally {
+        if ($sr) { try { $sr.Dispose() } catch {} }
+        if ($fs) { try { $fs.Dispose() } catch {} }
+    }
+
+    if ($reqActive -and $null -ne $LastActivity -and $null -ne $lastReqAt) {
+        if ($LastActivity -gt $lastReqAt.AddSeconds(2)) {
+            $reqActive = $false
+        }
+    }
+    return @{ InFlight = [bool]$reqActive; LogPath = $logPath; RequestAt = $lastReqAt; Trace = $lastReqTrace }
+}
+
+# agy 가 실행한 도구 자식 프로세스(MCP node 서버·agy 본체·콘솔 호스트 제외)의 누적 CPU 시간(초) 합을 구합니다.
+# 테스트에서는 ProcessList(ProcessId, ParentProcessId, Name, CommandLine)와 CpuLookup(hashtable 또는 scriptblock)을 주입할 수 있습니다.
+function Get-AgyToolChildCpuSeconds([int]$RootPid, $ProcessList = $null, $CpuLookup = $null) {
+    $all = if ($null -ne $ProcessList) {
+        @($ProcessList)
+    } else {
+        @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name, CommandLine -ErrorAction SilentlyContinue)
+    }
+    $kids = @{}
+    $byId = @{}
+    foreach ($p in $all) {
+        if ($null -eq $p) { continue }
+        $pid_ = [int]$p.ProcessId
+        $ppid = [int]$p.ParentProcessId
+        $byId[$pid_] = $p
+        if (-not $kids.ContainsKey($ppid)) { $kids[$ppid] = New-Object System.Collections.ArrayList }
+        [void]$kids[$ppid].Add($pid_)
+    }
+    $seen = @{}
+    $queue = New-Object System.Collections.Queue
+    $queue.Enqueue($RootPid)
+    $toolPids = New-Object System.Collections.ArrayList
+    $total = 0.0
+    while ($queue.Count -gt 0) {
+        $id = [int]$queue.Dequeue()
+        if ($seen.ContainsKey($id)) { continue }
+        $seen[$id] = $true
+        $p = if ($byId.ContainsKey($id)) { $byId[$id] } else { $null }
+        $isExcluded = ($id -eq $RootPid)
+        if (-not $isExcluded -and $null -ne $p) {
+            $pName = ([string]$p.Name).ToLowerInvariant()
+            $pCmd  = [string]$p.CommandLine
+            $parentObj = if ($byId.ContainsKey([int]$p.ParentProcessId)) { $byId[[int]$p.ParentProcessId] } else { $null }
+            $parentName = if ($parentObj) { ([string]$parentObj.Name).ToLowerInvariant() } else { "" }
+            if ($pName -in @('agy.exe', 'conhost.exe', 'openconsole.exe')) {
+                $isExcluded = $true
+            } elseif ($pCmd -match '(?i)(mcp[-_]?server|@modelcontextprotocol|chrome-devtools-mcp|atlassian-mcp|postman-mcp|composio.*mcp|gemini-api-docs)') {
+                $isExcluded = $true
+            } elseif ($pName -in @('node.exe', 'npx.exe') -and ($parentName -eq 'agy.exe' -or [int]$p.ParentProcessId -eq $RootPid)) {
+                $isExcluded = $true
+            }
+        }
+        if (-not $isExcluded) {
+            [void]$toolPids.Add($id)
+            if ($CpuLookup -is [scriptblock]) {
+                try { $total += [double](& $CpuLookup $id) } catch {}
+            } elseif ($CpuLookup -is [System.Collections.IDictionary]) {
+                if ($CpuLookup.Contains($id)) { $total += [double]$CpuLookup[$id] }
+            } else {
+                try { $total += (Get-Process -Id $id -ErrorAction Stop).TotalProcessorTime.TotalSeconds } catch {}
+            }
+        }
+        # MCP node 서버의 자손은 도구로 보지 않지만, agy/콘솔 호스트 아래의 자손은 계속 탐색한다
+        $skipSubtree = $false
+        if ($null -ne $p -and $id -ne $RootPid) {
+            $pName2 = ([string]$p.Name).ToLowerInvariant()
+            $pCmd2  = [string]$p.CommandLine
+            if ($pCmd2 -match '(?i)(mcp[-_]?server|@modelcontextprotocol|chrome-devtools-mcp|atlassian-mcp|postman-mcp|composio.*mcp|gemini-api-docs)') { $skipSubtree = $true }
+            elseif ($pName2 -in @('node.exe', 'npx.exe') -and $isExcluded) { $skipSubtree = $true }
+        }
+        if (-not $skipSubtree -and $kids.ContainsKey($id)) {
+            foreach ($c in $kids[$id]) { $queue.Enqueue($c) }
+        }
+    }
+    return @{ HasToolChild = ($toolPids.Count -gt 0); TotalCpu = $total; ToolPids = @($toolPids.ToArray()) }
+}
+
+# 도구 자식 프로세스 CPU 표본 목록(CpuSamples: @{ At; Cpu; HasToolChild })으로 최근 WindowSeconds(기본 60초) 동안 CPU 를 썼는지 판정합니다.
+function Test-AgyToolChildActive($CpuSamples, [datetime]$Now, [int]$WindowSeconds = 60, [double]$MinCpuSeconds = 0.1) {
+    $samples = @($CpuSamples)
+    if ($samples.Count -lt 2) { return $false }
+    $last = $samples[$samples.Count - 1]
+    if (-not $last.HasToolChild) { return $false }
+    $base = $null
+    for ($i = $samples.Count - 2; $i -ge 0; $i--) {
+        $age = ($last.At - $samples[$i].At).TotalSeconds
+        if ($age -le ($WindowSeconds + 15)) {
+            $base = $samples[$i]
+            if ($age -ge $WindowSeconds) { break }
+        }
+    }
+    if ($null -eq $base) { return $false }
+    $delta = [double]$last.Cpu - [double]$base.Cpu
+    return ($delta -ge $MinCpuSeconds)
+}
+
+# 1차 침묵 기준 도달 후 활성 신호(모델 요청 진행 중 / 도구 자식 프로세스 CPU 활동)를 종합 판정합니다.
+# 반환: @{ Active = $true/$false; State = ''|'thinking'|'tool running'; Reason = <설명> }
+function Get-AgyStallProbeSignal($AgyHome, [string]$ConvId, [int]$RootPid, [datetime]$StartedAt, $LastActivity, $ToolCpuSamples, [datetime]$Now) {
+    $inFlight = Test-AgyModelRequestInFlight $AgyHome $ConvId $RootPid $StartedAt $LastActivity
+    if ($inFlight.InFlight) {
+        $reqNote = if ($inFlight.RequestAt) { $inFlight.RequestAt.ToString("HH:mm:ss") + " 요청" } else { "모델 요청 진행 중" }
+        return @{ Active = $true; State = 'thinking'; Reason = ("cli 로그 모델 요청 진행 중({0})" -f $reqNote) }
+    }
+    if (Test-AgyToolChildActive $ToolCpuSamples $Now 60) {
+        return @{ Active = $true; State = 'tool running'; Reason = "도구 자식 프로세스 CPU 활동" }
+    }
+    return @{ Active = $false; State = ''; Reason = "" }
+}
+
 # RootPid 의 자손 프로세스 중 이름이 ProcessName 인 것의 PID 목록.
 # 시간 초과로 끊을 때 "이번 호출이 띄운 agy"만 정확히 가리기 위해 씁니다. 이름만으로 고르면
 # 이 워처와 상관없는 다른 agy(사용자가 직접 띄운 것, 다른 워처의 것)까지 죽일 수 있습니다.
@@ -902,16 +1105,20 @@ function Read-AgyProcessSteps {
 #   현재 컨텍스트 = 가장 마지막 턴이 모델에 보낸 입력의 크기(캐시 밖 입력 + 캐시 읽기).
 # ==========================================================================
 
-# 새 집계 상태. Path 는 대화 기록 파일, Offset 은 다음에 읽을 위치(이어 읽기용), Turns 는 step_index -> @{ In; Cache; Out }.
+# 새 집계 상태. Path 는 대화 기록 파일, Offset 은 다음에 읽을 위치(이어 읽기용), Turns 는 step_index -> @{ In; Cache; Out; Think; CreatedAt; Model }, UserInputSteps 는 USER_INPUT step_index -> CreatedAt.
 function New-AgyUsageState([string]$Path) {
-    return @{ Path = $Path; Offset = [long]0; Turns = @{}; Anon = 0; Touched = (Get-Date) }
+    return @{ Path = $Path; Offset = [long]0; Turns = @{}; UserInputSteps = @{}; Anon = 0; Touched = (Get-Date) }
 }
 
 # 파일에서 새로 쌓인 줄만 읽어 상태에 반영한다(아직 줄바꿈으로 끝나지 않은 마지막 줄은 다음에). 파일이 없거나 오류면 상태를 그대로 둔다.
 function Update-AgyUsageState($State) {
     if (-not $State -or -not $State.Path -or -not (Test-Path -LiteralPath $State.Path -PathType Leaf)) { return }
     $item = Get-Item -LiteralPath $State.Path
-    if ($item.Length -lt $State.Offset) { $State.Offset = [long]0; $State.Turns.Clear() }    # 파일이 줄었으면(새로 쓰임) 처음부터
+    if ($item.Length -lt $State.Offset) {
+        $State.Offset = [long]0
+        $State.Turns.Clear()    # 파일이 줄었으면(새로 쓰임) 처음부터
+        if ($State.UserInputSteps) { $State.UserInputSteps.Clear() }
+    }
     if ($item.Length -le $State.Offset) { return }
     $fs = [System.IO.File]::Open($State.Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
     try {
@@ -925,6 +1132,20 @@ function Update-AgyUsageState($State) {
         $text = [System.Text.Encoding]::UTF8.GetString($buf, 0, $lastNl + 1)
         foreach ($line in ($text -split "\r?\n")) {
             if (-not $line) { continue }
+            $createdAt = $null
+            if ($line -match '"created_at"\s*:\s*"([^"]+)"') {
+                try {
+                    $parsed = [datetime]::Parse([string]$matches[1], [System.Globalization.CultureInfo]::InvariantCulture,
+                        [System.Globalization.DateTimeStyles]::RoundtripKind)
+                    $createdAt = $parsed.ToLocalTime()
+                } catch {}
+            }
+            if ($line -match '"type"\s*:\s*"USER_INPUT"' -or $line -match '"source"\s*:\s*"USER_EXPLICIT"') {
+                if ($line -match '"step_index"\s*:\s*(\d+)') {
+                    if ($null -eq $State.UserInputSteps) { $State.UserInputSteps = @{} }
+                    $State.UserInputSteps[[int]$matches[1]] = $createdAt
+                }
+            }
             $hasIn = $line -match '"input_tokens"\s*:\s*(\d+)'
             $inTok = if ($hasIn) { [int64]$matches[1] } else { [int64]0 }
             $hasCache = $line -match '"cache_read_tokens"\s*:\s*(\d+)'
@@ -936,25 +1157,19 @@ function Update-AgyUsageState($State) {
             if (-not ($hasIn -or $hasCache -or $hasOut -or $hasThink)) { continue }
             $key = $null
             if ($line -match '"step_index"\s*:\s*(\d+)') { $key = [int]$matches[1] } else { $State.Anon++; $key = "x" + $State.Anon }
-            $createdAt = $null
-            if ($line -match '"created_at"\s*:\s*"([^"]+)"') {
-                try {
-                    $parsed = [datetime]::Parse([string]$matches[1], [System.Globalization.CultureInfo]::InvariantCulture,
-                        [System.Globalization.DateTimeStyles]::RoundtripKind)
-                    $createdAt = $parsed.ToLocalTime()
-                } catch {}
-            }
-            $State.Turns[$key] = @{ In = $inTok; Cache = $cacheTok; Out = $outTok; Think = $thinkTok; CreatedAt = $createdAt }     # 같은 턴은 마지막 값으로 덮어쓴다
+            $model = ""
+            if ($line -match '"model"\s*:\s*"([^"]*)"') { $model = [string]$matches[1] }
+            $State.Turns[$key] = @{ In = $inTok; Cache = $cacheTok; Out = $outTok; Think = $thinkTok; CreatedAt = $createdAt; Model = $model }     # 같은 턴은 마지막 값으로 덮어쓴다
         }
         $State.Offset = $State.Offset + $lastNl + 1
     } finally { $fs.Dispose() }
     $State.Touched = Get-Date
 }
 
-# 상태에서 합계를 낸다. MaxStep 이 0 보다 크면 그 단계 번호까지의 턴만(어느 시점까지의 값이 필요할 때).
+# 상태에서 합계를 낸다. MaxStep 이 0 보다 크면 그 단계 번호까지의 턴만, MinStep 이 0 보다 크면 그 단계 번호 이상의 턴만.
 # Since 를 주면 그 시각(로컬) 이후의 턴만 합친다(이어 보낸 세션에서 이번 위임만 볼 때).
-# 반환: @{ Input; Cache; Output; Thinking; Total; Context; Turns }
-function Get-AgyUsageSummary($State, [int]$MaxStep = 0, $Since = $null) {
+# 반환: @{ Input; Cache; Output; Thinking; Total; Context; Turns; ByModel }
+function Get-AgyUsageSummary($State, [int]$MaxStep = 0, $Since = $null, [int]$MinStep = 0) {
     $sinceDt = $null
     if ($Since) {
         try {
@@ -966,6 +1181,7 @@ function Get-AgyUsageSummary($State, [int]$MaxStep = 0, $Since = $null) {
 
     $in = [int64]0; $cache = [int64]0; $out = [int64]0; $think = [int64]0; $turns = 0
     $ctxStep = -1; $ctx = [int64]0
+    $byModelMap = @{}
     if ($State -and $State.Turns) {
         foreach ($k in @($State.Turns.Keys)) {
             $isNum = ($k -is [int])
@@ -973,16 +1189,147 @@ function Get-AgyUsageSummary($State, [int]$MaxStep = 0, $Since = $null) {
             if ($MaxStep -gt 0 -and -not $isNum) { continue }
             $v = $State.Turns[$k]
 
-            # 컨텍스트 = 가장 마지막 턴이 모델에 보낸 입력의 크기(캐시 밖 입력 + 캐시 읽기). Since 로 필터링하지 않는다.
+            # 컨텍스트 = 가장 마지막 턴이 모델에 보낸 입력의 크기(캐시 밖 입력 + 캐시 읽기). Since/MinStep 으로 필터링하지 않는다.
             if ($isNum -and $k -gt $ctxStep) { $ctxStep = $k; $ctx = $v.In + $v.Cache }
+
+            if ($MinStep -gt 0 -and $isNum -and $k -lt $MinStep) { continue }
+            if ($MinStep -gt 0 -and -not $isNum) { continue }
 
             # Since 가 있으면 그 시각 이전 턴은 합계에서 제외
             if ($sinceDt -and $v.CreatedAt -and $v.CreatedAt -lt $sinceDt) { continue }
 
             $in += $v.In; $cache += $v.Cache; $out += $v.Out; $think += $v.Think; $turns++
+
+            # 실제 실행된 모델별 합계(model 필드가 없는 줄은 제외)
+            $m = if ($v.Model) { [string]$v.Model } else { "" }
+            if ($m) {
+                if (-not $byModelMap.ContainsKey($m)) {
+                    $byModelMap[$m] = @{ Model = $m; Input = [int64]0; Cache = [int64]0; Output = [int64]0; Thinking = [int64]0; Total = [int64]0; Steps = 0 }
+                }
+                $bm = $byModelMap[$m]
+                $bm.Input += $v.In
+                $bm.Cache += $v.Cache
+                $bm.Output += $v.Out
+                $bm.Thinking += $v.Think
+                $bm.Total += ($v.In + $v.Out)
+                $bm.Steps++
+            }
         }
     }
-    return @{ Input = $in; Cache = $cache; Output = $out; Thinking = $think; Total = ($in + $out); Context = $ctx; Turns = $turns }
+    $byModel = @($byModelMap.Values | Sort-Object -Property @{ Expression = { $_.Total }; Descending = $true }, @{ Expression = { $_.Model }; Ascending = $true })
+    return @{ Input = $in; Cache = $cache; Output = $out; Thinking = $think; Total = ($in + $out); Context = $ctx; Turns = $turns; ByModel = $byModel }
+}
+
+# 마지막으로 알려진 단계 번호(HintStep)가 속한 호출의 [MinStep, MaxStep] 범위를 구한다.
+# HintStep 이후 다음 USER_INPUT/USER_EXPLICIT 직전 단계까지(없으면 대화 끝까지 = MaxStep 0)를 잡아
+# 병렬 도구 호출 뒤 최종 응답(hint+1, hint+2...)이 잘리지 않게 한다.
+function Resolve-AgyCallStepRange($State, [int]$HintStep = 0) {
+    if ($HintStep -le 0 -or $null -eq $State -or $null -eq $State.UserInputSteps -or $State.UserInputSteps.Count -eq 0) {
+        return @{ MinStep = 0; MaxStep = 0 }
+    }
+    [int[]]$uSteps = @($State.UserInputSteps.Keys | Sort-Object)
+    $minStep = 0
+    $nextU = $null
+    foreach ($u in $uSteps) {
+        if ($u -lt $HintStep) { $minStep = $u }
+        elseif ($null -eq $nextU -and $u -ge $HintStep) { $nextU = $u }
+    }
+    $maxStep = if ($null -ne $nextU) { [Math]::Max(0, $nextU - 1) } else { 0 }
+    return @{ MinStep = $minStep; MaxStep = $maxStep }
+}
+
+# 위임 작업 하나에 해당하는 대화 기록 단계 범위([MinStep, MaxStep])를 구한다.
+# 같은 대화를 이어 쓴 경우 process 단계 번호 또는 작업 시작 시각으로 자기 USER_INPUT 턴을 찾아 다음 USER_INPUT 직전까지 잡는다.
+function Resolve-AgyTaskStepRange($State, $ProcessSteps = $null, $Row = $null) {
+    if ($null -eq $State -or $null -eq $State.UserInputSteps -or $State.UserInputSteps.Count -le 1) {
+        return @{ MinStep = 0; MaxStep = 0 }
+    }
+    [int[]]$uSteps = @($State.UserInputSteps.Keys | Sort-Object)
+    $procList = $null
+    if ($ProcessSteps -is [string]) {
+        $rawProc = ([string]$ProcessSteps).Trim()
+        if ($rawProc -and $rawProc -ne '[]') {
+            try { $procList = ConvertFrom-Json -InputObject $rawProc } catch { $procList = $null }
+        }
+    } elseif ($null -ne $ProcessSteps) {
+        $procList = $ProcessSteps
+    }
+
+    $procMin = $null; $procMax = $null
+    if ($null -ne $procList) {
+        foreach ($st in @($procList)) {
+            if ($null -eq $st) { continue }
+            $nVal = $null
+            if ($st -is [System.Collections.IDictionary]) {
+                if ($st.Contains('n')) { $nVal = $st['n'] }
+            } elseif ($st.PSObject -and $st.PSObject.Properties['n']) {
+                $nVal = $st.n
+            }
+            if ($null -ne $nVal) {
+                $nInt = 0
+                if ([int]::TryParse([string]$nVal, [ref]$nInt) -and $nInt -gt 0) {
+                    if ($null -eq $procMin -or $nInt -lt $procMin) { $procMin = $nInt }
+                    if ($null -eq $procMax -or $nInt -gt $procMax) { $procMax = $nInt }
+                }
+            }
+        }
+    }
+
+    if ($null -ne $procMin) {
+        $minStep = 0
+        $nextU = $null
+        foreach ($u in $uSteps) {
+            if ($u -le $procMin) { $minStep = $u }
+            elseif ($null -eq $nextU -and $u -gt $procMax) { $nextU = $u }
+        }
+        $maxStep = if ($null -ne $nextU) { ($nextU - 1) } else { 0 }
+        return @{ MinStep = $minStep; MaxStep = $maxStep }
+    }
+
+    $startDt = $null; $finishDt = $null
+    if ($null -ne $Row) {
+        $tsStr = if ($Row -is [System.Collections.IDictionary]) { [string]$Row['timestamp'] } else { [string]$Row.timestamp }
+        $elStr = if ($Row -is [System.Collections.IDictionary]) { [string]$Row['elapsed_sec'] } else { [string]$Row.elapsed_sec }
+        if ($tsStr) {
+            $dt = [datetime]::MinValue
+            if ([datetime]::TryParse($tsStr, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeLocal, [ref]$dt)) {
+                $finishDt = $dt
+                $el = 0.0
+                if ([double]::TryParse($elStr, [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$el) -and $el -ge 0) {
+                    $startDt = $finishDt.AddSeconds(-$el)
+                }
+            }
+        }
+    }
+
+    if ($null -ne $startDt) {
+        $bestIdx = -1; $bestDiff = [double]::MaxValue
+        for ($i = 0; $i -lt $uSteps.Count; $i++) {
+            $u = $uSteps[$i]
+            $uDt = $State.UserInputSteps[$u]
+            if ($null -eq $uDt) { continue }
+            if ($uDt -gt $finishDt.AddSeconds(5)) { continue }
+            $diff = [Math]::Abs(($uDt - $startDt).TotalSeconds)
+            if ($diff -lt $bestDiff) { $bestDiff = $diff; $bestIdx = $i }
+        }
+        if ($bestIdx -ge 0) {
+            $minStep = $uSteps[$bestIdx]
+            $maxStep = if ($bestIdx + 1 -lt $uSteps.Count) { ($uSteps[$bestIdx + 1] - 1) } else { 0 }
+            return @{ MinStep = $minStep; MaxStep = $maxStep }
+        }
+    }
+
+    return @{ MinStep = $uSteps[$uSteps.Count - 1]; MaxStep = 0 }
+}
+
+# 사용량 집계용 대화 기록 파일 경로를 돌려준다(transcript.jsonl 우선, 없으면 transcript_full.jsonl). 없으면 $null.
+function Get-AgyTranscriptUsageFile([string]$AgyHome, [string]$ConversationId) {
+    $full = Get-AgyTranscriptPath $AgyHome $ConversationId
+    if (-not $full) { return $null }
+    $compact = Join-Path (Split-Path -Parent $full) "transcript.jsonl"
+    if (Test-Path -LiteralPath $compact -PathType Leaf) { return $compact }
+    if (Test-Path -LiteralPath $full -PathType Leaf) { return $full }
+    return $null
 }
 
 # 취소(또는 작업자 비정상 종료) 직전까지 agy 가 진행한 내용을 마크다운 요약으로 만듭니다.

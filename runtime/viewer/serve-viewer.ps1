@@ -645,7 +645,7 @@ function Get-AgyProgress([string]$ConversationId, $StartedAt, [string]$TaskId = 
 
         # 실시간 토큰 집계 (transcript.jsonl 우선, 없으면 transcript_full.jsonl — 오프셋 기반 증분 읽기)
         # 끝난 뒤 위임 기록과 같은 기준: 총 = 입력(캐시 밖) + 출력. 같은 턴의 줄은 덮어쓰고, 캐시 읽기는 따로 센다. 계산은 agy-progress.ps1 의 공용 함수.
-        $tIn = [int64]0; $tOut = [int64]0; $tCache = [int64]0; $tCtx = [int64]0; $tTurns = 0
+        $tIn = [int64]0; $tOut = [int64]0; $tThink = [int64]0; $tCache = [int64]0; $tCtx = [int64]0; $tTurns = 0; $tModels = @()
         $compactTf = Join-Path $agyHome ("brain\{0}\.system_generated\logs\transcript.jsonl" -f $ConversationId)
         $targetTokenFile = if (Test-Path -LiteralPath $compactTf) { $compactTf } else { $tf }
         if ($targetTokenFile -and (Get-Command Update-AgyUsageState -ErrorAction SilentlyContinue)) {
@@ -662,14 +662,31 @@ function Get-AgyProgress([string]$ConversationId, $StartedAt, [string]$TaskId = 
                 }
                 Update-AgyUsageState $us
                 $sum = Get-AgyUsageSummary $us 0 $stepFilter
-                $tIn = $sum.Input; $tOut = $sum.Output; $tCache = $sum.Cache; $tCtx = $sum.Context; $tTurns = $sum.Turns
+                $tIn = $sum.Input; $tOut = $sum.Output; $tThink = $sum.Thinking; $tCache = $sum.Cache; $tCtx = $sum.Context; $tTurns = $sum.Turns
+                if ($sum.ByModel) {
+                    $tModels = @($sum.ByModel | ForEach-Object {
+                        [PSCustomObject]@{
+                            model    = [string]$_.Model
+                            total    = [int64]$_.Total
+                            input    = [int64]$_.Input
+                            cache    = [int64]$_.Cache
+                            output   = [int64]$_.Output
+                            thinking = [int64]$_.Thinking
+                            steps    = [int]$_.Steps
+                        }
+                    })
+                }
             } catch {}
         }
 
         # 멈춤 판정에 쓸 값. 워처(watch-agy.ps1)와 같은 기준(AGY_STALL_SECONDS, 기본 300초)을 화면에도 알려 줘서, 화면이 "멈춘 것으로 보임"을 같은 잣대로 말하게 한다.
         # 오래 걸리는 명령을 백그라운드로 돌려 두고 기다리는 동안은 새 단계가 없어도 멈춘 게 아니다 - 기록 전체를 훑는 일이라 멈춤 기준에 가까워졌을 때만 확인한다.
         $stallSec = 300
-        if (Get-Command Get-AgySecondsSetting -ErrorAction SilentlyContinue) { $stallSec = Get-AgySecondsSetting 'AGY_STALL_SECONDS' 300 30 }
+        $stallGraceSec = 300
+        if (Get-Command Get-AgySecondsSetting -ErrorAction SilentlyContinue) {
+            $stallSec = Get-AgySecondsSetting 'AGY_STALL_SECONDS' 300 30
+            $stallGraceSec = Get-AgySecondsSetting 'AGY_STALL_GRACE_SECONDS' 300 30
+        }
         $waitingBg = $false
         if ((((Get-Date) - $last).TotalSeconds -ge ($stallSec - 60)) -and (Get-Command Get-AgyPendingBackgroundTasks -ErrorAction SilentlyContinue)) {
             try { $waitingBg = (@(Get-AgyPendingBackgroundTasks $agyHome $ConversationId).Count -gt 0) } catch {}
@@ -686,17 +703,20 @@ function Get-AgyProgress([string]$ConversationId, $StartedAt, [string]$TaskId = 
             background      = $background
             step_count      = $stepList.Count
             stall_seconds   = $stallSec
+            stall_grace_seconds = $stallGraceSec
             waiting_background = $waitingBg
             steps           = $stepList
             thinking        = $thinking
             say             = $say
             tokens          = [PSCustomObject]@{
-                input   = $tIn
-                output  = $tOut
-                total   = ($tIn + $tOut)
-                cache   = $tCache
-                context = $tCtx
-                turns   = $tTurns
+                input    = $tIn
+                output   = $tOut
+                thinking = $tThink
+                total    = ($tIn + $tOut)
+                cache    = $tCache
+                context  = $tCtx
+                turns    = $tTurns
+                models   = $tModels
             }
             last_activity   = $last.ToString("yyyy-MM-dd HH:mm:ss")
             last_activity_ms = [int64]([DateTimeOffset]$last).ToUnixTimeMilliseconds()
@@ -726,6 +746,8 @@ $claudeTranscriptLib = Find-DelegateScript "sub\claude-transcript.ps1"
 if ($claudeTranscriptLib) { try { . $claudeTranscriptLib } catch {} }
 $agyQuotaLib = Find-DelegateScript "sub\agy-quota.ps1"
 if ($agyQuotaLib) { try { . $agyQuotaLib } catch {} }
+$usageHistoryLib = Find-DelegateScript "sub\usage-history.ps1"
+if ($usageHistoryLib) { try { . $usageHistoryLib } catch {} }
 $limitsEstimateLib = Join-Path $PSScriptRoot "limits-estimate.ps1"
 if (Test-Path -LiteralPath $limitsEstimateLib) { try { . $limitsEstimateLib } catch {} }
 # 핸드오프 채널 공용 함수(handoff-lib.ps1): 메시지 머리말의 모델과 "자동 이어가기" 상태를 읽는다. 못 찾으면 그 정보만 빠진다.
@@ -733,6 +755,16 @@ $script:HandoffMetaCache = @{}
 $handoffLibLoaded = $false
 foreach ($hlCand in @((Join-Path $PSScriptRoot "..\handoff\scripts\handoff-lib.ps1"), (Join-Path $env:USERPROFILE ".samjil\handoff\scripts\handoff-lib.ps1"))) {
     if (Test-Path -LiteralPath $hlCand) { try { . $hlCand; $handoffLibLoaded = $true } catch {}; break }
+}
+# 업데이트 확인 헬퍼(update-check.ps1): 캐시만 읽어 새 버전 여부를 알린다(요청 경로에서 네트워크 호출 없음). 못 찾으면 조용히 건너뛴다.
+$updateCheckLib = Find-DelegateScript "sub\update-check.ps1"
+if ($updateCheckLib) { try { . $updateCheckLib } catch { $updateCheckLib = $null } }
+$SamjilInstallRoot = if ($env:SAMJIL_INSTALL_ROOT) {
+    $env:SAMJIL_INSTALL_ROOT
+} elseif ($parentDir -and (Test-Path -LiteralPath (Join-Path $parentDir "VERSION") -PathType Leaf)) {
+    $parentDir
+} else {
+    Join-Path $env:USERPROFILE ".samjil"
 }
 
 # 화면 데이터가 바뀌었는지 가늠하는 도장: 위임 기록(updated_seq)의 최댓값과 개수.
@@ -750,56 +782,24 @@ function Get-ViewerDataStamp([string]$DbPath, [string]$DataDir) {
 }
 
 # 한도 추정 스냅샷(Claude / Gemini)을 60초 간격으로 캐시해 돌려준다.
-# agy-quota.json 이 10분 넘게 지났으면 요청을 막지 않고 백그라운드에서 한 번만 갱신한다(-NoAgent 일 때는 생략).
+# agy 쪽은 task_quota 행 수·최신 measured_at 이 바뀌면 즉시 다시 계산한다.
 function Get-ViewerLimitsCached([string]$TargetRuntime, [string]$DbPath, [string]$ProjectsDir) {
-    $empty = @{ Stamp = ""; Json = "" }
+    $empty = @{ Stamp = ""; Json = ""; QuotaStamp = "" }
     if (-not (Get-Command Get-LimitsEstimateSnapshot -ErrorAction SilentlyContinue)) { return $empty }
 
     $now = [datetime]::UtcNow
+    $quotaStamp = if (Get-Command Get-AgyTaskQuotaStamp -ErrorAction SilentlyContinue) { Get-AgyTaskQuotaStamp $DbPath } else { "" }
+    $histStamp = if (Get-Command Get-UsageHistoryStamp -ErrorAction SilentlyContinue) { Get-UsageHistoryStamp $TargetRuntime } else { "" }
+    $combinedStamp = "{0}|{1}" -f $quotaStamp, $histStamp
     if ($null -ne $ViewerShared) {
         [System.Threading.Monitor]::Enter($ViewerShared.SyncRoot)
         try {
             $cached = $ViewerShared['LimitsCache']
-            if ($cached -and ($now - $cached.ComputedAt).TotalSeconds -lt 60) {
+            if ($cached -and ($now - $cached.ComputedAt).TotalSeconds -lt 60 -and $cached.QuotaStamp -eq $combinedStamp) {
                 return $cached
             }
         } finally {
             [System.Threading.Monitor]::Exit($ViewerShared.SyncRoot)
-        }
-    }
-
-    if (-not $NoAgent -and $TargetRuntime -and $agyQuotaLib -and (Get-Command Get-AgyQuotaSnapshot -ErrorAction SilentlyContinue)) {
-        $quotaFile = Join-Path $TargetRuntime "agy-quota.json"
-        $needRefresh = $true
-        if (Test-Path -LiteralPath $quotaFile -PathType Leaf) {
-            try {
-                $qItem = Get-Item -LiteralPath $quotaFile -ErrorAction SilentlyContinue
-                if ($qItem -and ($now - $qItem.LastWriteTimeUtc).TotalSeconds -lt 600) { $needRefresh = $false }
-            } catch {}
-        }
-        if ($needRefresh -and $null -ne $ViewerShared) {
-            $shouldLaunch = $false
-            [System.Threading.Monitor]::Enter($ViewerShared.SyncRoot)
-            try {
-                $lastTry = $ViewerShared['QuotaRefreshAt']
-                if (-not $lastTry -or ($now - $lastTry).TotalSeconds -ge 60) {
-                    $ViewerShared['QuotaRefreshAt'] = $now
-                    $shouldLaunch = $true
-                }
-            } finally {
-                [System.Threading.Monitor]::Exit($ViewerShared.SyncRoot)
-            }
-            if ($shouldLaunch) {
-                try {
-                    $psi = New-Object System.Diagnostics.ProcessStartInfo
-                    $psi.FileName = "powershell.exe"
-                    $psi.Arguments = ('-NoProfile -ExecutionPolicy Bypass -Command ". ''{0}''; [void](Get-AgyQuotaSnapshot ''{1}'')"' -f ($agyQuotaLib -replace "'", "''"), ($quotaFile -replace "'", "''"))
-                    $psi.UseShellExecute = $false
-                    $psi.CreateNoWindow = $true
-                    $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
-                    [void][System.Diagnostics.Process]::Start($psi)
-                } catch {}
-            }
         }
     }
 
@@ -808,8 +808,10 @@ function Get-ViewerLimitsCached([string]$TargetRuntime, [string]$DbPath, [string
         $obj = Get-LimitsEstimateSnapshot $TargetRuntime $DbPath $ProjectsDir $now
     } catch { $obj = $null }
 
-    $json = if ($obj -and $obj.Count -gt 0) { ConvertTo-Json -InputObject $obj -Depth 6 -Compress } else { "" }
-    $entry = @{ ComputedAt = $now; Stamp = $json; Json = $json }
+    $histStampAfter = if (Get-Command Get-UsageHistoryStamp -ErrorAction SilentlyContinue) { Get-UsageHistoryStamp $TargetRuntime } else { "" }
+    $combinedStampAfter = "{0}|{1}" -f $quotaStamp, $histStampAfter
+    $json = if ($obj -and @($obj.Keys).Count -gt 0) { ConvertTo-Json -InputObject $obj -Depth 6 -Compress } else { "" }
+    $entry = @{ ComputedAt = $now; QuotaStamp = $combinedStampAfter; Stamp = ("{0}|{1}" -f $json, $combinedStampAfter); Json = $json }
     if ($null -ne $ViewerShared) {
         [System.Threading.Monitor]::Enter($ViewerShared.SyncRoot)
         try { $ViewerShared['LimitsCache'] = $entry } finally { [System.Threading.Monitor]::Exit($ViewerShared.SyncRoot) }
@@ -817,9 +819,203 @@ function Get-ViewerLimitsCached([string]$TargetRuntime, [string]$DbPath, [string
     return $entry
 }
 
-function Get-TaskClaudeUsageCached($Db, $CacheMap, [string]$TaskId, $MetaObj, [string]$EndTimestamp, [string]$ProjectsDir) {
+function ConvertTo-TaskLimitsSnapshotJson([string]$LimitsJson) {
+    if (-not $LimitsJson) { return "" }
+    try {
+        $obj = ConvertFrom-Json -InputObject $LimitsJson -ErrorAction Stop
+        if ($null -eq $obj) { return "" }
+        $styles = [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal
+        $schema = [ordered]@{
+            claude = @("five_hour", "seven_day")
+        }
+        $clean = [ordered]@{}
+        foreach ($src in $schema.Keys) {
+            if (-not $obj.PSObject.Properties[$src] -or $null -eq $obj.$src) { continue }
+            $srcObj = $obj.$src
+            $srcOut = [ordered]@{}
+            foreach ($wk in $schema[$src]) {
+                if (-not $srcObj.PSObject.Properties[$wk] -or $null -eq $srcObj.$wk) { continue }
+                $e = $srcObj.$wk
+                if ($null -eq $e.est -or ($e.est -is [bool]) -or ($e.est -is [string])) { continue }
+                $estVal = 0L
+                try { $estVal = [long]$e.est } catch { continue }
+                if ($estVal -le 0) { continue }
+                $wOut = [ordered]@{ est = $estVal }
+                if ($e.PSObject.Properties['used_pct'] -and $null -ne $e.used_pct -and -not ($e.used_pct -is [bool]) -and -not ($e.used_pct -is [string])) {
+                    try { $wOut["used_pct"] = [math]::Round([double]$e.used_pct, 1) } catch {}
+                }
+                if ($e.PSObject.Properties['stale'] -and $e.stale -eq $true) {
+                    $wOut["stale"] = $true
+                }
+                if ($e.PSObject.Properties['estimated_at'] -and $e.estimated_at) {
+                    $dt = [datetime]::MinValue
+                    if ([datetime]::TryParse([string]$e.estimated_at, [System.Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$dt)) {
+                        $wOut["estimated_at"] = $dt.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+                    }
+                }
+                $srcOut[$wk] = $wOut
+            }
+            if ($srcOut.Count -gt 0) { $clean[$src] = $srcOut }
+        }
+        if ($clean.Count -eq 0) { return "" }
+        return (ConvertTo-Json -InputObject $clean -Depth 5 -Compress)
+    } catch {
+        return ""
+    }
+}
+
+function Format-TaskLimitsAtJson([string]$SnapshotJson, [string]$CapturedAt, $GeminiEst = $null, $ClaudeSessions = $null, $GeminiSessions = $null) {
+    $geminiJson = ""
+    if ($GeminiEst -is [System.Collections.IDictionary]) {
+        $gObj = [ordered]@{}
+        foreach ($wk in @("five_hour", "weekly")) {
+            if (-not $GeminiEst.Contains($wk)) { continue }
+            $e = $GeminiEst.Item($wk)
+            if (-not $e) { continue }
+            $estVal = 0L
+            try { $estVal = [long]$e.est } catch { continue }
+            if ($estVal -le 0) { continue }
+            $wOut = [ordered]@{ est = $estVal }
+            if ($e.Contains("est_cost") -and $null -ne $e.est_cost) {
+                try {
+                    $ec = [long]$e.est_cost
+                    if ($ec -gt 0) { $wOut["est_cost"] = $ec }
+                } catch {}
+            }
+            if ($e.Contains("used_pct") -and $null -ne $e.used_pct) {
+                try { $wOut["used_pct"] = [math]::Round([double]$e.used_pct, 1) } catch {}
+            }
+            if ($e.Contains("share_pct") -and $null -ne $e.share_pct) {
+                try { $wOut["share_pct"] = [math]::Round([double]$e.share_pct, 2) } catch {}
+            }
+            if ($e.Contains("five_points") -and $null -ne $e.five_points) {
+                try { $wOut["five_points"] = [int]$e.five_points } catch {}
+            }
+            if ($e.Contains("initial") -and $e.initial -eq $true) {
+                $wOut["initial"] = $true
+            }
+            $isBackfill = ($e.Contains("backfill") -and $e.backfill -eq $true)
+            $isStale = ($e.Contains("stale") -and $e.stale -eq $true) -or $isBackfill -or ($e.Contains("basis") -and ([string]$e.basis -in @("previous_window", "previous_task")))
+            if ($isStale) {
+                $wOut["stale"] = $true
+                if ($isBackfill) { $wOut["backfill"] = $true }
+                if ($e.Contains("estimated_at") -and $e.estimated_at) {
+                    $wOut["estimated_at"] = [string]$e.estimated_at
+                }
+            }
+            $gObj[$wk] = $wOut
+        }
+        if ($gObj.Count -gt 0) {
+            if ($GeminiEst.Contains("sessions") -and $null -ne $GeminiEst.Item("sessions")) {
+                $gObj["sessions"] = $GeminiEst.Item("sessions")
+            } elseif ($null -ne $GeminiSessions) {
+                $gObj["sessions"] = $GeminiSessions
+            }
+            if ($GeminiEst.Contains("measured") -and $null -ne $GeminiEst.Item("measured")) {
+                $gObj["measured"] = $GeminiEst.Item("measured")
+            }
+            $geminiJson = ConvertTo-Json -InputObject $gObj -Depth 6 -Compress
+        }
+    }
+
+    $base = ""
+    if ($SnapshotJson) {
+        $trimmed = $SnapshotJson.Trim()
+        if ($trimmed.StartsWith("{") -and $trimmed.EndsWith("}")) {
+            $base = $trimmed
+            if ($null -ne $ClaudeSessions) {
+                try {
+                    $bObj = ConvertFrom-Json -InputObject $base -ErrorAction Stop
+                    if ($null -ne $bObj -and $bObj.PSObject.Properties['claude'] -and $null -ne $bObj.claude) {
+                        $outBase = [ordered]@{}
+                        if ($CapturedAt) {
+                            $outBase["captured_at"] = $CapturedAt
+                        } elseif ($bObj.PSObject.Properties['captured_at'] -and $bObj.captured_at) {
+                            $outBase["captured_at"] = [string]$bObj.captured_at
+                        }
+                        foreach ($p in $bObj.PSObject.Properties) {
+                            if ($p.Name -eq 'captured_at') { continue }
+                            if ($p.Name -eq 'claude') {
+                                $cMap = [ordered]@{}
+                                foreach ($cp in $p.Value.PSObject.Properties) {
+                                    $cMap[$cp.Name] = $cp.Value
+                                }
+                                $cMap["sessions"] = $ClaudeSessions
+                                $outBase["claude"] = $cMap
+                            } else {
+                                $outBase[$p.Name] = $p.Value
+                            }
+                        }
+                        $base = ConvertTo-Json -InputObject $outBase -Depth 6 -Compress
+                    }
+                } catch {}
+            }
+            if ($CapturedAt -and $base.IndexOf('"captured_at"', [System.StringComparison]::Ordinal) -lt 0) {
+                $base = ('{"captured_at":' + (ConvertTo-AgyJsonString $CapturedAt) + ',' + $base.Substring(1))
+            }
+        }
+    }
+
+    if ($base -and $geminiJson) {
+        if ($base.IndexOf('"gemini"', [System.StringComparison]::Ordinal) -lt 0) {
+            return ($base.Substring(0, $base.Length - 1) + ',"gemini":' + $geminiJson + '}')
+        }
+        return $base
+    }
+    if ($base) { return $base }
+    if ($geminiJson) {
+        $cap = $CapturedAt
+        if (-not $cap -and ($GeminiEst -is [System.Collections.IDictionary]) -and $GeminiEst.Contains("measured_at")) {
+            $cap = [string]$GeminiEst.Item("measured_at")
+        }
+        if ($cap) {
+            return ('{"captured_at":' + (ConvertTo-AgyJsonString $cap) + ',"gemini":' + $geminiJson + '}')
+        }
+        return ('{"gemini":' + $geminiJson + '}')
+    }
+    return ""
+}
+
+function Get-TaskClaudeUsageCached($Db, $CacheMap, [string]$TaskId, $MetaObj, [string]$EndTimestamp, [string]$ProjectsDir, [datetime]$NowLocal = [datetime]::MinValue) {
     if (-not $MetaObj -or -not $MetaObj.PSObject.Properties['session'] -or -not $MetaObj.session) { return "" }
     if (-not (Get-Command Get-ClaudeDelegationUsage -ErrorAction SilentlyContinue)) { return "" }
+
+    $cached = if ($CacheMap -and $CacheMap.ContainsKey($TaskId)) { $CacheMap.Item($TaskId) } else { $null }
+    if ($cached) {
+        $cJson = [string]$cached.json
+        if ($cJson -match '"frozen"\s*:\s*true') {
+            if ($cJson -match '"(?:main|sub)"\s*:') { return $cJson }
+            return ""
+        }
+    }
+
+    $nowVal = if ($NowLocal -eq [datetime]::MinValue) { [datetime]::Now } else { $NowLocal }
+    $past30m = $false
+    if ($EndTimestamp) {
+        $dtEnd = [datetime]::MinValue
+        if ([datetime]::TryParse($EndTimestamp, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeLocal, [ref]$dtEnd)) {
+            if (($nowVal - $dtEnd).TotalMinutes -ge 30.0) { $past30m = $true }
+        }
+    }
+
+    if ($cached -and $past30m) {
+        $cJson = [string]$cached.json
+        $frozenJson = if ($cJson -and $cJson.Trim().StartsWith("{") -and $cJson.Trim().EndsWith("}")) {
+            $t = $cJson.Trim()
+            $t.Substring(0, $t.Length - 1) + ',"frozen":true}'
+        } else {
+            '{"frozen":true}'
+        }
+        $nowIso = [datetime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
+        if (Get-Command Set-ClaudeUsageCache -ErrorAction SilentlyContinue) {
+            try { Set-ClaudeUsageCache $Db $TaskId $frozenJson ([string]$cached.src_mtime) $nowIso } catch {}
+        }
+        if ($CacheMap) {
+            $CacheMap[$TaskId] = @{ json = $frozenJson; src_mtime = [string]$cached.src_mtime; computed_at = $nowIso }
+        }
+        if ($frozenJson -match '"(?:main|sub)"\s*:') { return $frozenJson }
+        return ""
+    }
 
     $sessId = [string]$MetaObj.session
     $agentId = if ($MetaObj.PSObject.Properties['agent_id'] -and $MetaObj.agent_id) { [string]$MetaObj.agent_id } else { "" }
@@ -836,28 +1032,50 @@ function Get-TaskClaudeUsageCached($Db, $CacheMap, [string]$TaskId, $MetaObj, [s
     }
     $srcMtime = "{0}|{1}" -f $mainTicks, $subTicks
 
-    $cached = if ($CacheMap -and $CacheMap.ContainsKey($TaskId)) { $CacheMap.Item($TaskId) } else { $null }
-    if ($cached) {
-        if ($cached.src_mtime -eq $srcMtime) { return [string]$cached.json }
-        $within24h = $false
-        if ($EndTimestamp) {
-            $dtEnd = [datetime]::MinValue
-            if ([datetime]::TryParse($EndTimestamp, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeLocal, [ref]$dtEnd)) {
-                if (([datetime]::Now - $dtEnd).TotalHours -lt 24.0) { $within24h = $true }
-            }
-        }
-        if (-not $within24h) { return [string]$cached.json }
+    if ($cached -and $cached.src_mtime -eq $srcMtime) {
+        $cJson = [string]$cached.json
+        if ($cJson -match '"(?:main|sub)"\s*:') { return $cJson }
+        return ""
     }
 
-    if ($mainTicks -eq 0 -and $subTicks -eq 0) { return "" }
+    if ($mainTicks -eq 0 -and $subTicks -eq 0) {
+        if ($past30m) {
+            $nowIso = [datetime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
+            if (Get-Command Set-ClaudeUsageCache -ErrorAction SilentlyContinue) {
+                try { Set-ClaudeUsageCache $Db $TaskId '{"frozen":true}' $srcMtime $nowIso } catch {}
+            }
+            if ($CacheMap) {
+                $CacheMap[$TaskId] = @{ json = '{"frozen":true}'; src_mtime = $srcMtime; computed_at = $nowIso }
+            }
+        }
+        return ""
+    }
+
     $u = Get-ClaudeDelegationUsage -MainTranscriptPath $mainPath -TaskId $TaskId -AgentId $agentId
-    $uJson = if ($null -ne $u) { ConvertTo-Json -InputObject $u -Depth 5 -Compress } else { "" }
+    $shouldFreeze = [bool]($past30m -or ($null -ne $u -and $u.review_found -eq $true))
+    $uJson = ""
+    if ($null -ne $u) {
+        $payload = [ordered]@{
+            main = $u.main
+            sub  = $u.sub
+        }
+        if ($shouldFreeze) { $payload["frozen"] = $true }
+        $uJson = ConvertTo-Json -InputObject $payload -Depth 5 -Compress
+    } elseif ($shouldFreeze) {
+        $uJson = '{"frozen":true}'
+    }
+
+    $nowIso = [datetime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
     if (Get-Command Set-ClaudeUsageCache -ErrorAction SilentlyContinue) {
         try {
-            Set-ClaudeUsageCache $Db $TaskId $uJson $srcMtime ([datetime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"))
+            Set-ClaudeUsageCache $Db $TaskId $uJson $srcMtime $nowIso
         } catch {}
     }
-    return $uJson
+    if ($CacheMap) {
+        $CacheMap[$TaskId] = @{ json = $uJson; src_mtime = $srcMtime; computed_at = $nowIso }
+    }
+    if ($null -ne $u) { return $uJson }
+    return ""
 }
 
 function Get-PendingClaudeUsageCached([string]$TaskId, $MetaObj, [string]$ProjectsDir) {
@@ -943,11 +1161,15 @@ function Get-ViewerQaRecordsJson([string]$DbPath, [string]$DataDir = "", [long]$
             return ('{{"records":[],"seq":{0},"total":{1}{2}}}' -f $Since, $total, $limTail)
         }
 
-        $claudeUsageMap = if (Get-Command Get-ClaudeUsageCacheMap -ErrorAction SilentlyContinue) { Get-ClaudeUsageCacheMap $db } else { @{} }
+        $targetRuntime = if ($RuntimeDir) { $RuntimeDir } elseif ($DataDir) { Join-Path (Split-Path $DataDir -Parent) "runtime" } elseif ($env:AGY_DELEGATE_RUNTIME) { $env:AGY_DELEGATE_RUNTIME } else { "" }
+        $claudeUsageMap = if (Get-Command Get-ClaudeUsageCacheMap -ErrorAction SilentlyContinue) { (Get-ClaudeUsageCacheMap $db) } else { @{} }
+        $taskLimitsMap = if (Get-Command Get-TaskLimitsMap -ErrorAction SilentlyContinue) { (Get-TaskLimitsMap $db) } else { @{} }
+        $agyEstMap = if (Get-Command Get-AgyTaskEstimates -ErrorAction SilentlyContinue) { (Get-AgyTaskEstimates $DbPath $targetRuntime) } else { @{} }
+        $snapshotJson = ConvertTo-TaskLimitsSnapshotJson $LimitsJson
+        $nowCapIso = [datetime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
         $effProjectsDir = if ($ProjectsDir) { $ProjectsDir } elseif ($ClaudeProjectsDir) { $ClaudeProjectsDir } else { "" }
 
         $fields = if ($script:QaRecordFields) { $script:QaRecordFields } else { @('timestamp', 'computer_name', 'task_id', 'source', 'model', 'attempts', 'tried_models', 'input_tokens', 'output_tokens', 'thinking_tokens', 'total_tokens', 'elapsed_sec', 'status', 'session', 'session_id', 'question', 'answer', 'process', 'cum_input_tokens', 'cum_output_tokens', 'cum_thinking_tokens', 'cum_total_tokens', 'usage_basis') }
-        $targetRuntime = if ($RuntimeDir) { $RuntimeDir } elseif ($DataDir) { Join-Path (Split-Path $DataDir -Parent) "runtime" } elseif ($env:AGY_DELEGATE_RUNTIME) { $env:AGY_DELEGATE_RUNTIME } else { "" }
         $seq = $Since
         $sb = New-Object System.Text.StringBuilder
         [void]$sb.Append('{"records":[')
@@ -1007,6 +1229,51 @@ function Get-ViewerQaRecordsJson([string]$DbPath, [string]$DataDir = "", [long]$
                 }
             }
 
+            # 완료된 위임별 한도 추정 스냅샷: Claude 는 task_limits 에서 1회 저장·재사용하고, agy(gemini) 는 task_quota 기반 결정적 추정치를 붙인다.
+            if ($tId) {
+                $tlRow = if ($taskLimitsMap.ContainsKey($tId)) { $taskLimitsMap.Item($tId) } else { $null }
+                if ($null -eq $tlRow -and $snapshotJson -and (Get-Command Set-TaskLimitsSnapshot -ErrorAction SilentlyContinue)) {
+                    try {
+                        [void](Set-TaskLimitsSnapshot $db $tId $snapshotJson $nowCapIso)
+                        $tlRow = @{ json = $snapshotJson; captured_at = $nowCapIso }
+                        $taskLimitsMap[$tId] = $tlRow
+                    } catch {}
+                }
+                $agyEst = if ($agyEstMap -and $agyEstMap.ContainsKey($tId)) { $agyEstMap.Item($tId) } else { $null }
+                $snapStr = if ($null -ne $tlRow -and $tlRow.json) { [string]$tlRow.json } else { "" }
+                $capStr = if ($null -ne $tlRow -and $tlRow.captured_at) { [string]$tlRow.captured_at } else { "" }
+                $claudeSess = $null
+                $geminiSess = $null
+                if ($targetRuntime -and (Get-Command Get-CachedSessionsRatio -ErrorAction SilentlyContinue)) {
+                    $stylesUtc = [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal
+                    if ($snapStr -and $capStr) {
+                        $capDt = [datetime]::MinValue
+                        if ([datetime]::TryParse($capStr, [System.Globalization.CultureInfo]::InvariantCulture, $stylesUtc, [ref]$capDt)) {
+                            $claudeSess = (Get-CachedSessionsRatio -RuntimeDir $targetRuntime -Src "claude" -UntilUtc $capDt.ToUniversalTime())
+                        }
+                    }
+                    if ($null -ne $agyEst) {
+                        if (($agyEst -is [System.Collections.IDictionary]) -and $agyEst.Contains("cost_units")) {
+                            if ($agyEst.Contains("sessions")) { $geminiSess = $agyEst.Item("sessions") }
+                        } else {
+                            $gemAtStr = if (($agyEst -is [System.Collections.IDictionary]) -and $agyEst.Contains("measured_at") -and $agyEst.Item("measured_at")) { [string]$agyEst.Item("measured_at") } else { $capStr }
+                            if ($gemAtStr) {
+                                $gemDt = [datetime]::MinValue
+                                if ([datetime]::TryParse($gemAtStr, [System.Globalization.CultureInfo]::InvariantCulture, $stylesUtc, [ref]$gemDt)) {
+                                    $geminiSess = (Get-CachedSessionsRatio -RuntimeDir $targetRuntime -Src "agy" -UntilUtc $gemDt.ToUniversalTime())
+                                }
+                            }
+                        }
+                    }
+                }
+                $latJson = Format-TaskLimitsAtJson $snapStr $capStr $agyEst $claudeSess $geminiSess
+                if ($latJson) {
+                    if (-not $firstField) { [void]$sb.Append(',') }
+                    $firstField = $false
+                    [void]$sb.Append('"limits_at":').Append($latJson)
+                }
+            }
+
             # 끝난 위임이 큐에서 기다린 시간(초). 기록에는 저장돼 있지 않아서 작업 ID(claude_<접수 시각 epoch>_N)의 접수 시각을 쓴다:
             #   대기 = (끝난 시각 − 실행 시간) − 접수 시각. 오차는 수 초(agy 가 알리는 실행 시간이 시작·끝을 정확히 재지 않아서)이고,
             #   ID 에 접수 시각이 없거나(핸드오프 등) 값이 말이 안 되면(음수·7일 초과) 필드를 내지 않는다.
@@ -1038,6 +1305,10 @@ if (-not $WorkerMode) {
     $ViewerShared['LimitsCache'] = $null
     $ViewerShared['QuotaRefreshAt'] = $null
     $ViewerShared['PendingClaudeUsageCache'] = @{}
+
+    if (Get-Command Initialize-UsageHistorySeed -ErrorAction SilentlyContinue) {
+        try { Initialize-UsageHistorySeed -RuntimeDir $RuntimeDir -DbPath $AgyDbPath } catch {}
+    }
 
     $listener = $null
     $prefix = $null
@@ -1836,6 +2107,15 @@ $ViewerHandleRequest = {
                             if ($claim -and $claim.tried) {
                                 $pendingObj["tried_models"] = [string]$claim.tried
                             }
+                            if ($claim -and $claim.PSObject.Properties['probe_state'] -and $claim.probe_state) {
+                                $pendingObj["probe_state"] = [string]$claim.probe_state
+                            }
+                            if ($claim -and $claim.PSObject.Properties['probe_since'] -and $claim.probe_since) {
+                                $pendingObj["probe_since"] = [string]$claim.probe_since
+                            }
+                            if ($claim -and $claim.PSObject.Properties['ask_count'] -and [int]$claim.ask_count -gt 0) {
+                                $pendingObj["ask_count"] = [int]$claim.ask_count
+                            }
                             $claudeMetaPath = Join-Path $runtimeDir ("claude-meta\{0}.json" -f $f.BaseName)
                             if (Test-Path -LiteralPath $claudeMetaPath -PathType Leaf) {
                                 try {
@@ -1916,6 +2196,20 @@ $ViewerHandleRequest = {
                     lastResult      = if ($watcherHealth) { [string]$watcherHealth.LastResult } else { "" }
                 }
 
+                $updateInfo = [PSCustomObject]@{ available = $false; installed = ""; latest = "" }
+                if (Get-Command Get-SamjilUpdateNotice -ErrorAction SilentlyContinue) {
+                    try {
+                        $un = Get-SamjilUpdateNotice -InstallRoot $SamjilInstallRoot
+                        if ($un -and $un.Available) {
+                            $updateInfo = [PSCustomObject]@{
+                                available = $true
+                                installed = [string]$un.Installed
+                                latest    = [string]$un.Latest
+                            }
+                        }
+                    } catch {}
+                }
+
                 $statusObj = [PSCustomObject]@{
                     port          = $Port
                     watcherAlive  = $watcherAlive
@@ -1927,6 +2221,7 @@ $ViewerHandleRequest = {
                     inboxCount    = $inboxCount
                     dataDir       = $DataDir
                     handoffDir    = $HandoffDir
+                    update        = $updateInfo
                 }
                 $json = $statusObj | ConvertTo-Json -Depth 5
                 $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
@@ -2079,39 +2374,104 @@ $ViewerHandleRequest = {
                         if ($null -eq $script:ContextCache) { $script:ContextCache = @{} }
                         $cxHome = if ($env:AGY_HOME) { $env:AGY_HOME } else { Join-Path $env:USERPROFILE ".gemini\antigravity-cli" }
                         $cxResults = [ordered]@{}
+                        $cxReqItems = New-Object System.Collections.ArrayList
+                        $cxReqTaskIds = New-Object System.Collections.ArrayList
                         $cxCount = 0
                         foreach ($cxItem in @($cxReq.items)) {
                             if ($cxCount -ge 400) { break }
                             $cxId = [string]$cxItem.id
                             $cxMax = 0
                             try { $cxMax = [int]$cxItem.max } catch { $cxMax = 0 }
+                            $cxTaskId = if ($cxItem.PSObject.Properties['task_id'] -and $cxItem.task_id) { [string]$cxItem.task_id } else { "" }
                             $cxKey = "$cxId|$cxMax"
                             if (-not $cxId -or $cxResults.Contains($cxKey)) { continue }
                             $cxCount++
-                            if (-not (Get-Command Get-AgyTranscriptPath -ErrorAction SilentlyContinue)) { continue }
-                            $cxFull = Get-AgyTranscriptPath $cxHome $cxId
-                            if (-not $cxFull) { continue }
-                            $cxCompact = Join-Path (Split-Path -Parent $cxFull) "transcript.jsonl"
-                            $cxFile = if (Test-Path -LiteralPath $cxCompact) { $cxCompact } else { $cxFull }
-                            if (-not (Test-Path -LiteralPath $cxFile -PathType Leaf)) { continue }
-                            $cxStamp = [string](Get-Item -LiteralPath $cxFile).Length + "|" + [string](Get-Item -LiteralPath $cxFile).LastWriteTimeUtc.Ticks
-                            $cached = $script:ContextCache[$cxKey]
-                            if ($cached -and $cached.Stamp -eq $cxStamp) { $cxResults[$cxKey] = $cached.Value; continue }
-                            try {
-                                $cxState = New-AgyUsageState $cxFile
-                                Update-AgyUsageState $cxState
-                                $cxSum = Get-AgyUsageSummary $cxState $cxMax
-                                $cxVal = @{ cache = [int64]$cxSum.Cache; context = [int64]$cxSum.Context; turns = [int]$cxSum.Turns }
-                                $script:ContextCache[$cxKey] = @{ Stamp = $cxStamp; Value = $cxVal }
-                                $cxResults[$cxKey] = $cxVal
-                            } catch {}
+                            $cxResults[$cxKey] = $null
+                            [void]$cxReqItems.Add(@{ Key = $cxKey; Id = $cxId; Max = $cxMax; TaskId = $cxTaskId })
+                            if ($cxTaskId) { [void]$cxReqTaskIds.Add($cxTaskId) }
+                        }
+                        $dbModelsByTask = @{}
+                        if ($cxReqTaskIds.Count -gt 0 -and (Get-Command Get-TaskModelsForIds -ErrorAction SilentlyContinue)) {
+                            try { $dbModelsByTask = Get-TaskModelsForIds $AgyDbPath ([string[]]@($cxReqTaskIds.ToArray())) } catch { $dbModelsByTask = @{} }
+                        }
+                        foreach ($reqIt in $cxReqItems) {
+                            $cxKey = $reqIt.Key
+                            $cxId = $reqIt.Id
+                            $cxMax = $reqIt.Max
+                            $cxTaskId = $reqIt.TaskId
+                            $dbModels = @(if ($cxTaskId -and $dbModelsByTask.ContainsKey($cxTaskId)) { $dbModelsByTask[$cxTaskId] })
+                            $cxVal = $null
+                            if (Get-Command Get-AgyTranscriptPath -ErrorAction SilentlyContinue) {
+                                $cxFull = Get-AgyTranscriptPath $cxHome $cxId
+                                $cxFile = $null
+                                if ($cxFull) {
+                                    $cxCompact = Join-Path (Split-Path -Parent $cxFull) "transcript.jsonl"
+                                    if (Test-Path -LiteralPath $cxCompact -PathType Leaf) { $cxFile = $cxCompact }
+                                    elseif (Test-Path -LiteralPath $cxFull -PathType Leaf) { $cxFile = $cxFull }
+                                }
+                                if ($cxFile) {
+                                    $cxStamp = [string](Get-Item -LiteralPath $cxFile).Length + "|" + [string](Get-Item -LiteralPath $cxFile).LastWriteTimeUtc.Ticks
+                                    $cached = $script:ContextCache[$cxKey]
+                                    if ($cached -and $cached.Stamp -eq $cxStamp) {
+                                        $cxVal = $cached.Value
+                                    } else {
+                                        try {
+                                            $cxState = New-AgyUsageState $cxFile
+                                            Update-AgyUsageState $cxState
+                                            $cxRange = if (Get-Command Resolve-AgyCallStepRange -ErrorAction SilentlyContinue) {
+                                                Resolve-AgyCallStepRange $cxState $cxMax
+                                            } else {
+                                                @{ MinStep = 0; MaxStep = $cxMax }
+                                            }
+                                            $cxSum = Get-AgyUsageSummary $cxState $cxRange.MaxStep $null $cxRange.MinStep
+                                            $cxModels = @()
+                                            if ($cxSum.ByModel) {
+                                                $cxModels = @($cxSum.ByModel | ForEach-Object {
+                                                    [PSCustomObject]@{
+                                                        model    = [string]$_.Model
+                                                        total    = [int64]$_.Total
+                                                        input    = [int64]$_.Input
+                                                        cache    = [int64]$_.Cache
+                                                        output   = [int64]$_.Output
+                                                        thinking = [int64]$_.Thinking
+                                                        steps    = [int]$_.Steps
+                                                    }
+                                                })
+                                            }
+                                            $cxVal = @{ cache = [int64]$cxSum.Cache; context = [int64]$cxSum.Context; turns = [int]$cxSum.Turns; models = $cxModels }
+                                            $script:ContextCache[$cxKey] = @{ Stamp = $cxStamp; Value = $cxVal }
+                                        } catch {}
+                                    }
+                                }
+                            }
+                            if ($dbModels.Count -gt 0) {
+                                $dbModelsOut = @($dbModels | ForEach-Object {
+                                    [PSCustomObject]@{
+                                        model    = [string]$_.model
+                                        total    = [int64]$_.total
+                                        input    = [int64]$_.input
+                                        cache    = [int64]$_.cache
+                                        output   = [int64]$_.output
+                                        thinking = [int64]$_.thinking
+                                        steps    = [int]$_.steps
+                                    }
+                                })
+                                if ($null -ne $cxVal) {
+                                    $cxVal = @{ cache = [int64]$cxVal.cache; context = [int64]$cxVal.context; turns = [int]$cxVal.turns; models = $dbModelsOut }
+                                } else {
+                                    $dbCache = [int64]0; $dbTurns = 0
+                                    foreach ($dm in $dbModelsOut) { $dbCache += $dm.cache; $dbTurns += $dm.steps }
+                                    $cxVal = @{ cache = $dbCache; context = [int64]0; turns = $dbTurns; models = $dbModelsOut }
+                                }
+                            }
+                            if ($null -ne $cxVal) { $cxResults[$cxKey] = $cxVal } else { $cxResults.Remove($cxKey) }
                         }
                         $cxPayload = @{ results = $cxResults }
                     }
                 }
                 $response.StatusCode = $cxCode
                 if ($cxPayload) {
-                    $bytes = [System.Text.Encoding]::UTF8.GetBytes(($cxPayload | ConvertTo-Json -Depth 5 -Compress))
+                    $bytes = [System.Text.Encoding]::UTF8.GetBytes(($cxPayload | ConvertTo-Json -Depth 6 -Compress))
                     $response.ContentType = "application/json; charset=utf-8"
                     $response.Headers.Add("Cache-Control", "no-store")
                 } else {
@@ -2448,12 +2808,20 @@ $ViewerHandleRequest = {
                     } catch { } finally {
                         [System.Threading.Monitor]::Exit($ViewerShared.SyncRoot)
                     }
-                    # 수집이 끝나 있고 갱신 시각이 그대로면 지난번에 만든 응답을 그대로 준다(90일치는 만드는 데 몇 초 걸린다)
+                    # 수집이 끝나 있고 갱신 시각·한도 이력이 그대로면 지난번에 만든 응답을 그대로 준다(90일치는 만드는 데 몇 초 걸린다)
+                    $usRuntime = if ($RuntimeDir) { $RuntimeDir } else { Join-Path (Split-Path $DataDir -Parent) "runtime" }
                     $usStamp = ""
                     if (-not $usCollecting -and (Test-Path -LiteralPath $AgyDbPath)) {
                         try {
+                            $usQuotaSt = if (Get-Command Get-AgyTaskQuotaStamp -ErrorAction SilentlyContinue) { Get-AgyTaskQuotaStamp $AgyDbPath } else { "" }
+                            $usHistSt = if (Get-Command Get-UsageHistoryStamp -ErrorAction SilentlyContinue) { Get-UsageHistoryStamp $usRuntime } else { "" }
+                            $usLimFile = if ($usRuntime) { Join-Path $usRuntime "claude-limits.json" } else { "" }
+                            $usLimSt = if ($usLimFile -and (Test-Path -LiteralPath $usLimFile -PathType Leaf)) {
+                                $fiLim = Get-Item -LiteralPath $usLimFile -ErrorAction SilentlyContinue
+                                if ($fiLim) { "{0}|{1}" -f [long]$fiLim.Length, [long]$fiLim.LastWriteTimeUtc.Ticks } else { "" }
+                            } else { "" }
                             $usDb = Open-AgyDb $AgyDbPath
-                            try { $usStamp = "{0}|{1}|{2}" -f $usDays, (Get-AgyMeta $usDb 'usage_updated_at'), (Get-Date).ToString("yyyy-MM-dd HH") } finally { $usDb.Dispose() }
+                            try { $usStamp = "{0}|{1}|{2}|{3}|{4}|{5}" -f $usDays, (Get-AgyMeta $usDb 'usage_updated_at'), (Get-Date).ToString("yyyy-MM-dd HH"), $usQuotaSt, $usHistSt, $usLimSt } finally { $usDb.Dispose() }
                         } catch { $usStamp = "" }
                     }
                     $usCache = $ViewerShared['UsageStatsCache']
@@ -2461,7 +2829,7 @@ $ViewerHandleRequest = {
                         $usJson = [string]$usCache.Json
                         $response.Headers.Add("X-Samjil-Cache", "hit")
                     } else {
-                        try { $usJson = Get-AgyUsageStatsJson $AgyDbPath $usDays $usCollecting } catch { $usJson = $null }
+                        try { $usJson = Get-AgyUsageStatsJson $AgyDbPath $usDays $usCollecting 200 $usRuntime ([string]$ClaudeProjectsDir) } catch { $usJson = $null }
                         if ($usStamp -and $null -ne $usJson) { $ViewerShared['UsageStatsCache'] = @{ Stamp = $usStamp; Json = $usJson } }
                     }
                 }

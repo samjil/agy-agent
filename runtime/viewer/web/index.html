@@ -30,7 +30,7 @@
   document.getElementById("hljs-light").disabled = (theme !== "light");
 })();
 </script>
-<link rel="stylesheet" href="style.css?v=87">
+<link rel="stylesheet" href="style.css?v=104">
 </head>
 <body>
   <!-- 단색 선 아이콘 모음. 이모지 대신 써서 OS마다 모양이 달라지지 않게 한다. -->
@@ -171,6 +171,7 @@
           <button type="button" id="watcher-start" class="watcher-start-btn" title="워처를 지금 켭니다 (창 없이 실행)" hidden>켜기</button>
         </div>
         <p class="watcher-start-msg" id="watcher-start-msg" role="status" aria-live="polite" hidden></p>
+        <a class="update-notice" id="update-notice" href="https://github.com/samjil/agy-agent#설치" target="_blank" rel="noopener" hidden></a>
         <div class="theme-switch" id="theme-switch" role="group" aria-label="화면 테마">
           <button type="button" data-theme-pref="system" aria-pressed="true" title="기기의 라이트/다크 설정을 따라갑니다(기본)"><svg class="icon"><use href="#i-theme-system"/></svg><span>시스템</span></button>
           <button type="button" data-theme-pref="light" aria-pressed="false" title="항상 라이트 모드"><svg class="icon"><use href="#i-theme-light"/></svg><span>라이트</span></button>
@@ -356,7 +357,7 @@
               <header class="dash-block-head">
                 <h2>모델 조합</h2>
               </header>
-              <div class="usage-table-wrap"><table class="usage-table" id="usage-models"></table></div>
+              <div class="usage-grid usage-grid-models" id="usage-models" role="table" aria-label="모델 조합"></div>
             </section>
 
             <section class="dash-block">
@@ -376,7 +377,8 @@
                 <h2>질문 기록</h2>
                 <span class="dash-count" id="usage-rows-count"></span>
               </header>
-              <div class="usage-table-wrap"><table class="usage-table usage-rows" id="usage-rows"></table></div>
+              <p class="usage-limits-banner" id="usage-limits-banner" hidden></p>
+              <div class="usage-list" id="usage-rows" role="list" aria-label="질문 기록"></div>
             </section>
           </div>
         </section>
@@ -389,6 +391,6 @@
   <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
-  <script src="app.js?v=112"></script>
+  <script src="app.js?v=130"></script>
 </body>
 </html>

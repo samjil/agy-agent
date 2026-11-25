@@ -1,9 +1,6 @@
 ﻿# session-start-hook.ps1
-# Claude Code SessionStart 훅: 새 세션이 시작될 때 agy 워처를 창 없이 켜고,
-# Claude 에게 samjil-delegate-agy 스킬의 위임 규칙 한 줄과 워처 상태를 알립니다(표준 출력이 세션 문맥이 됩니다).
-#   - 워처가 이미 켜져 있으면 아무것도 켜지 않습니다.
-#   - 사용자가 stop-agy 로 일부러 끈 상태(manual_stop.flag)면 켜지 않습니다.
-#   - 켜는 일은 기다리지 않고 CREATE_NO_WINDOW 무창 분리 실행으로 백그라운드에 맡겨, 세션 시작을 늦추거나 창을 깜빡이지 않습니다.
+# Claude Code SessionStart 훅: 새 세션이 시작될 때 Claude 에게 samjil-delegate-agy 스킬의 위임 규칙 한 줄과 워처 상태를 알립니다(표준 출력이 세션 문맥이 됩니다).
+#   - 세션 시작 시에는 워처를 켜지 않습니다(꺼져 있어도 위임할 때 submit-task.ps1 이 자동으로 켜고, 켜지지 않으면 작업자를 직접 실행합니다).
 # 어떤 경우에도 오류로 세션 시작을 막지 않도록 항상 종료 코드 0 으로 끝납니다.
 # -Event UserPromptSubmit: 질문을 보낼 때마다, 컨텍스트가 기준을 넘었으면 "위임하면 agy 제출을 서브에이전트에" 한 줄만 출력한다
 #   (표준 입력 JSON 의 transcript_path 로 크기를 읽는다). Node 가 있으면 같은 일을 하는 prompt-hook.js 가 대신 등록된다.
@@ -13,7 +10,8 @@ param(
     [string]$EnsureScript = "",
     [string]$Event = "SessionStart",
     [string]$TranscriptPath = "",     # 시험용. 없으면 Claude Code 가 표준 입력으로 주는 JSON 의 transcript_path 를 쓴다
-    [string]$HookInputPath = ""       # 시험용. PreToolUse 에서 표준 입력 대신 읽을 JSON 파일 경로
+    [string]$HookInputPath = "",      # 시험용. PreToolUse 에서 표준 입력 대신 읽을 JSON 파일 경로
+    [string]$InstallRoot = ""         # 시험용. 없으면 ~/.samjil 을 쓴다
 )
 
 # 창과 파이프 상속 없이 백그라운드 PowerShell 을 띄운다(agy-spawn.ps1 없으면 WScript.Shell 로 폴백).
@@ -182,16 +180,30 @@ try {
 
     $watcherLine = switch ($state) {
         "ALIVE"       { "agy 워처: 켜져 있음." }
-        "DEAD" {
-            Start-HookHiddenPowerShell @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $EnsureScript, "-RuntimeDir", $RuntimeDir, "-ConfirmDelaySeconds", "0", "-StaleThresholdSeconds", "0")
-            "agy 워처: 꺼져 있어 세션 시작 훅이 창 없이 켜는 중. 위임 직전에 ensure-agy-running.ps1 -CheckOnly 로 ALIVE 인지 다시 본다."
-        }
-        "MANUAL_STOP" { "agy 워처: 사용자가 일부러 꺼 둔 상태라 켜지 않았다. 위임하려면 켜도 되는지 먼저 묻는다." }
+        "DEAD"        { "agy 워처: 꺼져 있음. 위임하면 submit-task 가 자동으로 켜고, 켜지지 않으면 작업자를 직접 실행한다." }
+        "MANUAL_STOP" { "agy 워처: 꺼져 있음. 위임하면 submit-task 가 자동으로 켜고, 켜지지 않으면 작업자를 직접 실행한다." }
         default       { "agy 워처: 상태를 확인하지 못했다(런타임이 설치돼 있지 않을 수 있다). 위임 없이 직접 처리하고 install.ps1 실행을 안내한다." }
     }
 
     Write-Output "[samjil-delegate-agy] 명세를 정할 수 있는 구현 · 수정 · 시험과 양 많은 단순 작업은 Hydrogen/Neon/Carbon 단계(@model: quick · build · build-hard · feature · feature-carbon · deep, 필요 시 @cmd: goal · swarm · run-workflow · boost · browser · plan)로 위임하고, 맥락이 필요한 일 · 한두 줄 수정은 직접 처리. 매우 복잡한 결정은 Neon(think) 또는 Carbon(think-carbon)과 상의한다(스킬 참고). 코드 · 문서 · 설정 파일 · xlsx/pptx 를 고치거나 만드는 일은 사용자가 위임이라고 말하지 않아도, 직접 시작하거나 Agent 도구로 넘기기 전에 samjil-delegate-agy 스킬을 먼저 불러온다. Agent 도구(Claude 서브에이전트)는 agy 로 못 하는 일(DB 조회 · VPN · 브라우저 · 메일 · 대화 맥락 판단)이거나 agy 가 실패 · 시간 초과했을 때만 쓴다."
     Write-Output $watcherLine
+
+    # 새 버전 안내(캐시만 읽음)와 백그라운드 확인 예약(완료는 기다리지 않고 다음 세션에서 반영)
+    try {
+        $effectiveInstallRoot = if ($InstallRoot) { $InstallRoot } elseif ($env:SAMJIL_INSTALL_ROOT) { $env:SAMJIL_INSTALL_ROOT } else { Join-Path $home_ ".samjil" }
+        $updateLib = Join-Path $PSScriptRoot "update-check.ps1"
+        if (Test-Path -LiteralPath $updateLib -PathType Leaf) {
+            . $updateLib
+            $notice = Get-SamjilUpdateNotice -InstallRoot $effectiveInstallRoot -ForSession
+            if ($notice -and $notice.Available) {
+                Write-Output ("agy-agent 새 버전 {0} 이 나왔다(설치본 {1}). 이번 답변에서 사용자에게 한 번만 짧게 알리고 업데이트 방법을 안내한다: PowerShell 에서 irm https://raw.githubusercontent.com/samjil/agy-agent/main/install.ps1 | iex, 또는 새 압축 팩의 Install.cmd. 확인을 끄려면 설치 때 -NoUpdateCheck." -f $notice.Latest, $notice.Installed)
+                Set-SamjilUpdateNotified -InstallRoot $effectiveInstallRoot -Version $notice.Latest
+            }
+            if ($env:AGY_TEST_NO_UPDATE_FETCH -ne "1" -and (Test-SamjilUpdateFetchDue -InstallRoot $effectiveInstallRoot)) {
+                Start-HookHiddenPowerShell @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $updateLib, "-Fetch", "-InstallRoot", $effectiveInstallRoot)
+            }
+        }
+    } catch {}
 } catch {
     # 훅 오류가 세션 시작을 막으면 안 된다.
 }

@@ -23,10 +23,12 @@ if ($MyInvocation.MyCommand.Path -and (-not $env:SAMJIL_UTF8_ACTIVE)) {
 # [사용법 1: 로컬 실행]
 #   저장소를 clone한 폴더에서:
 #   .\install.ps1
+#   (옵션: -AlwaysOff, -NoUpdateCheck, -NoStart, -SkipChecks, -ReplyLanguage <언어>, -HandoffAutoHook, -Full, -Uninstall)
 #
 # [사용법 2: 원격 웹 원라이너 (새 PC 등)]
 #   저장소를 clone하지 않고 PowerShell에서 바로 실행:
 #   irm https://raw.githubusercontent.com/samjil/agy-agent/main/install.ps1 | iex
+#   (환경변수: SAMJIL_ALWAYS_OFF=1, SAMJIL_NO_UPDATE_CHECK=1, SAMJIL_HANDOFF_AUTO_HOOK=1, SAMJIL_FULL=1)
 
 $OutputEncoding = [System.Text.Encoding]::UTF8
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -43,8 +45,10 @@ $HandoffAutoHook = ($env:SAMJIL_HANDOFF_AUTO_HOOK -eq "1")
 #        into ~/.samjil, plus one SessionStart hook entry in ~/.claude/settings.json (backed up first). Env: SAMJIL_FULL=1 for `irm | iex`.
 # -AlwaysOff: do not register the SessionStart hook (default: registered, so Claude delegates by default in every session)
 #        and remove it if an earlier install registered it. Env: SAMJIL_ALWAYS_OFF=1. (-AlwaysOn is still accepted and means the default.)
+# -NoUpdateCheck: disable daily GitHub VERSION update check (~/.samjil/no-update-check). Env: SAMJIL_NO_UPDATE_CHECK=1 for `irm | iex`.
 $Full = ($env:SAMJIL_FULL -eq "1")
 $AlwaysOff = ($env:SAMJIL_ALWAYS_OFF -eq "1")
+$NoUpdateCheck = ($env:SAMJIL_NO_UPDATE_CHECK -eq "1")
 $NoStart = $false
 $SkipChecks = $false
 $ReplyLanguage = ""
@@ -58,6 +62,8 @@ if ($args) {
             $AlwaysOff = $false
         } elseif ($args[$i] -eq "-AlwaysOff") {
             $AlwaysOff = $true
+        } elseif ($args[$i] -eq "-NoUpdateCheck") {
+            $NoUpdateCheck = $true
         } elseif ($args[$i] -eq "-NoStart") {
             $NoStart = $true
         } elseif ($args[$i] -eq "-SkipChecks") {
@@ -475,9 +481,33 @@ Get-ChildItem -LiteralPath $SamjilRoot -Recurse -File -ErrorAction SilentlyConti
     try { Unblock-File -LiteralPath $_.FullName -ErrorAction SilentlyContinue } catch {}
 }
 $versionSrc = Join-Path $SkillsSourceDir "VERSION"
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 if (Test-Path -LiteralPath $versionSrc) {
-    $vText = [System.IO.File]::ReadAllText($versionSrc).Trim()
-    if ($vText -and $vText -notmatch '\$Format') { [System.IO.File]::WriteAllText((Join-Path $SamjilRoot "VERSION"), $vText + "`r`n") }
+    $vText = [System.IO.File]::ReadAllText($versionSrc, [System.Text.Encoding]::UTF8).TrimStart([char]0xFEFF).Trim()
+    if ($vText -and $vText -notmatch '\$Format') {
+        [System.IO.File]::WriteAllText((Join-Path $SamjilRoot "VERSION"), $vText + "`r`n", $utf8NoBom)
+    } elseif ($vText -match '\$Format') {
+        try {
+            $prevEap = $ErrorActionPreference
+            $ErrorActionPreference = "Continue"
+            try {
+                $gitHash = (& git -C $SkillsSourceDir rev-parse --short HEAD 2>$null | Out-String).Trim()
+                $hashOk = ($LASTEXITCODE -eq 0)
+                $gitDate = (& git -C $SkillsSourceDir log -1 --format=%cs 2>$null | Out-String).Trim()
+                $dateOk = ($LASTEXITCODE -eq 0)
+            } finally {
+                $ErrorActionPreference = $prevEap
+            }
+            if ($hashOk -and $dateOk -and $gitHash -match '^[0-9a-f]{7,40}$' -and $gitDate -match '^\d{4}-\d{2}-\d{2}$') {
+                [System.IO.File]::WriteAllText((Join-Path $SamjilRoot "VERSION"), "$gitHash $gitDate dev`r`n", $utf8NoBom)
+            }
+        } catch {}
+    }
+}
+if ($NoUpdateCheck) {
+    if (-not (Test-Path -LiteralPath $SamjilRoot)) { New-Item -ItemType Directory -Force -Path $SamjilRoot | Out-Null }
+    [System.IO.File]::WriteAllText((Join-Path $SamjilRoot "no-update-check"), "", $utf8NoBom)
+    Write-Host "[+] Update check disabled (~/.samjil/no-update-check created)." -ForegroundColor Green
 }
 
 $delegateHome = Join-Path $SamjilRoot "delegate-agy"

@@ -300,6 +300,22 @@ if (Test-Path -LiteralPath $samjilDir) {
         }
     }
 
+    # 4-5b. 업데이트 확인 캐시 및 비활성화 표시 파일 정리
+    $updateCacheFile = Join-Path $samjilDir "cache\update-check.json"
+    if (Test-Path -LiteralPath $updateCacheFile) {
+        Remove-Item -Force -LiteralPath $updateCacheFile -ErrorAction SilentlyContinue
+        Write-Host "[+] 업데이트 확인 캐시 삭제 완료: $updateCacheFile" -ForegroundColor Green
+    }
+    $cacheDir = Join-Path $samjilDir "cache"
+    if ((Test-Path -LiteralPath $cacheDir -PathType Container) -and -not (Get-ChildItem -LiteralPath $cacheDir -Force -ErrorAction SilentlyContinue)) {
+        Remove-Item -Force -LiteralPath $cacheDir -ErrorAction SilentlyContinue
+    }
+    $noUpdateFile = Join-Path $samjilDir "no-update-check"
+    if (Test-Path -LiteralPath $noUpdateFile) {
+        Remove-Item -Force -LiteralPath $noUpdateFile -ErrorAction SilentlyContinue
+        Write-Host "[+] 업데이트 확인 끔 표시 삭제 완료: $noUpdateFile" -ForegroundColor Green
+    }
+
     # 4-6. ~/.samjil 루트 디렉터리가 비어있으면 삭제
     $remaining = @(Get-ChildItem -LiteralPath $samjilDir -Force -ErrorAction SilentlyContinue)
     if ($remaining.Count -eq 0) {

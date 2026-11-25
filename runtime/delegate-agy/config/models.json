@@ -1,6 +1,5 @@
 {
-  "version": 1,
-  "note": "agy 위임 모델 단계. 이 파일은 sync-installed.ps1 · install.ps1 이 항상 덮어쓴다. 바꾸고 싶은 값은 같은 폴더의 models.local.json 에 그 항목만 쓴다(단계는 단계 단위로 합친다).",
+  "note": "agy 위임 설정. 설치 · 동기화 때 덮어쓰므로 바꿀 값은 같은 폴더의 models.local.json 에 그 항목만 쓴다.",
   "tiers": {
     "quick": {
       "model": "gemini-4-hydrogen-low",
@@ -82,5 +81,34 @@
     "gemini-4-carbon-high",
     "gemini-pro-orchestrator-neon",
     "gemini-pro-orchestrator"
-  ]
+  ],
+  "quota_cost": {
+    "note": "한도 추정용 토큰 무게(공시 단가 비율). agy 는 Neon 입력 = 1, Claude 는 Opus 입력 = 1 기준. Claude 모델 무게는 추정값.",
+    "weights": {
+      "hydrogen": 0.5,
+      "neon": 1.0,
+      "carbon": 1.3333333333333333,
+      "orchestrator-neon": 0.75,
+      "orchestrator": 0.85
+    },
+    "cache": 0.1,
+    "output": 5.0,
+    "claude": {
+      "opus": 1.0,
+      "sonnet": 0.6,
+      "haiku": 0.2,
+      "cache_write": 1.25,
+      "cache_read": 0.1,
+      "output": 5
+    }
+  },
+  "context_window": {
+    "note": "컨텍스트 창 크기(토큰). 키는 모델 이름의 일부(긴 키 우선), 없으면 비율을 표시하지 않는다. opus-5-5 는 Claude 사용량 도구, agy 는 /context 화면(Gemini 4 모델 공통)으로 확인한 값.",
+    "claude": {
+      "opus-5-5": 1000000
+    },
+    "agy": {
+      "default": 1048576
+    }
+  }
 }

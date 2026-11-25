@@ -100,17 +100,17 @@ function Test-AgyWatcherAlive {
     }
 
     # (2) 보조 수단: 프로세스 목록에서 watch-agy.ps1 을 찾습니다(해당 런타임 폴더의 워처만).
+    #     -NoExit 로 띄운 콘솔 창은 스크립트가 끝나도 남아 있으므로, 잠금 파일 PID 또는 최근 하트비트가 있을 때만 살아 있음으로 봅니다.
     $localProcs = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
         Where-Object {
-            $_.CommandLine -like "*watch-agy.ps1*" -and
-            (Test-WatcherCommandLineForRuntime $_.CommandLine $RuntimeDir)
+            Test-AgyWatcherProcessAlive -Process $_ -RuntimeDir $RuntimeDir -StaleThresholdSeconds $StaleThresholdSeconds
         })
     if ($localProcs.Count -gt 0) {
         return $true
     }
 
     # (3) 마지막 보조 수단: 이 PC의 하트비트 파일이 최근이면 살아있는 것으로 봅니다.
-    if (Test-Path $HeartbeatDir) {
+    if ($StaleThresholdSeconds -gt 0 -and (Test-Path $HeartbeatDir)) {
         $mine = "hb_{0}.txt" -f $env:COMPUTERNAME
         $hb = Get-ChildItem -Path $HeartbeatDir -Filter $mine -File -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($hb) {

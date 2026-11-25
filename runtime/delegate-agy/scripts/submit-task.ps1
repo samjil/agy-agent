@@ -58,8 +58,6 @@ function Stop-WithCode([int]$Code, [string]$Message) {
 
 # 런타임 폴더: -RuntimeDir > 환경변수 AGY_DELEGATE_RUNTIME > 이 스크립트 옆(설치 위치 ~/.samjil/delegate-agy/scripts -> ../runtime) > 예전 설치 이름들
 . (Join-Path $PSScriptRoot "sub\agy-layout.ps1")
-$progressLib = Join-Path $PSScriptRoot "sub\agy-progress.ps1"
-if (Test-Path -LiteralPath $progressLib) { . $progressLib }
 
 function Resolve-RuntimeDirForSubmit([string]$Given) {
     $cands = @()
@@ -137,14 +135,240 @@ function Get-PendingStatus([string]$Id) {
     return "접수 기록 없음(inbox 에도 실행 목록에도 없음): 작업 ID 를 확인하세요"
 }
 
-# 워처가 살아있는지(최근 30초 이내 하트비트) 확인한다
-function Test-SubmitWatcherAlive {
+# ensure-agy-running.ps1 경로(시험에서는 환경변수 AGY_TEST_ENSURE_SCRIPT 로 대체할 수 있다)
+function Get-SubmitEnsureScript {
+    if ($env:AGY_TEST_ENSURE_SCRIPT -and (Test-Path -LiteralPath $env:AGY_TEST_ENSURE_SCRIPT -PathType Leaf)) {
+        return $env:AGY_TEST_ENSURE_SCRIPT
+    }
+    return (Join-Path $PSScriptRoot "sub\ensure-agy-running.ps1")
+}
+
+# 워처 상태를 ensure-agy-running.ps1 -CheckOnly -StaleThresholdSeconds 0 으로 확인한다(ALIVE | DEAD | MANUAL_STOP).
+function Get-SubmitWatcherStatus {
+    $ensure = Get-SubmitEnsureScript
+    if (Test-Path -LiteralPath $ensure -PathType Leaf) {
+        try {
+            $out = @(& $ensure -RuntimeDir $script:RuntimeDirResolved -CheckOnly -StaleThresholdSeconds 0 2>$null)
+            $word = ((@($out) -join "").Trim())
+            if ($word -in @("ALIVE", "DEAD", "MANUAL_STOP")) { return $word }
+        } catch {}
+    }
     $layout = Get-AgyLayout $script:RuntimeDirResolved
-    $hbDir = $layout.HeartbeatDir
-    if (-not (Test-Path -LiteralPath $hbDir -PathType Container)) { return $false }
-    $hb = @(Get-ChildItem -LiteralPath $hbDir -Filter "hb_*.txt" -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1)
-    if ($hb.Count -gt 0 -and ((Get-Date) - $hb[0].LastWriteTime).TotalSeconds -le 30) { return $true }
-    return $false
+    if (Test-Path -LiteralPath $layout.LockFile -PathType Leaf) {
+        $lockPid = 0
+        try { $lockPid = [int]((Get-Content -LiteralPath $layout.LockFile -Raw -ErrorAction SilentlyContinue).Trim()) } catch { $lockPid = 0 }
+        if ($lockPid -gt 0) {
+            $proc = Get-Process -Id $lockPid -ErrorAction SilentlyContinue
+            if ($proc -and $proc.ProcessName -eq "powershell") { return "ALIVE" }
+        }
+    }
+    if (Test-Path -LiteralPath $layout.ManualStopFlag -PathType Leaf) { return "MANUAL_STOP" }
+    return "DEAD"
+}
+
+# 살아 있는 워처의 PID 를 잠금 파일(또는 프로세스 목록)에서 읽는다. 못 찾으면 0.
+function Get-SubmitWatcherPid {
+    $layout = Get-AgyLayout $script:RuntimeDirResolved
+    if (Test-Path -LiteralPath $layout.LockFile -PathType Leaf) {
+        $lockPid = 0
+        try { $lockPid = [int]((Get-Content -LiteralPath $layout.LockFile -Raw -ErrorAction SilentlyContinue).Trim()) } catch { $lockPid = 0 }
+        if ($lockPid -gt 0) {
+            $proc = Get-Process -Id $lockPid -ErrorAction SilentlyContinue
+            if ($proc -and $proc.ProcessName -eq "powershell") { return $lockPid }
+        }
+    }
+    try {
+        $procs = @(Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
+            Where-Object {
+                Test-AgyWatcherProcessAlive -Process $_ -RuntimeDir $script:RuntimeDirResolved -StaleThresholdSeconds 0
+            })
+        if ($procs.Count -gt 0) { return [int]$procs[0].ProcessId }
+    } catch {}
+    return 0
+}
+
+# 실행 표시 파일(running\<ID>.json)에 필드를 합쳐 원자적으로 쓴다(watch-agy.ps1 의 Write-RunningClaim 과 같은 형식).
+function Write-SubmitRunningClaim([string]$TaskId, [hashtable]$Fields) {
+    if (-not $TaskId) { return }
+    try {
+        $runningDir = (Get-AgyLayout $script:RuntimeDirResolved).RunningDir
+        if (-not (Test-Path -LiteralPath $runningDir -PathType Container)) {
+            New-Item -ItemType Directory -Force -Path $runningDir | Out-Null
+        }
+        $path = Join-Path $runningDir ("{0}.json" -f $TaskId)
+        $data = [ordered]@{ task_id = $TaskId }
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            try {
+                $old = Read-TextFile $path | ConvertFrom-Json
+                if ($old) { foreach ($p in $old.PSObject.Properties) { $data[$p.Name] = $p.Value } }
+            } catch {}
+        }
+        foreach ($k in $Fields.Keys) { $data[$k] = $Fields[$k] }
+        $tmp = "$path.$PID.tmp"
+        [System.IO.File]::WriteAllText($tmp, (ConvertTo-Json -InputObject $data -Compress -Depth 4), $utf8)
+        Move-Item -LiteralPath $tmp -Destination $path -Force
+    } catch {}
+}
+
+function Remove-SubmitRunningClaim([string]$TaskId) {
+    if (-not $TaskId) { return }
+    $runningDir = (Get-AgyLayout $script:RuntimeDirResolved).RunningDir
+    Remove-Item -LiteralPath (Join-Path $runningDir ("{0}.json" -f $TaskId)) -Force -ErrorAction SilentlyContinue
+}
+
+# 지시파일 맨 위에서 @session · @cwd 만 꺼낸다(직접 작업자 실행 시 running claim 에 기록).
+function Get-SubmitTaskMeta([string]$TaskPath) {
+    $session = ""
+    $cwds = New-Object System.Collections.ArrayList
+    $seen = @{}
+    try {
+        $raw = Read-TextFile $TaskPath
+        foreach ($line in @($raw -split "`r?`n")) {
+            if ($line -match '^\s*$') { continue }
+            if ($line -match '^\ufeff?@session:\s*(.+)$') { $session = $Matches[1].Trim() }
+            elseif ($line -match '^\ufeff?@cwd:\s*(.+)$') {
+                $c = $Matches[1].Trim()
+                $k = $c.Replace('/', '\').TrimEnd('\').ToLowerInvariant()
+                if ($k -and -not $seen.ContainsKey($k)) { $seen[$k] = $true; [void]$cwds.Add($c) }
+            }
+            elseif ($line -match '^\ufeff?@[A-Za-z]+\s*:') { }
+            else { break }
+        }
+    } catch {}
+    return @{ Session = $session; Cwds = @($cwds.ToArray()) }
+}
+
+# 작업자 powershell 에 넘길 인자(watch-agy.ps1 의 Get-InboxWorkerArgs 와 같은 형식, 따옴표 없는 원래 값).
+function Get-SubmitInboxWorkerArgs([string]$Wrapper, [string]$TaskPath, [string]$RepoRootValue, [string]$RuntimeDirValue, [bool]$Skip = $true) {
+    $a = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $Wrapper,
+        "-RepoRoot", $RepoRootValue, "-RuntimeDir", $RuntimeDirValue, "-WorkerTask", $TaskPath)
+    if ($Skip) { $a += "-SkipPermissions" }
+    return $a
+}
+
+# 띄운 작업자가 실제로 시작했는지 확인한다(watch-agy.ps1 의 Wait-InboxWorkerStarted 와 같은 판정).
+function Wait-SubmitInboxWorkerStarted([int]$WorkerPid, [string]$TaskPath, [int]$TimeoutMs = 1500) {
+    $deadline = (Get-Date).AddMilliseconds($TimeoutMs)
+    while ((Get-Date) -lt $deadline) {
+        if (-not (Get-Process -Id $WorkerPid -ErrorAction SilentlyContinue)) {
+            return (-not (Test-Path -LiteralPath $TaskPath))
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    return $true
+}
+
+# 워처 없이 지시파일 하나를 작업자 모드(agy-task-worker.ps1 -> watch-agy.ps1 -WorkerTask)로 숨김 실행한다.
+# 실행 전후에 running\<ID>.json claim 을 써서 -Poll · -Cancel · 뷰어가 실행 중으로 보게 한다. 성공하면 작업자 PID, 실패하면 0.
+function Start-SubmitDirectWorker([string]$TaskId, [string]$TaskPath) {
+    $wrapper = ""
+    $isTestWorker = $false
+    if ($env:AGY_TEST_WORKER_CMD) {
+        $wrapper = $env:AGY_TEST_WORKER_CMD
+        $isTestWorker = $true
+    } else {
+        $wrapper = Join-Path $PSScriptRoot "sub\agy-task-worker.ps1"
+        if (-not (Test-Path -LiteralPath $wrapper -PathType Leaf)) {
+            $wrapper = Join-Path $PSScriptRoot "sub\watch-agy.ps1"
+        }
+    }
+    if (-not $wrapper -or -not (Test-Path -LiteralPath $wrapper -PathType Leaf)) { return 0 }
+
+    $repoRootValue = Split-Path -Path $PSScriptRoot -Parent
+    $meta = Get-SubmitTaskMeta $TaskPath
+    $rawArgs = @(Get-SubmitInboxWorkerArgs $wrapper $TaskPath $repoRootValue $script:RuntimeDirResolved $true)
+    $argList = @($rawArgs | ForEach-Object { if ([string]$_ -match '\s') { "`"$_`"" } else { [string]$_ } })
+    try {
+        Write-SubmitRunningClaim $TaskId @{ pid = 0; session = $meta.Session; cwds = @($meta.Cwds); started = (Get-Date -Format "yyyy-MM-dd HH:mm:ss"); watcher_pid = 0 }
+        $workerPid = 0
+        if (-not (Get-Command Start-AgyHiddenDetachedProcess -ErrorAction SilentlyContinue)) {
+            $spawnLib = Join-Path $PSScriptRoot "sub\agy-spawn.ps1"
+            if (Test-Path -LiteralPath $spawnLib -PathType Leaf) { . $spawnLib }
+        }
+        if (Get-Command Start-AgyHiddenDetachedProcess -ErrorAction SilentlyContinue) {
+            $workerPid = Start-AgyHiddenDetachedProcess -FilePath "powershell.exe" -ArgumentList $rawArgs -WorkingDirectory $script:RuntimeDirResolved -NoShellFallback
+            if ($workerPid -gt 0 -and -not $isTestWorker -and -not (Wait-SubmitInboxWorkerStarted $workerPid $TaskPath)) {
+                $workerPid = 0
+            }
+        }
+        if ($workerPid -le 0) {
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = "powershell.exe"
+            $psi.Arguments = ($argList -join " ")
+            $psi.WorkingDirectory = $script:RuntimeDirResolved
+            $psi.UseShellExecute = $false
+            $psi.CreateNoWindow = $true
+            $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+            $proc = [System.Diagnostics.Process]::Start($psi)
+            $workerPid = $proc.Id
+        }
+        Write-SubmitRunningClaim $TaskId @{ pid = $workerPid }
+        return $workerPid
+    } catch {
+        Remove-SubmitRunningClaim $TaskId
+        return 0
+    }
+}
+
+# 워처가 꺼져 있으면(DEAD · MANUAL_STOP) 워처를 숨김 기동해 최대 15초 기다린다.
+# 그래도 켜지지 않으면 이 작업 하나를 작업자 모드로 직접 실행한다.
+# 위임 제출/복구는 수동 정지를 덮어쓰므로, 상태 확인 전에 manual_stop.flag 와 남은 stop.signal 을 항상 지운다
+# (워처가 ALIVE 로 보여도 플래그 때문에 곧 종료하려 할 수 있기 때문).
+function Ensure-SubmitWatcherOrDirectWorker([string]$TaskId, [string]$TaskPath) {
+    $layout = Get-AgyLayout $script:RuntimeDirResolved
+    # start-agy.ps1 과 같은 방식으로 수동 정지 표시와 남은 정지 신호를 먼저 지운다
+    Remove-Item -LiteralPath $layout.ManualStopFlag -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $layout.StopSignalFile -Force -ErrorAction SilentlyContinue
+
+    $status = Get-SubmitWatcherStatus
+    if ($status -eq "ALIVE") {
+        return @{ Mode = "alive"; Pid = (Get-SubmitWatcherPid) }
+    }
+
+    $watcherAliveNow = $false
+    if ($env:AGY_TEST_NO_WATCHER_START -ne "1") {
+        $ensure = Get-SubmitEnsureScript
+        if (Test-Path -LiteralPath $ensure -PathType Leaf) {
+            try {
+                & $ensure -RuntimeDir $script:RuntimeDirResolved -ConfirmDelaySeconds 0 -StaleThresholdSeconds 0 2>$null | Out-Null
+            } catch {}
+        }
+        $maxWait = 15
+        if ($env:AGY_TEST_WATCHER_WAIT_SECONDS -match '^\d+$') { $maxWait = [int]$env:AGY_TEST_WATCHER_WAIT_SECONDS }
+        for ($w = 0; $w -le $maxWait; $w++) {
+            if ((Get-SubmitWatcherStatus) -eq "ALIVE") { $watcherAliveNow = $true; break }
+            if ($w -lt $maxWait) { Start-Sleep -Seconds 1 }
+        }
+    }
+
+    if ($watcherAliveNow) {
+        $wpid = Get-SubmitWatcherPid
+        [Console]::Error.WriteLine("[워처] 꺼져 있어 켰습니다(PID $wpid).")
+        return @{ Mode = "watcher_started"; Pid = $wpid }
+    }
+
+    if ($TaskPath -and (Test-Path -LiteralPath $TaskPath -PathType Leaf)) {
+        $workerPid = Start-SubmitDirectWorker $TaskId $TaskPath
+        if ($workerPid -gt 0) {
+            [Console]::Error.WriteLine("[워처 없음] 워처를 켜지 못해 이 작업을 작업자로 직접 실행합니다(PID $workerPid).")
+            return @{ Mode = "direct_worker"; Pid = $workerPid }
+        }
+    }
+    return @{ Mode = "failed"; Pid = 0 }
+}
+
+# 대기열(inbox 에 있고 실행 표시 없음) 작업인데 워처가 꺼져 있으면, 작업당 한 번 워처를 켜거나 작업자를 직접 띄운다.
+# 워처가 첫 점검 뒤에 종료될 수 있으므로 매 폴 라운드마다 다시 확인한다. 복구에 성공하면 $true.
+function Try-RecoverQueuedTask([string]$TaskId, [hashtable]$RecoverTried, [string]$RunningDir) {
+    if ($RecoverTried.ContainsKey($TaskId)) { return $false }
+    $claimPath = Join-Path $RunningDir "$TaskId.json"
+    if (Test-Path -LiteralPath $claimPath -PathType Leaf) { return $false }
+    $queuedNow = @(Get-ChildItem -LiteralPath $inboxDir -File -ErrorAction SilentlyContinue | Where-Object { [System.IO.Path]::GetFileNameWithoutExtension($_.Name) -eq $TaskId } | Select-Object -First 1)
+    if ($queuedNow.Count -eq 0) { return $false }
+    if ((Get-SubmitWatcherStatus) -eq "ALIVE") { return $false }
+    $RecoverTried[$TaskId] = $true
+    $recRes = Ensure-SubmitWatcherOrDirectWorker $TaskId $queuedNow[0].FullName
+    return ($null -ne $recRes -and ($recRes.Mode -in @("watcher_started", "direct_worker")))
 }
 
 # 다른 작업이 실제로 실행 중인지(PID 프로세스 살아있음) 확인한다
@@ -195,21 +419,28 @@ function Get-TaskStartTime([string]$Id, [datetime]$Fallback) {
 $script:CancelledPrefix = "취소됨(CANCELLED):"
 
 # 모델 단계 설정(config\models.json)과 자동 선택 규칙. 대기 한도(-CancelOnTimeout 의 기본값)를 단계에서 읽는다.
+# 시작 지연을 줄이려고 -Cancel 이 끝난 뒤(스크립트 스코프)에 agy-models.ps1 만 불러오고, agy-autotier/agy-rules 는 Get-BriefTierInfo 안에서만 불러온다.
 $script:ModelsReady = $false
-try {
-    . (Join-Path $PSScriptRoot "sub\agy-models.ps1")
-    $autoTierLib = Join-Path $PSScriptRoot "sub\agy-autotier.ps1"
-    if (Test-Path -LiteralPath $autoTierLib) { . $autoTierLib }
-    $rulesLibForSubmit = Join-Path $PSScriptRoot "sub\agy-rules.ps1"
-    if (Test-Path -LiteralPath $rulesLibForSubmit) { . $rulesLibForSubmit }
-    $script:ModelsReady = $true
-} catch {}
+$script:CachedModelConfig = $null
+function Get-SubmitModelConfig {
+    if (-not $script:ModelsReady) { return $null }
+    if ($null -eq $script:CachedModelConfig) {
+        $script:CachedModelConfig = Get-AgyModelConfig
+    }
+    return $script:CachedModelConfig
+}
 
 # 지시문 맨 위 지시어(@model · @session · @cwd · @cmd · @mode)로 워처가 쓸 단계와 대기 한도를 짐작한다(워처와 같은 규칙).
 # 반환: @{ Tier; Model; WaitSec; Cmd; Mode } (설정을 못 읽으면 $null)
 function Get-BriefTierInfo([string]$Text) {
-    if (-not $script:ModelsReady) { return $null }
-    $cfg = Get-AgyModelConfig
+    $cfg = Get-SubmitModelConfig
+    if (-not $cfg) { return $null }
+    try {
+        $autoTierLib = Join-Path $PSScriptRoot "sub\agy-autotier.ps1"
+        if (Test-Path -LiteralPath $autoTierLib -PathType Leaf) { . $autoTierLib }
+        $rulesLibForSubmit = Join-Path $PSScriptRoot "sub\agy-rules.ps1"
+        if (Test-Path -LiteralPath $rulesLibForSubmit -PathType Leaf) { . $rulesLibForSubmit }
+    } catch {}
     $model = ""; $session = ""; $hasCwd = $false; $cmd = ""; $mode = ""; $body = [string]$Text
     while ($body.Length -gt 0) {
         $parts = $body -split "`r?`n", 2
@@ -269,9 +500,9 @@ function Get-BriefTierInfo([string]$Text) {
 
 # 작업 하나의 대기 한도(초). 실행 표시 파일의 단계(워처가 정한 것) > 지시문에서 짐작한 단계 > 0(모름)
 function Get-TaskWaitSec([string]$Id) {
-    if (-not $script:ModelsReady) { return 0 }
+    $cfg = Get-SubmitModelConfig
+    if (-not $cfg) { return 0 }
     try {
-        $cfg = Get-AgyModelConfig
         $claimPath = Join-Path (Get-AgyLayout $script:RuntimeDirResolved).RunningDir "$Id.json"
         if (Test-Path -LiteralPath $claimPath -PathType Leaf) {
             $claim = Read-TextFile $claimPath | ConvertFrom-Json
@@ -477,6 +708,11 @@ if ($cancelIds.Count -gt 0) {
     exit $cancelExit
 }
 
+try {
+    . (Join-Path $PSScriptRoot "sub\agy-models.ps1")
+    $script:ModelsReady = $true
+} catch {}
+
 if ($ids.Count -eq 0) {
     # 새로 넣기
     $text = $null
@@ -567,8 +803,9 @@ if ($ids.Count -eq 0) {
     } catch {}
     # 쓰는 도중의 파일을 워처가 읽지 않게 임시 이름으로 쓰고 바꿔치기한다(.tmp 는 워처가 보지 않는다)
     $tmp = Join-Path $inboxDir "$id.md.tmp"
+    $taskFilePath = Join-Path $inboxDir "$id.md"
     [System.IO.File]::WriteAllText($tmp, $text, $utf8)
-    Move-Item -LiteralPath $tmp -Destination (Join-Path $inboxDir "$id.md")
+    Move-Item -LiteralPath $tmp -Destination $taskFilePath
     Write-Output "submitted: $id"
     try {
         $tierInfo = Get-BriefTierInfo $text
@@ -579,7 +816,13 @@ if ($ids.Count -eq 0) {
             [Console]::Error.WriteLine(("[단계] {0} ({1}){2} · 대기 한도 {3}초(-CancelOnTimeout 의 기본값)" -f $(if ($tierInfo.Tier) { $tierInfo.Tier } else { "모델 지정" }), $tierInfo.Model, $extraInfo, $tierInfo.WaitSec))
         }
     } catch {}
+    $script:SubmittedRecoverTried = $false
+    try {
+        $submitEnsureRes = Ensure-SubmitWatcherOrDirectWorker $id $taskFilePath
+        if ($submitEnsureRes -and $submitEnsureRes.Mode -ne "alive") { $script:SubmittedRecoverTried = $true }
+    } catch {}
     if ($NoWait) { exit 0 }
+    $script:SubmittedTaskId = $id
     $ids = @($id)
 }
 
@@ -588,15 +831,25 @@ if ($ids.Count -eq 0) {
 # 한도가 지나도 활동(대화/도구 로그)이 있으면 멈출 때까지 대기를 연장하고 10초마다 재확인한다.
 $timedOut = @()
 $startedWait = Get-Date
+$pollLayout = Get-AgyLayout $script:RuntimeDirResolved
+$pollRunningDir = $pollLayout.RunningDir
+$watcherRecoverTried = @{}
+if ($script:SubmittedTaskId -and $script:SubmittedRecoverTried) { $watcherRecoverTried[$script:SubmittedTaskId] = $true }
 
 if ($MaxWaitSec -gt 0 -or -not $CancelOnTimeout) {
     $effectiveWait = if ($MaxWaitSec -gt 0) { $MaxWaitSec } else { $WaitSeconds }
     $deadline = $startedWait.AddSeconds([math]::Max(0, $effectiveWait))
     while ($true) {
         $pending = @($ids | Where-Object { -not (Test-TaskDone $_) })
+        if ($pending.Count -eq 0) { break }
+        foreach ($pid_ in $pending) {
+            [void](Try-RecoverQueuedTask $pid_ $watcherRecoverTried $pollRunningDir)
+        }
+        $pending = @($ids | Where-Object { -not (Test-TaskDone $_) })
         if ($pending.Count -eq 0 -or (Get-Date) -ge $deadline) { break }
         $interval = if (((Get-Date) - $startedWait).TotalSeconds -lt 60) { 3 } else { 10 }
         $left = ($deadline - (Get-Date)).TotalSeconds
+        if ($left -le 0) { break }
         Start-Sleep -Seconds ([math]::Max(1, [math]::Min($interval, [math]::Floor($left))))
     }
     if ($CancelOnTimeout) {
@@ -607,6 +860,8 @@ if ($MaxWaitSec -gt 0 -or -not $CancelOnTimeout) {
     }
 } else {
     # -CancelOnTimeout 만 주어진 경우: 작업별 시작 시각 기준 + 진행 중 대기 연장 규칙
+    $progressLib = Join-Path $PSScriptRoot "sub\agy-progress.ps1"
+    if (Test-Path -LiteralPath $progressLib -PathType Leaf) { . $progressLib }
     $stallSec = Get-AgySecondsSetting "AGY_STALL_SECONDS" 300 30
     $hardTimeoutSec = Get-AgySecondsSetting "AGY_HARD_TIMEOUT_SECONDS" 7200 60
     $recheckSec = 10.0
@@ -614,10 +869,11 @@ if ($MaxWaitSec -gt 0 -or -not $CancelOnTimeout) {
         $recheckSec = [double]$env:AGY_POLL_RECHECK_SEC
     }
     $agyHome = Get-AgyHomeDir
-    $layout = Get-AgyLayout $script:RuntimeDirResolved
-    $runningDir = $layout.RunningDir
+    $runningDir = $pollRunningDir
     $extendedPrinted = @{}
     $bgExtendedPrinted = @{}
+    $probeExtendedPrinted = @{}
+    $activeProbeStates = @("checking", "thinking", "tool running", "asked")
 
     while ($true) {
         $pending = @($ids | Where-Object { -not (Test-TaskDone $_) -and ($timedOut -notcontains $_) })
@@ -639,19 +895,43 @@ if ($MaxWaitSec -gt 0 -or -not $CancelOnTimeout) {
                 continue
             }
 
+            # 대기열(inbox 에 있고 실행 표시 없음) 작업인데 워처가 꺼져 있으면, 작업당 한 번 워처를 켜거나 작업자를 직접 띄운다.
+            $claimPath = Join-Path $runningDir "$id.json"
+            if (Try-RecoverQueuedTask $id $watcherRecoverTried $runningDir) {
+                continue
+            }
+
             # 단계 한도 전이면 계속 대기
             if ($elapsed -lt $tLimit) {
                 continue
             }
 
             # 단계 대기 한도 초과: 실행 중/대기열/활동 상태 판정
-            $claimPath = Join-Path $runningDir "$id.json"
             $claim = $null
             if (Test-Path -LiteralPath $claimPath -PathType Leaf) {
                 try { $claim = Read-TextFile $claimPath | ConvertFrom-Json } catch { $claim = $null }
             }
 
             if ($claim) {
+                $probeState = ""
+                if ($claim.PSObject.Properties['probe_state'] -and $claim.probe_state) {
+                    $probeState = ([string]$claim.probe_state).Trim()
+                }
+                if ($probeState -and ($activeProbeStates -contains $probeState)) {
+                    $probeKey = "{0}|{1}" -f $id, $probeState
+                    if (-not $probeExtendedPrinted.ContainsKey($probeKey)) {
+                        $probeLabel = switch ($probeState) {
+                            "checking"     { "생각 중인지 확인하는 중(checking)" }
+                            "thinking"     { "모델이 생각하는 중(thinking)" }
+                            "tool running" { "도구를 실행하는 중(tool running)" }
+                            "asked"        { "같은 대화에 진행 상황을 묻는 중(asked)" }
+                            default        { $probeState }
+                        }
+                        [Console]::Error.WriteLine(("[대기 연장] {0}: 한도 {1}초가 지났지만 {2}이라 계속 기다립니다." -f $id, $tLimit, $probeLabel))
+                        $probeExtendedPrinted[$probeKey] = $true
+                    }
+                    continue
+                }
                 $convId = [string]$claim.conversation_id
                 if ($convId) {
                     $actConv = Get-AgyConversationActivity $agyHome $convId
@@ -706,7 +986,7 @@ if ($MaxWaitSec -gt 0 -or -not $CancelOnTimeout) {
                 # running 목록에 없음: 대기열(inbox) 확인
                 $queued = @(Get-ChildItem -LiteralPath $inboxDir -File -ErrorAction SilentlyContinue | Where-Object { [System.IO.Path]::GetFileNameWithoutExtension($_.Name) -eq $id })
                 if ($queued.Count -gt 0) {
-                    $watcherAlive = Test-SubmitWatcherAlive
+                    $watcherAlive = ((Get-SubmitWatcherStatus) -eq "ALIVE")
                     $otherRunning = Test-OtherTaskRunning $id
                     if ($watcherAlive -and $otherRunning) {
                         # 워처가 살아있고 다른 작업이 돌고 있음: 차례 기다리는 중

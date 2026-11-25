@@ -21,8 +21,7 @@ The full working rules for this skill, in Korean (the delegation rules were rewr
 
 ## 위임 범위와 단계 (발동 규칙)
 
-이 스킬은 **작업 요청을 받으면 먼저 위임할 수 있는지 보고, 할 수 있으면 위임하는 규칙**이다. 기본은 위임이고, 직접 하는 것은 아래 "직접 한다" 칸의 이유가 있을 때뿐이다(2026-11-20 사용자 결정: 한도 비교 없이 되도록 위임). 새 세션에서도 같다 — 세션 시작 훅(`session-start-hook.ps1`)이 agy 워처를 창 없이 켜고
-규칙 한 줄과 워처 상태만 문맥에 넣는다.
+이 스킬은 **작업 요청을 받으면 먼저 위임할 수 있는지 보고, 할 수 있으면 위임하는 규칙**이다. 기본은 위임이고, 직접 하는 것은 아래 "직접 한다" 칸의 이유가 있을 때뿐이다(2026-11-20 사용자 결정: 한도 비교 없이 되도록 위임). 새 세션에서도 같다 — 세션 시작 훅(`session-start-hook.ps1`)이 규칙 한 줄과 워처 상태만 문맥에 넣으며, 워처가 꺼져 있어도 위임하면 `submit-task.ps1` 이 자동으로 켜고 켜지지 않으면 작업자를 직접 실행한다.
 
 - **사용자가 "위임"이라고 말하지 않아도 불러온다.** 코드 · 문서 · 설정 파일 · xlsx/pptx 를 고치거나 만드는 작업을 시작하기 전, 그리고 그런 작업을 Agent 도구로 넘기기 전에 이 스킬을 먼저 불러온다.
 
@@ -68,7 +67,7 @@ agy 가 할 수 있는 일을 Agent 도구로 넘기지 않는다. **Agent 도�
 - 같은 요청 안에서도 꼭 직접 해야 하는 부분만 남기고 나머지는 위임한다.
 
 그 밖에 Claude 전용 도구(웹 검색 · 브라우저 · MCP)가 꼭 필요한 일은 직접 한다. xlsx · pptx 문구 바꾸기처럼 파이썬 라이브러리(openpyxl · python-pptx)로 되는 일은 문서 스킬 대신 agy 에 위임한다.
-사용자가 "agy 에게 시켜 줘"라고 했는데 직접 할 일이면 한 줄로 알리고 직접 할지 묻는다. 사용자가 그래도 원하면 따른다. **agy 를 지목한 사용자 말은 허락이므로 워처가 꺼져 있으면 묻지 않고 켠다**(아래 "워처가 꺼져 있을 때"의 확인 · 기동 · 재확인 단계를 따르되 질문은 건너뛴다).
+사용자가 "agy 에게 시켜 줘"라고 했는데 직접 할 일이면 한 줄로 알리고 직접 할지 묻는다. 사용자가 그래도 원하면 따른다. 워처가 꺼져 있어도(`DEAD` · `MANUAL_STOP`) 묻지 않고 그대로 `submit-task.ps1` 로 제출한다.
 
 ### 2. 단계 고르기 (`@model: <단계>`)
 
@@ -139,7 +138,7 @@ agy 가 할 수 있는 일을 Agent 도구로 넘기지 않는다. **Agent 도�
 1. **호출 1**: 워처 확인 + 제출(`-NoWait`) + 백그라운드 대기(`-Poll <ID> -CancelOnTimeout`)를 한 메시지에서. 큰 수정 전에는 `git diff` 를 먼저 저장해 둔다.
 2. **호출 2**: 결과 읽기와 확인을 한 명령으로 — `-Poll` 결과 + `git diff --stat`(필요한 diff) + 시험 명령.
 3. **호출 3**(필요하면): 직접 보완.
-- **Claude 데스크톱 앱 사용률 수집:** `mcp__ccd_session_mgmt__get_usage` 도구가 있으면 **호출 1**에서 제출과 같은 메시지로 함께 부르고, **호출 2** 확인 명령 앞에 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$USERPROFILE/.samjil/delegate-agy/scripts/note-claude-limits.ps1" -FiveHourPct <percentUsed> -FiveHourReset <resetsAt> -WeekPct <percentUsed> -WeekReset <resetsAt> ;` 를 붙여 `plan.windows`(5-hour limit / Weekly · all models) 값을 남긴다(뷰어 한도 추정용; 도구가 없거나 `plan` 이 비면 건너뜀).
+- **Claude 데스크톱 앱 사용률 수집:** `mcp__ccd_session_mgmt__get_usage` 도구가 있으면 도구를 쓰는 **모든 질문(직접 · 위임 공통)**의 첫 도구 호출과 병렬로 부른다(최대 10분에 한 번). 이어지는 다음 셸 명령 앞에 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$USERPROFILE/.samjil/delegate-agy/scripts/note-claude-limits.ps1" -FiveHourPct <percentUsed> -FiveHourReset <resetsAt> -WeekPct <percentUsed> -WeekReset <resetsAt> ;` 를 붙여 `plan.windows`(5-hour limit / Weekly · all models) 값을 남긴다(뷰어 한도 추정용; 도구가 없거나 `plan` 이 비면 건너뜀).
 
 ### 7. 컨텍스트가 크면 agy 제출 절차를 서브에이전트에 맡긴다
 
@@ -162,7 +161,7 @@ agy 가 할 수 있는 일을 Agent 도구로 넘기지 않는다. **Agent 도�
 - 사유 한 줄만 따로 남긴다. 막는 훅은 없고, 안 남기면 통계에 "기록 없음"으로 보인다.
   - **직접 처리:** 그 질문의 **첫 셸 명령 앞에 붙여** 한 번에 실행한다. **따로 부르지 않는다.** 셸 명령을 쓰지 않는 질문은 남기지 않는다.
     `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$USERPROFILE/.samjil/delegate-agy/scripts/note-choice.ps1" -Mode direct -Reason "두 줄 수정이라 브리프가 더 비쌈" ; <원래 명령>`
-    (`noted` 한 줄만 찍고, 실패해도 종료 코드 0 이라 뒤 명령을 막지 않는다. 사유는 200자까지.)
+    (데스크톱 사용률 기록도 함께 남길 때는 `note-choice.ps1 ... ; note-claude-limits.ps1 ... ; <원래 명령>` 처럼 한 명령 앞에 이어 붙인다. `noted` 한 줄만 찍고, 실패해도 종료 코드 0 이라 뒤 명령을 막지 않는다. 사유는 200자까지.)
   - **위임:** 브리프의 `@` 줄에 `@reason: <한 줄>` 을 쓴다. 기록에만 남고 agy 에는 보내지 않는다.
 
 ## 코딩 작업을 위임하기 전에 (대화당 한 번)
@@ -170,15 +169,15 @@ agy 가 할 수 있는 일을 Agent 도구로 넘기지 않는다. **Agent 도�
 작업에 소스 파일 수정이 들어가면 첫 위임 전에 아래 둘을 끝낸다.
 
 1. **`@cwd` 확인**: 수정할 프로젝트 폴더를 사용자에게 한 번 확인받는다(`AskUserQuestion` 이 있으면 선택 팝업으로. 규칙은 아래 "프로젝트 폴더 코딩 위임 (`@cwd`)"). 확인받은 폴더는 같은 대화에서 계속 유효하다.
-2. **워처 상태 확인**: `ensure-agy-running.ps1 -CheckOnly -StaleThresholdSeconds 0` 으로 `ALIVE` 인지 본다. 꺼져 있으면 아래 "워처가 꺼져 있을 때" 절차를 따른다.
+2. **워처 상태 확인**: `ensure-agy-running.ps1 -CheckOnly -StaleThresholdSeconds 0` 으로 상태를 볼 수 있다. `DEAD` 나 `MANUAL_STOP` 이어도 묻지 않고 그대로 `submit-task.ps1` 로 제출한다(`submit-task.ps1` 이 워처를 켜거나 작업자를 직접 실행한다. 아래 "워처가 꺼져 있을 때" 참고).
 
 ## 사용자가 agy 에게 직접 시킬 때 (통로는 워처 하나)
 
 사용자가 "agy 에게 1부터 5까지 더한 값을 물어봐 줘" 처럼 **agy 를 지목해서** 시키면, 난이도 판단 없이 그 일을 `submit-task.ps1`(아래 "실행 방법")로 위임한다.
-위임 기록·사용량·세션 이어가기·git 안전장치는 모두 워처를 거칠 때만 남기 때문이다.
+위임 기록·사용량·세션 이어가기·git 안전장치는 모두 워처/작업자 경로를 거칠 때만 남기 때문이다.
 
-- **`ask_antigravity` 같은 antigravity MCP 도구를 쓰지 않는다.** 도구 목록에 보여도, 이 PC 의 agy 호출 통로는 워처다. MCP 가 실패했을 때 대신 `agy.exe` / `agy -p` 를 직접 실행하는 우회도 하지 않는다 — 답은 오지만 기록이 남지 않는다(실제 사례: MCP 경로 오류 뒤 `agy -p` 를 직접 돌려 답만 받고 뷰어에는 기록이 없었다).
-- 워처가 꺼져 있으면 **묻지 않고 켠다** — 사용자가 agy 를 직접 지목했으니 그 말이 허락이다(절차는 아래 "워처가 꺼져 있을 때"의 확인·기동·재확인 단계를 그대로 따르되, 2번의 질문은 건너뛴다). 꺼진 채 MCP 나 직접 실행으로 대신하지 않는다. 사용자가 그 방식을 명시적으로 원한 경우만 예외다. (스킬이 스스로 위임하려는 경우의 질문 규칙은 그대로다.)
+- **`ask_antigravity` 같은 antigravity MCP 도구를 쓰지 않는다.** 도구 목록에 보여도, 이 PC 의 agy 호출 통로는 `submit-task.ps1`(워처/작업자)이다. MCP 가 실패했을 때 대신 `agy.exe` / `agy -p` 를 직접 실행하는 우회도 하지 않는다 — 답은 오지만 기록이 남지 않는다(실제 사례: MCP 경로 오류 뒤 `agy -p` 를 직접 돌려 답만 받고 뷰어에는 기록이 없었다).
+- 워처가 꺼져 있어도(`DEAD` · `MANUAL_STOP`) 묻지 않고 그대로 `submit-task.ps1` 로 제출한다(`submit-task.ps1` 이 `manual_stop.flag` 를 지우고 워처를 켜며, 켜지지 않으면 작업자로 직접 실행한다). 꺼진 채 MCP 나 직접 `agy -p` 실행으로 대신하지 않는다. 사용자가 그 방식을 명시적으로 원한 경우만 예외다.
 - 사용자가 모델·세션을 말하면(`@model`, `@session`) 지시문 머리에 그대로 옮긴다.
 
 ## agy 의 능력을 추측해 막지 않는다
@@ -191,6 +190,16 @@ agy 가 할 수 있는 일을 Agent 도구로 넘기지 않는다. **Agent 도�
 - 할 수 있는지 모르겠으면 **agy 에게 읽기 전용으로 짧게 물어 확인**한다(예: "브라우저로 로컬 페이지를 열어 스크린샷을 남길 수 있는 도구가 있나? 있으면 도구 이름만 답해"). 한 번이면 되고, 확인한 결과는 이 절에 반영한다.
 - 금지 조항은 **실제로 위험한 것**(커밋, 범위 밖 파일 수정 등)에만 둔다. 능력을 추측한 금지는 쓰지 않는다.
 - 위임 여부를 "agy 에 그 도구가 없을 것 같다"는 짐작으로 정하지 않는다. 짐작이 근거라면 먼저 물어 확인하고, 확인 전에는 위임을 기본으로 한다.
+
+### agy CLI 자체를 모를 때는 agy 에게 묻는다
+
+agy 의 플래그 · 슬래시 명령 · 출력 필드 · 설정 · 파일 위치처럼 **agy CLI 사용법**을 모르면 짐작하거나 사용자에게 묻기 전에 agy 에게 직접 묻는다.
+
+1. 먼저 로컬에서 확인할 수 있는 것을 본다: `agy --help`, `agy help <하위 명령>`, `agy models`. 이것으로 풀리면 묻지 않는다.
+2. 그래도 모르면 읽기 전용으로 짧게 묻는다. 결과가 위임 기록에 남도록 위임으로 보낸다(`@model: quick`, `@cwd` 없음, "도구를 쓰지 말고 아는 것만, 모르면 모른다고, 정확한 플래그 · 필드 이름으로" 를 넣는다).
+   Gemini 5시간 한도가 소진됐으면 agy 안의 Claude 모델(한도가 따로다)로 바로 물을 수 있다: `agy -p "<질문>" --model claude-sonnet-5-5-low`.
+3. 답은 **확인 전에는 사실로 쓰지 않는다.** 플래그나 출력 필드는 실제로 한 번 실행해 보고, 확인된 것만 이 문서나 코드에 반영한다.
+   (실제 사례: `/context` 는 대화형 전용이라 `agy -p "/context"` 는 "print mode 에서 쓸 수 없다" 오류가 난다. `--output-format stream-json` 의 init · result 이벤트에도 컨텍스트 창 크기는 없다 — 둘 다 직접 실행해 확인했다.)
 
 ## 결과 처리: 필수 검토
 
@@ -214,16 +223,16 @@ agy 가 할 수 있는 일을 Agent 도구로 넘기지 않는다. **Agent 도�
 - **위임 런타임 폴더는 `~/.samjil/delegate-agy/runtime` 이다.** `submit-task.ps1`(아래 "실행 방법")이 스스로 찾으므로 따로 탐색하지 않는다.
   스크립트가 없거나 폴더를 못 찾으면(낡은 설치) 설치본을 갱신해 달라고 사용자에게 알리고, 이번 작업은 위임 없이 직접 처리로 폴백한다.
 
-## 워처가 꺼져 있을 때: 일부러 끈 상태일 때만 켜도 되는지 묻는다
+## 워처가 꺼져 있을 때: 묻지 않고 그대로 위임한다
 
-(`DEAD` 이면 묻지 않고 켠다. `MANUAL_STOP` 일 때만 묻는다 — 아래 2번 끝의 "묻지 않고 켜는 경우" 참고.)
+`DEAD` 이든 `MANUAL_STOP`(사용자가 `stop-agy.ps1` 로 끈 상태)이든 **워처가 꺼져 있다는 이유만으로 사용자에게 묻거나 Claude 가 직접 처리하지 않는다. 그대로 `submit-task.ps1` 로 제출한다.**
 
-다른 작업 세션에서 위임 요청이 와도 마찬가지다. **위임 파일을 inbox에 넣기 직전마다** 워처가 켜져 있는지 확인하고,
-꺼져 있으면(일부러 끈 `MANUAL_STOP` 이 아닌 한) 켜고, `MANUAL_STOP` 이면 **묻기 전에는 켜지 않는다.** 일부러 끈 것을 되살리는 결정은 사용자의 것이다. (뷰어가 떠 있으면 60초마다 점검해 켜 주기도 하지만, 위임하는 시점에는 그걸 기다리지 않고 이 절차를 따른다.)
+- **제출 시 자동 기동 · 직접 실행 폴백:** `submit-task.ps1` 은 지시문을 inbox 에 넣은 직후(그리고 `-Poll <ID> -CancelOnTimeout` 으로 대기 중인 작업을 기다릴 때) 워처 상태를 확인한다.
+  - `DEAD` 또는 `MANUAL_STOP` 이면 `manual_stop.flag` 를 지우고 워처를 창 없이 켠 뒤 최대 15초 동안 `ALIVE` 를 기다린다(성공 시 표준 오류에 `[워처] 꺼져 있어 켰습니다(PID <n>).`).
+  - 그래도 워처가 켜지지 않으면 `submit-task.ps1` 이 해당 작업 하나를 워처의 작업자 모드(`agy-task-worker.ps1` → `watch-agy.ps1 -WorkerTask`)로 직접 실행한다(표준 오류에 `[워처 없음] 워처를 켜지 못해 이 작업을 작업자로 직접 실행합니다(PID <n>).`). 모델 단계 · 폴백 체인 · outbox/DB 기록 · `running\<ID>.json` 표시(`-Poll` · `-Cancel` · 뷰어)는 워처가 실행할 때와 같다.
+- `stop-agy.ps1` 은 계속 `manual_stop.flag` 를 남긴다. 뷰어의 주기적 자동 재시작은 `manual_stop.flag` 를 존중하고, 위임(`submit-task.ps1`)만 이를 덮어쓰고 워처를 켠다.
 
-**1. 확인한다.** 하트비트 파일의 나이로는 판단하지 않는다 — 워처는 agy 호출을 기다리는 동안(최대 30분) 하트비트를 쓰지 않아서
-일하는 중인 워처가 꺼진 것처럼 보이고, 반대로 워처 창을 닫아도 하트비트 파일은 최대 5분 남아서 죽은 워처가 켜진 것처럼 보인다.
-워처가 시작할 때 적는 PID 잠금 파일로 판단하는 `ensure-agy-running.ps1 -CheckOnly`를 쓴다(켜지는 않는다).
+**상태 확인(`ensure-agy-running.ps1 -CheckOnly`):** 하트비트 파일의 나이로는 판단하지 않고 PID 잠금 파일로 판단한다.
 
 ```bash
 powershell.exe -NoProfile -File "$USERPROFILE\.samjil\delegate-agy\scripts\sub\ensure-agy-running.ps1" -CheckOnly -StaleThresholdSeconds 0
@@ -232,63 +241,13 @@ echo "exit=$?"
 
 | 출력 | 종료 코드 | 뜻 | 다음 |
 |---|---|---|---|
-| `ALIVE` | 0 | 워처가 켜져 있다 | 그대로 위임한다 |
-| `DEAD` | 1 | 꺼져 있다 | 2번으로 |
-| `MANUAL_STOP` | 2 | 꺼져 있고, 사용자가 `stop-agy`로 **일부러 끈** 상태다 | 2번으로 (일부러 끈 상태임을 질문에 밝힌다) |
+| `ALIVE` | 0 | 워처가 켜져 있다 | 그대로 `submit-task.ps1` 로 제출한다 |
+| `DEAD` | 1 | 꺼져 있다 | 그대로 `submit-task.ps1` 로 제출한다(자동 기동 또는 작업자 직접 실행) |
+| `MANUAL_STOP` | 2 | `stop-agy.ps1` 로 꺼 둔 상태다 | 그대로 `submit-task.ps1` 로 제출한다(`manual_stop.flag` 삭제 후 자동 기동 또는 작업자 직접 실행) |
 
-**출력이 위 셋 중 하나가 아니면(비어 있거나 오류) 확인에 실패한 것이다 — "켜져 있다"로 읽지 않는다.** 설치본이 낡으면
-`ensure-agy-running.ps1`이 `-CheckOnly`를 모르고 **그냥 무시한 채 아무것도 출력하지 않고 종료 코드 0으로 끝난다.** 게다가 그때는
-평소 동작대로 워처가 꺼져 있으면 20초 뒤 스스로 켜 버릴 수 있다(사용자에게 묻지 않고). 이 경우 워처를 켜지 말고, 설치본이 낡았으니
-저장소에서 `install.ps1`을 다시 실행해 달라고 사용자에게 알린 뒤, 이번 작업은 직접 처리한다.
+**출력이 위 셋 중 하나가 아니면(비어 있거나 오류) 확인에 실패한 것이다 — "켜져 있다"로 읽지 않는다.** 설치본이 낡아 `-CheckOnly` 를 모를 수 있으므로, 저장소에서 `install.ps1` 을 다시 실행해 달라고 사용자에게 알린 뒤 이번 작업은 직접 처리한다.
 
-**2. 켜도 되는지 묻는다.** 한 번에 짧게, 무엇이 일어나는지와 함께 묻는다. 답을 받기 전에는 워처를 켜지 않고 inbox에 작업도 넣지 않는다.
-
-**`AskUserQuestion` 도구가 있으면 그것으로 묻는다** — 사용자가 글로 답하지 않고 마우스로 고르는 선택 팝업이 뜬다. 도구가 지연 로드 목록에만
-보이면 먼저 불러온다(`ToolSearch`로 `select:AskUserQuestion`). 질문은 한 개, 선택지는 아래 둘이다. 어느 쪽도 "(Recommended)"로 표시하지 않는다 —
-켤지는 사용자의 결정이다.
-
-- 질문: `agy 워처가 꺼져 있습니다(직접 끈 상태입니다 / 꺼진 것으로 보입니다). 이 작업을 위임하려면 워처가 필요합니다. 켜도 될까요?`
-- 머리말(header): `워처 켜기`
-- 선택지 1 `창 없이 켜기` — 이 PC에서 agy가 위임 작업을 처리하는 프로세스(워처)와 대시보드 뷰어(127.0.0.1:8787)가 콘솔 창 없이 백그라운드로 계속 떠 있게 됩니다. 끄려면 워처는 `stop-agy.ps1`, 뷰어는 `ensure-viewer-running.ps1 -Stop`을 실행하세요.
-- 선택지 2 `켜지 않고 직접 처리` — 워처를 켜지 않고 이 작업은 Claude가 직접 처리합니다(Claude quota를 씁니다).
-- 사용자가 "기타"로 직접 쓴 답은 내용대로 따른다. 켜라는 뜻이 분명하지 않으면 켜지 않는다.
-
-도구가 없는 환경(선택 팝업을 못 쓰는 세션)에서는 같은 내용을 글로 묻는다:
-
-> agy 워처가 꺼져 있습니다(직접 끈 상태입니다 / 꺼진 것으로 보입니다). 이 작업을 agy에 위임하려면 워처가 필요합니다.
-> 지금 창 없이 켤까요? 켜면 이 PC에서 agy가 위임 작업을 처리하는 프로세스(워처)와 대시보드 뷰어가 콘솔 창 없이 백그라운드로 계속 떠 있게 되며, 끄려면 워처는 `stop-agy.ps1`, 뷰어는 `ensure-viewer-running.ps1 -Stop`을 실행하면 됩니다.
-> (켜지 않으면 이 작업은 Claude가 직접 처리합니다.)
-
-**묻지 않고 켜는 경우:**
-- **사용자가 이번 요청에서 agy 를 명시적으로 지목했을 때**("agy 에게 …해 줘 / 물어봐 / 시켜", "agy 로 …") — 그 말이 곧 워처를 켜도 된다는 뜻이므로 묻지 않고 켠다(`MANUAL_STOP` 이어도 같다. 아래 3번대로 수동 정지 표시를 지우고 켠다). 켠 뒤 "워처가 꺼져 있어 켰습니다" 를 한 줄로 알린다.
-- 사용자가 이 대화에서 **미리 명시적으로 허락**했다면("워처 꺼져 있으면 알아서 켜 줘" 등).
-
-- **`DEAD` 이고 수동 정지가 아닐 때** — 세션 시작 훅이 워처를 자동으로 켜도록 이미 정해 둔 사용자 결정이므로 묻지 않고 켠다(훅이 켜는 중일 수 있으니 3번의 확인 루프로 `ALIVE` 를 기다린다).
-
-**묻는 경우:** `MANUAL_STOP`(사용자가 `stop-agy` 로 일부러 끈 상태)일 때만 묻는다. 일부러 끈 것을 되살리는 결정은 사용자의 것이다. 그럴 것 같다는 짐작은 허락이 아니다.
-
-**3. 승인하면 켜고, 켜졌는지 확인한다.** `MANUAL_STOP`이었다면 사용자가 켜라고 한 것이므로 수동 정지 표시를 지운다. 재확인 대기 없이(0초) 창 없이 켠다.
-
-```bash
-powershell.exe -NoProfile -Command 'Remove-Item -LiteralPath "$env:USERPROFILE\.samjil\delegate-agy\runtime\logs\manual_stop.flag" -Force -ErrorAction SilentlyContinue'
-powershell.exe -NoProfile -File "$USERPROFILE\.samjil\delegate-agy\scripts\sub\ensure-agy-running.ps1" -ConfirmDelaySeconds 0 -StaleThresholdSeconds 0
-# 대시보드 뷰어도 창·브라우저 탭 없이 켠다(이미 떠 있으면 그대로 둔다. 뷰어는 켜질 때 워처도 창 없이 함께 켠다)
-powershell.exe -NoProfile -File "$USERPROFILE\.samjil\viewer\ensure-viewer-running.ps1"
-for i in $(seq 1 10); do
-  powershell.exe -NoProfile -File "$USERPROFILE\.samjil\delegate-agy\scripts\sub\ensure-agy-running.ps1" -CheckOnly -StaleThresholdSeconds 0 | grep -q ALIVE && echo "켜짐" && break
-  sleep 3
-done
-```
-
-- **콘솔 창이 뜨는 방식으로 켜지 않는다.** `start-agy.ps1`(기본은 새 콘솔 창을 띄움), `serve-viewer.bat`, `Start-Process cmd.exe ...` 로 켜지 말고 위 두 `ensure-*` 스크립트를 쓴다(둘 다 창을 아예 만들지 않는 숨김 실행). 사용자가 직접 `start-agy.ps1`을 쓸 때 창이 싫으면 `-Hidden`을 붙이면 된다.
-- 뷰어를 끄려면(창이 없어서 Ctrl+C 로 끌 수 없다) `ensure-viewer-running.ps1 -Stop`, 워처를 끄려면 `stop-agy.ps1`.
-- 30초 안에 `ALIVE`가 되면 위임을 이어간다.
-- 안 켜지면 **위임하지 않고 직접 처리**하면서, `~/.samjil/delegate-agy/runtime/logs/watchdog.log`와 `watcher.log`를 확인하라고 한 줄로 알린다. 켜졌다고 추측하지 않는다.
-
-**4. 거절하거나 답이 없으면 직접 처리한다.** 위임하지 않고 Claude가 직접 하며, 같은 대화에서 같은 질문을 되풀이하지 않는다.
-사용자가 나중에 켜 달라고 하거나 `ALIVE`가 확인되면 그때부터 다시 위임한다.
-
-**5. 승인은 그 한 번의 기동에만 쓴다.** 켠 뒤 같은 대화에서 다시 `DEAD`가 되면 다시 묻는다. 반복해서 꺼지면 이유 확인이 필요하다고 알린다.
+- **콘솔 창이 뜨는 방식으로 직접 켜지 않는다.** 수동으로 창 없이 켤 때는 `ensure-agy-running.ps1 -ConfirmDelaySeconds 0 -StaleThresholdSeconds 0` 또는 `start-agy.ps1 -Hidden` 을 쓰고, 뷰어는 `ensure-viewer-running.ps1`(끄기: `-Stop`), 워처 끄기는 `stop-agy.ps1` 을 쓴다.
 
 ## 지시문과 답변은 한글로 (모든 위임 공통)
 
@@ -514,6 +473,7 @@ $S -Poll <ID1>,<ID2>
   모델을 바꿔 새 대화로 옮기려면 `@upgrade: true`(이전 질문·답 2쌍을 글로 붙인다).
 - `지정한 @model 을 쓸 수 없습니다` 오류는 값이 단계 이름도 허용 모델도 아니라는 뜻이다(워처는 agy를 부르지 않는다). 오류에 적힌 목록으로 고쳐 다시 보낸다.
 - **성능 · 한도 특성**: Carbon(`high` AA 60, ~56 tok/s, 첫 토큰 ~73초, 기준 100%, $4/$20), Neon(`high` 60 / `xhigh` 61, AA Coding Agent 1위 58.64, ~101–110 tok/s, 첫 토큰 ~41초, 한도 ~30–32% 절감, $3/$15), Hydrogen(`high` 51 / `xhigh` 54, ~165–170 tok/s, 첫 토큰 ~20초, 한도 50%+ 절감, $1.50/$7.50). `Orchestrator (Carbon)` 은 단독 Carbon 대비 한도 ~24% 절감 · 완료 속도 ~19% 빠르다.
+- **멈춤 확인 · 이어서 묻기 (`AGY_STALL_SECONDS` / `AGY_STALL_GRACE_SECONDS`):** 새 단계가 `AGY_STALL_SECONDS`(기본 300초) 동안 없어도 바로 끊지 않고 `확인 중(checking)`으로 전환해 `cli-*.log`의 진행 중인 모델 요청(`생각 중`)과 도구 자식 프로세스(MCP node 서버 제외)의 최근 60초 CPU 활동(`명령 실행 중`)을 60초마다 확인한다(활성 신호가 있으면 2시간 절대 상한까지 계속 대기). 활성 신호 없이 유예 시간 `AGY_STALL_GRACE_SECONDS`(기본 300초)가 더 지나면 실행을 중단한 뒤 같은 대화(`agy --conversation <대화 ID>`)에 진행 상황을 이어서 묻는다(작업당 최대 2회). 이어서 받은 답변이 정상이면 최종 답변으로 채택되고, 첫 줄이 `[진행 불가]`이면 실패로 기록하되 답변을 보존하며, 2회 질문 뒤에도 유예 시간을 넘기면 기존과 같이 멈춤 실패로 끝낸다. `submit-task.ps1 -Poll -CancelOnTimeout` 도 실행 표시의 `probe_state`가 `checking` · `thinking` · `tool running` · `asked`인 동안은 진행 중으로 보아 취소하지 않는다(2시간 절대 한도는 유지).
 - **"멈춤 판정" 오류가 나도 결과가 남아 있을 수 있다.** agy 가 최종 응답을 대화 기록에 남겼는데 프로세스만 끝나지 않으면, 워처는 끊기 직전에
   그 응답을 **자동으로 회수해 성공(OK)으로 기록한다**(`data/tasks/outbox/<id>.error.log` 에 회수했다는 안내가 남는다). 그래도 "멈춤 판정" 오류로 끝났다면
   최종 응답이 없던 것이니, 직접 처리로 넘기기 전에 `logs/watcher.log` 의 마지막 단계 줄과 `~/.gemini/antigravity-cli/brain/<대화 ID>/.system_generated/logs/transcript_full.jsonl`

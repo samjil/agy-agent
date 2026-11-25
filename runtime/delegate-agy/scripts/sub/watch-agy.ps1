@@ -452,6 +452,13 @@ if (-not (Test-Path $retentionFile)) {
 }
 . $retentionFile
 
+# agy 남은 한도 실측 파싱 · 캐시(agy-quota.ps1). 테스트: tests\delegate-agy\agy-quota.tests.ps1
+$quotaLibFile = Join-Path $PSScriptRoot "agy-quota.ps1"
+if (-not (Test-Path $quotaLibFile)) {
+    $quotaLibFile = Join-Path (Split-Path $PSScriptRoot -Parent) "agy-quota.ps1"
+}
+if (Test-Path $quotaLibFile) { . $quotaLibFile }
+
 # 핸드오프 "자동 이어가기" 펌프(워처 본체만 씀): 채널에 Claude 가 새 메시지를 보내면 agy 에게 위임하고, 답이 오면 회신 메시지로 기록한다.
 # 못 찾거나 불러오지 못해도 워처의 본래 일(inbox 위임)에는 영향이 없다. 함수 정의는 handoff-pump.ps1 머리말 참고. 테스트: tests\handoff
 $script:HandoffPumpReady = $false
@@ -583,6 +590,117 @@ function Sync-QaStore {
     return $added
 }
 
+# agy 위임이 끝난 직후 남은 한도를 실측해 task_quota 표에 기록한다(최초 1회, 덮어쓰지 않음).
+# 실패해도 워처 루프나 완료 기록 저장을 막지 않는다.
+function Save-TaskFinishQuota([string]$TaskId, $Row, [scriptblock]$UsageRunner = $null, [datetime]$NowUtc = [datetime]::MinValue) {
+    try {
+        if (-not $TaskId -or $null -eq $Row) { return $false }
+        $model = [string]$Row.model
+        if ($model -notmatch '(?i)gemini|orchestrator') { return $false }
+
+        $tok = 0L
+        if (-not [long]::TryParse([string]$Row.total_tokens, [ref]$tok) -or $tok -le 0) { return $false }
+        if (-not (Get-Command ConvertFrom-AgyUsageText -ErrorAction SilentlyContinue)) { return $false }
+
+        $raw = $null
+        if ($null -ne $UsageRunner) {
+            $raw = & $UsageRunner
+        } elseif (Test-Path Env:\AGY_TEST_USAGE_TEXT) {
+            $raw = $env:AGY_TEST_USAGE_TEXT
+        } elseif (Get-Command Invoke-AgyUsageCommand -ErrorAction SilentlyContinue) {
+            $raw = Invoke-AgyUsageCommand "agy" 20
+        }
+        if (-not $raw) { return $false }
+
+        $parsed = (ConvertFrom-AgyUsageText ([string]$raw))
+        if (-not $parsed.Contains('gemini_5h') -and -not $parsed.Contains('gemini_weekly')) { return $false }
+
+        $now = if ($NowUtc -eq [datetime]::MinValue) { [datetime]::UtcNow } else { $NowUtc.ToUniversalTime() }
+        $measuredAt = $now.ToString("yyyy-MM-ddTHH:mm:ssZ")
+
+        # 방금 받은 신선한 출력으로 agy-quota.json 캐시도 함께 갱신한다.
+        if ($RuntimeDir -and (Get-Command Get-AgyQuotaSnapshot -ErrorAction SilentlyContinue)) {
+            $qCacheFile = Join-Path $RuntimeDir "agy-quota.json"
+            $rawCopy = [string]$raw
+            try { [void](Get-AgyQuotaSnapshot $qCacheFile 0 { return $rawCopy } -NowUtc $now) } catch {}
+        }
+
+        $fiveUsed = $null; $fiveReset = $null
+        if ($parsed.Contains('gemini_5h')) {
+            $e5 = $parsed.Item('gemini_5h')
+            $fiveUsed = 100.0 - [double]$e5.pct
+            $fiveReset = [string]$e5.reset
+        }
+        $weekUsed = $null; $weekReset = $null
+        if ($parsed.Contains('gemini_weekly')) {
+            $ew = $parsed.Item('gemini_weekly')
+            $weekUsed = 100.0 - [double]$ew.pct
+            $weekReset = [string]$ew.reset
+        }
+
+        $concurrent = 0
+        if ($RunningDir -and (Test-Path -LiteralPath $RunningDir -PathType Container)) {
+            $ownClaimName = "{0}.json" -f $TaskId
+            $otherClaims = @(Get-ChildItem -LiteralPath $RunningDir -Filter "*.json" -File -ErrorAction SilentlyContinue | Where-Object { $_.Name -ine $ownClaimName })
+            if ($otherClaims.Count -gt 0) { $concurrent = 1 }
+        }
+
+        if ($AgyDbPath -and (Get-Command Save-TaskQuota -ErrorAction SilentlyContinue)) {
+            $db = Open-AgyDb $AgyDbPath
+            try {
+                return [bool](Save-TaskQuota $db $TaskId $measuredAt $fiveUsed $fiveReset $weekUsed $weekReset $concurrent)
+            } finally {
+                $db.Dispose()
+            }
+        }
+        return $false
+    } catch {
+        Log "한도 실측 저장 중 오류($TaskId): $($_.Exception.Message)"
+        return $false
+    }
+}
+
+# 위임이 끝난 직후 대화 기록에서 실제 실행 모델별 토큰을 task_models 표에 저장한다(최초 1회, 덮어쓰지 않음).
+# 실패해도 워처 루프나 완료 기록 저장을 막지 않는다.
+function Save-TaskFinishModels([string]$TaskId, $Row, $ProcessSteps = $null, [string]$TranscriptPath = "") {
+    try {
+        if (-not $TaskId -or $null -eq $Row -or -not $AgyDbPath) { return $false }
+        if (-not (Get-Command Save-TaskModels -ErrorAction SilentlyContinue)) { return $false }
+        if (-not (Get-Command New-AgyUsageState -ErrorAction SilentlyContinue)) { return $false }
+
+        $tp = $null
+        if ($TranscriptPath -and (Test-Path -LiteralPath $TranscriptPath -PathType Leaf)) {
+            $tp = $TranscriptPath
+        } elseif ($Row.session_id) {
+            $sid = [string]$Row.session_id
+            if (Get-Command Get-AgyTranscriptUsageFile -ErrorAction SilentlyContinue) {
+                $tp = Get-AgyTranscriptUsageFile (Get-AgyHomeDir) $sid
+            } else {
+                $cand = Get-AgyTranscriptPath (Get-AgyHomeDir) $sid
+                if ($cand -and (Test-Path -LiteralPath $cand -PathType Leaf)) { $tp = $cand }
+            }
+        }
+        if (-not $tp) { return $false }
+
+        $st = New-AgyUsageState $tp
+        Update-AgyUsageState $st
+        $range = if (Get-Command Resolve-AgyTaskStepRange -ErrorAction SilentlyContinue) {
+            Resolve-AgyTaskStepRange $st $ProcessSteps $Row
+        } else {
+            @{ MinStep = 0; MaxStep = 0 }
+        }
+        $sum = Get-AgyUsageSummary $st $range.MaxStep $null $range.MinStep
+        if ($null -eq $sum) { return $false }
+        # 컨텍스트 크기(실측 통계가 보여 준다)는 모델 기록이 없어도 따로 남긴다.
+        if (Get-Command Save-TaskContext -ErrorAction SilentlyContinue) { try { [void](Save-TaskContext $AgyDbPath $TaskId $sum.Context) } catch {} }
+        if (@($sum.ByModel).Count -eq 0) { return $false }
+        return [bool](Save-TaskModels $AgyDbPath $TaskId $sum.ByModel)
+    } catch {
+        Log "모델별 토큰 저장 중 오류($TaskId): $($_.Exception.Message)"
+        return $false
+    }
+}
+
 # 작업자가 작업 하나를 끝낼 때의 마무리: 지시파일을 processed 로 옮기고, 그 작업의 행(사용량 행은 Write-UsageRow 가 먼저 넣었다)에
 # 질문·답·과정을 채운다. 작업자는 작업마다 새 프로세스라 전체 기록을 읽지 않고 이 한 건만 다룬다.
 # 사용량 행이 없거나 채우다 오류가 나면 미완료 작업 전체를 채우는 보충(Update-QAReport)으로 물러선다.
@@ -594,6 +712,12 @@ function Complete-TaskQaRecord([string]$TaskId, [string]$SourcePath, [string]$Do
         if ($null -ne $row.answer) { return }                  # 이미 채워졌다(워처가 켜질 때의 보충이 먼저 한 경우)
         $rec = New-QaRecordFromRow $row $DonePath
         if ((Write-QaRecordToDb $AgyDbPath $rec 'FillIfIncomplete') -eq 'pending') { Log "기록을 DB 에 바로 쓰지 못해 pending 폴더에 두었습니다: $TaskId" }
+        if (Get-Command Save-TaskFinishQuota -ErrorAction SilentlyContinue) {
+            try { [void](Save-TaskFinishQuota $TaskId $row) } catch {}
+        }
+        if (Get-Command Save-TaskFinishModels -ErrorAction SilentlyContinue) {
+            try { [void](Save-TaskFinishModels $TaskId $row $rec['process']) } catch {}
+        }
     } catch {
         Log "기록 저장소에 작업 한 건을 채우다 오류가 나서 전체 보충으로 대신합니다: $($_.Exception.Message)"
         Update-QAReport
@@ -644,11 +768,21 @@ $AgyTimeoutSeconds = Get-AgySecondsSetting 'AGY_TIMEOUT_SECONDS' 1800 60   # 환
 # 절대 마감을 넘겨도 agy 가 진짜 일하는 중이면(새 단계·도구 출력·CPU) 바로 끊지 않고 이 시간까지 더 기다린다. 이 시간이 지나면 일하는 중이어도 끊는다.
 $AgyHardTimeoutSeconds = [Math]::Max((Get-AgySecondsSetting 'AGY_HARD_TIMEOUT_SECONDS' 7200 60), $AgyTimeoutSeconds)   # 환경변수 AGY_HARD_TIMEOUT_SECONDS 로 바꿀 수 있다(마감보다 작으면 마감과 같게)
 
-# 위 절대 마감과 별개로, agy 대화 기록에 새 단계가 이 시간 동안 하나도 없으면 "멈춘 것"으로 보고
-# 중단합니다. 단계가 계속 기록되는 동안은(= 일하는 중) 절대 마감까지 기다립니다.
+# 위 절대 마감과 별개로, agy 대화 기록에 새 단계가 이 시간 동안 하나도 없으면 "확인 중"으로 전환해
+# 모델 요청 진행 중(cli-*.log) · 도구 자식 프로세스 CPU 활동을 확인하고, 활성 신호도 없이 유예 시간(AGY_STALL_GRACE_SECONDS)이
+# 지나면 실행을 중단한 뒤 같은 대화에 진행 상황을 묻습니다(최대 2회).
 # 이 값의 근거와 한계는 agy-progress.ps1 머리말을 보세요.
 $AgyStallSeconds = 300
 $AgyStallSeconds = Get-AgySecondsSetting 'AGY_STALL_SECONDS' 300 30   # 환경변수 AGY_STALL_SECONDS(30 이상)로 바꿀 수 있다
+$AgyStallGraceSeconds = 300
+$AgyStallGraceSeconds = Get-AgySecondsSetting 'AGY_STALL_GRACE_SECONDS' 300 30   # 환경변수 AGY_STALL_GRACE_SECONDS(30 이상)로 바꿀 수 있다
+$AgyThinkMaxSeconds = 1200
+$AgyThinkMaxSeconds = Get-AgySecondsSetting 'AGY_THINK_MAX_SECONDS' 1200 30   # 환경변수 AGY_THINK_MAX_SECONDS(30 이상, 기본 1200 = 총 침묵 20분)로 바꿀 수 있다
+$AgyToolMaxSeconds = 1800
+$AgyToolMaxSeconds = Get-AgySecondsSetting 'AGY_TOOL_MAX_SECONDS' 1800 30     # 환경변수 AGY_TOOL_MAX_SECONDS(30 이상, 기본 1800 = 총 침묵 30분)로 바꿀 수 있다
+$AgyStallProbeIntervalSeconds = 60   # 확인 중/생각 중/명령 실행 중 재확인 주기(초)
+$AgyStallMaxAsks = 2                 # 작업당 같은 대화에 진행 상황을 묻는 최대 횟수
+$AgyStallAskPrompt = "직전 실행이 응답 없이 10분 넘게 멈춰 중단했습니다. 대화 기록을 보고 판단하세요. 1) 이미 끝났다면 최종 답변만 그대로 다시 쓰세요. 2) 남은 일이 있으면 이어서 끝까지 진행하고 최종 답변을 쓰세요. 3) 진행할 수 없으면 첫 줄에 [진행 불가] 와 사유를 쓰세요."
 # 마감/멈춤을 점검하는 주기(초)
 $AgyPollSeconds = 30
 # 오래 걸리는 호출의 진행 상황(경과 시간, 마지막 활동)을 로그에 남기는 주기(초)
@@ -666,7 +800,7 @@ $AgyConversationWindowSeconds = 120
 # 타임아웃은 그 밖의 이유로 멈추는 경우를 위한 안전장치입니다.
 #
 # 반환: @{ TimedOut = $true/$false; Raw = <agy 표준출력(문자열)> }
-function Invoke-AgyOnce($agyArgs, $errFile, $workDir, [string]$marker = "") {
+function Invoke-AgyOnce($agyArgs, $errFile, $workDir, [string]$marker = "", [string]$initialProbeState = "") {
     # agy 에 넘길 인자 하나를 명령줄 조각으로 만든다(공백·따옴표·끝의 역슬래시를 Windows 규칙대로 감싼다).
     function ConvertTo-AgyCommandLineArg([string]$Arg) {
         if ($null -eq $Arg) { return '""' }
@@ -762,7 +896,16 @@ function Invoke-AgyOnce($agyArgs, $errFile, $workDir, [string]$marker = "") {
     $nextBgLog       = 0         # 백그라운드 도구를 기다린다는 로그를 5분에 한 번만 남기려고
     $nextCapLog      = 0         # 절대 마감 이후 "작업 중이라 계속 기다림" 로그 주기
     $cpuSamples      = New-Object System.Collections.ArrayList   # 마감이 가까워지면 모으는 CPU 사용 표본(마감 이후 활동 확인용)
+    $toolCpuSamples  = New-Object System.Collections.ArrayList   # 도구 자식 프로세스 CPU 표본(MCP 제외)
     $capNote         = ""
+    $probeState      = ""
+    $probeSince      = $null
+    $graceSince      = $null
+    $lastProbeAt     = [datetime]::MinValue
+    $graceSeconds    = if ($null -ne $AgyStallGraceSeconds) { [int]$AgyStallGraceSeconds } else { 0 }
+    $probeInterval   = if ($null -ne $AgyStallProbeIntervalSeconds -and [int]$AgyStallProbeIntervalSeconds -gt 0) { [int]$AgyStallProbeIntervalSeconds } else { 60 }
+    $thinkMaxSeconds = if ($null -ne $AgyThinkMaxSeconds -and [int]$AgyThinkMaxSeconds -gt 0) { [int]$AgyThinkMaxSeconds } else { 1200 }
+    $toolMaxSeconds  = if ($null -ne $AgyToolMaxSeconds -and [int]$AgyToolMaxSeconds -gt 0) { [int]$AgyToolMaxSeconds } else { 1800 }
     $finished        = $false
     while ($true) {
         $finished = $proc.WaitForExit([int]($AgyPollSeconds * 1000))
@@ -775,10 +918,34 @@ function Invoke-AgyOnce($agyArgs, $errFile, $workDir, [string]$marker = "") {
             [void]$cpuSamples.Add(@{ At = $now; Cpu = (Get-AgyTreeCpuSeconds $proc.Id) })
             while ($cpuSamples.Count -gt 0 -and (($now - $cpuSamples[0].At).TotalSeconds -gt (3 * $AgyStallSeconds))) { $cpuSamples.RemoveAt(0) }
         }
-        # 절대 마감에 닿아도 바로 끊지 않는다. 그 시점에 agy 가 진짜 일하는 중인지(새 단계·도구 출력·CPU) 확인해, 일하면 최대 대기 시간(AgyHardTimeoutSeconds)까지
+        # 절대 마감에 닿아도 바로 끊지 않는다. 그 시점에 agy 가 진짜 일하는 중인지(새 단계·도구 출력·CPU·모델 요청 진행 중) 확인해, 일하면 최대 대기 시간(AgyHardTimeoutSeconds)까지
         # 계속 기다리고 아무 활동도 없으면 멈춘 것으로 보고 끊는다.
         if ($elapsed -ge $AgyTimeoutSeconds) {
+            if ($convId) {
+                $lastActivity = Get-AgyConversationActivity $agyHome $convId
+                if (Get-Command Get-AgyChildConversationActivity -ErrorAction SilentlyContinue) {
+                    $childAct = Get-AgyChildConversationActivity $agyHome $convId
+                    if ($childAct -and (($null -eq $lastActivity) -or ($childAct -gt $lastActivity))) { $lastActivity = $childAct }
+                }
+            }
             $alive = Test-AgyAliveAtCap $agyHome $convId $now $AgyStallSeconds $cpuSamples
+            if (-not $alive.Alive -and $convId -and (Get-Command Get-AgyStallProbeSignal -ErrorAction SilentlyContinue)) {
+                $capSig = Get-AgyStallProbeSignal $agyHome $convId $proc.Id $startedAt $lastActivity $toolCpuSamples $now
+                if ($capSig.Active) {
+                    $capRef = $startedAt
+                    if (($null -ne $lastActivity) -and ($lastActivity -gt $capRef)) { $capRef = $lastActivity }
+                    $capIdleSec = ($now - $capRef).TotalSeconds
+                    if ($capSig.State -eq 'thinking' -and $capIdleSec -ge $thinkMaxSeconds) {
+                        Log ("  멈춤 확인: thinking 상태가 최대 허용 침묵({0}초)을 넘어 중단하고 이어서 묻기로 전환합니다 (침묵 {1}초, 대화 {2})" -f $thinkMaxSeconds, [int]$capIdleSec, $convId)
+                        $stopReason = 'stall'; $stopNow = $now; break
+                    }
+                    if ($capSig.State -eq 'tool running' -and $capIdleSec -ge $toolMaxSeconds) {
+                        Log ("  멈춤 확인: tool running 상태가 최대 허용 침묵({0}초)을 넘어 중단하고 이어서 묻기로 전환합니다 (침묵 {1}초, 대화 {2})" -f $toolMaxSeconds, [int]$capIdleSec, $convId)
+                        $stopReason = 'stall'; $stopNow = $now; break
+                    }
+                    $alive = @{ Alive = $true; Reason = [string]$capSig.Reason; Note = "" }
+                }
+            }
             if (-not $alive.Alive) { $capNote = [string]$alive.Note; $stopReason = 'cap'; $stopNow = $now; break }
             if ($elapsed -ge $nextCapLog) {
                 Log ("  절대 마감 {0}초를 넘겼지만 작업 중으로 보여({1}) 끊지 않고 기다립니다. 최대 {2}초까지." -f $AgyTimeoutSeconds, $alive.Reason, $AgyHardTimeoutSeconds)
@@ -815,16 +982,98 @@ function Invoke-AgyOnce($agyArgs, $errFile, $workDir, [string]$marker = "") {
                 $childAct = Get-AgyChildConversationActivity $agyHome $convId
                 if ($childAct -and (($null -eq $lastActivity) -or ($childAct -gt $lastActivity))) { $lastActivity = $childAct }
             }
-            if (Test-AgyStalled $lastActivity $startedAt $now $AgyStallSeconds) {
+            $refActivity = $startedAt
+            if (($null -ne $lastActivity) -and ($lastActivity -gt $refActivity)) { $refActivity = $lastActivity }
+            $idleNowSec = ($now - $refActivity).TotalSeconds
+
+            # 1차 침묵 기준 90초 전부터(또는 확인 중일 때) 도구 자식 프로세스(MCP 제외)의 CPU 표본을 모은다
+            if (($idleNowSec -ge [Math]::Max(0, $AgyStallSeconds - 90) -or $probeState) -and (Get-Command Get-AgyToolChildCpuSeconds -ErrorAction SilentlyContinue)) {
+                try {
+                    $tc = Get-AgyToolChildCpuSeconds $proc.Id
+                    [void]$toolCpuSamples.Add(@{ At = $now; Cpu = [double]$tc.TotalCpu; HasToolChild = [bool]$tc.HasToolChild })
+                    while ($toolCpuSamples.Count -gt 0 -and (($now - $toolCpuSamples[0].At).TotalSeconds -gt 120)) { $toolCpuSamples.RemoveAt(0) }
+                } catch {}
+            }
+
+            if (-not (Test-AgyStalled $lastActivity $startedAt $now $AgyStallSeconds)) {
+                # 새 단계가 기록되어 침묵 상태가 풀렸으면 probe 상태를 비운다
+                if ($probeState -or ($initialProbeState -eq 'asked' -and $null -ne $lastActivity -and $lastActivity -gt $startedAt)) {
+                    $probeState = ""
+                    $probeSince = $null
+                    $graceSince = $null
+                    $lastProbeAt = [datetime]::MinValue
+                    $initialProbeState = ""
+                    if ($script:CurrentTaskId -and (Get-Command Write-RunningClaim -ErrorAction SilentlyContinue)) {
+                        Write-RunningClaim $script:CurrentTaskId @{ probe_state = ""; probe_since = "" }
+                    }
+                }
+            } else {
                 # 오래 걸리는 명령을 agy 가 백그라운드로 돌려 두고 기다리는 중이면 새 단계가 없는 게 정상이다. 끊지 않는다(절대 마감은 그대로).
                 $bgPending = @(Get-AgyPendingBackgroundTasks $agyHome $convId)
                 if ($bgPending.Count -gt 0) {
+                    if ($probeState) {
+                        $probeState = ""
+                        $probeSince = $null
+                        $graceSince = $null
+                        if ($script:CurrentTaskId -and (Get-Command Write-RunningClaim -ErrorAction SilentlyContinue)) {
+                            Write-RunningClaim $script:CurrentTaskId @{ probe_state = ""; probe_since = "" }
+                        }
+                    }
                     if ($elapsed -ge $nextBgLog) {
                         Log ("  새 단계가 {0}초 넘게 없지만 agy 가 백그라운드로 돌린 도구 {1}건이 아직 끝나지 않아 멈춤으로 보지 않고 기다립니다 ({2}). 절대 마감 {3}초까지." -f $AgyStallSeconds, $bgPending.Count, ($bgPending -join ', '), $AgyTimeoutSeconds)
                         $nextBgLog = $elapsed + 300
                     }
                 } else {
-                    $stopReason = 'stall'; $stopNow = $now; break
+                    # 1차 침묵 기준 도달: 바로 끊지 않고 확인 중 -> cli-*.log 모델 요청/도구 자식 CPU 확인 -> 유예 시간 경과 시 중단
+                    $firstProbe = ($null -eq $probeSince)
+                    if ($firstProbe) {
+                        $probeSince = $now
+                        $graceSince = $now
+                        $probeState = "checking"
+                        if ($script:CurrentTaskId -and (Get-Command Write-RunningClaim -ErrorAction SilentlyContinue)) {
+                            Write-RunningClaim $script:CurrentTaskId @{ probe_state = "checking"; probe_since = $probeSince.ToString("yyyy-MM-dd HH:mm:ss") }
+                        }
+                        Log ("  멈춤 확인: 새 단계가 {0}초 넘게 없어 생각 중인지 확인합니다 (대화 {1}, 유예 {2}초)" -f $AgyStallSeconds, $convId, $graceSeconds)
+                    }
+                    if ($firstProbe -or (($now - $lastProbeAt).TotalSeconds -ge $probeInterval)) {
+                        $lastProbeAt = $now
+                        $sig = if (Get-Command Get-AgyStallProbeSignal -ErrorAction SilentlyContinue) {
+                            Get-AgyStallProbeSignal $agyHome $convId $proc.Id $startedAt $lastActivity $toolCpuSamples $now
+                        } else {
+                            @{ Active = $false; State = ""; Reason = "" }
+                        }
+                        if ($sig.Active) {
+                            $newState = [string]$sig.State
+                            $graceSince = $null
+                            if ($probeState -ne $newState) {
+                                $probeState = $newState
+                                if ($script:CurrentTaskId -and (Get-Command Write-RunningClaim -ErrorAction SilentlyContinue)) {
+                                    Write-RunningClaim $script:CurrentTaskId @{ probe_state = $probeState; probe_since = $probeSince.ToString("yyyy-MM-dd HH:mm:ss") }
+                                }
+                                Log ("  멈춤 확인: 활성 신호 감지({0}, {1}) -> 계속 기다립니다 (대화 {2})" -f $probeState, $sig.Reason, $convId)
+                            }
+                        } else {
+                            if ($null -eq $graceSince) { $graceSince = $now }
+                            if ($probeState -ne "checking") {
+                                $probeState = "checking"
+                                if ($script:CurrentTaskId -and (Get-Command Write-RunningClaim -ErrorAction SilentlyContinue)) {
+                                    Write-RunningClaim $script:CurrentTaskId @{ probe_state = "checking"; probe_since = $probeSince.ToString("yyyy-MM-dd HH:mm:ss") }
+                                }
+                                Log ("  멈춤 확인: 활성 신호가 사라져 유예 대기로 전환합니다 (대화 {0}, 유예 {1}초)" -f $convId, $graceSeconds)
+                            }
+                        }
+                    }
+                    if ($probeState -eq 'thinking' -and $idleNowSec -ge $thinkMaxSeconds) {
+                        Log ("  멈춤 확인: thinking 상태가 최대 허용 침묵({0}초)을 넘어 중단하고 이어서 묻기로 전환합니다 (침묵 {1}초, 대화 {2})" -f $thinkMaxSeconds, [int]$idleNowSec, $convId)
+                        $stopReason = 'stall'; $stopNow = $now; break
+                    }
+                    if ($probeState -eq 'tool running' -and $idleNowSec -ge $toolMaxSeconds) {
+                        Log ("  멈춤 확인: tool running 상태가 최대 허용 침묵({0}초)을 넘어 중단하고 이어서 묻기로 전환합니다 (침묵 {1}초, 대화 {2})" -f $toolMaxSeconds, [int]$idleNowSec, $convId)
+                        $stopReason = 'stall'; $stopNow = $now; break
+                    }
+                    if ($null -ne $graceSince -and (($now - $graceSince).TotalSeconds -ge $graceSeconds)) {
+                        $stopReason = 'stall'; $stopNow = $now; break
+                    }
                 }
             }
         }
@@ -960,6 +1209,9 @@ function Invoke-AgyWithFallback($safePrompt, $targetCwd, [bool]$skipPerm, $errFi
         SessionRenewed = $false
         StdErr         = ""
         Tier           = ""
+        AskCount       = 0
+        Blocked        = $false
+        TimedOutReason = ""
     }
 
     $overallStart = Get-Date
@@ -1033,31 +1285,76 @@ function Invoke-AgyWithFallback($safePrompt, $targetCwd, [bool]$skipPerm, $errFi
         # 파일 참조면 그 파일 이름, 인라인이면 지시문 첫 줄(따옴표·역슬래시 앞까지, 12자 이상일 때만).
         $marker = if ($delivery.Mode -eq 'file') { [System.IO.Path]::GetFileName($promptFile) } else { [string]$delivery.Marker }
         if ($delivery.Mode -eq 'file' -and $delivery.Reason) { Log "  -> 지시문을 파일 참조로 넘깁니다($($delivery.Reason))" }
-        $call = Invoke-AgyOnce $agyArgs $errFile $RuntimeDir $marker
-        if ($call.StdErr) { $result.StdErr = [string]$call.StdErr }
 
-        # 멈춤·마감으로 끊았는데 agy 가 이미 최종 응답을 대화 기록에 남겼다면(응답을 마친 뒤 프로세스만 안 끝난 경우, 실측 2건) 실패가 아니라 그 응답을 답으로 회수한다.
-        # 'hard'(최대 대기 시간)는 일하는 중이었던 것이라 회수하지 않는다. 사용량(토큰)은 agy 의 JSON 응답에만 있어 이 경우 비워 둔다.
-        if ($call.TimedOut -and @('stall', 'cap') -contains [string]$call.Reason -and $call.ConversationId) {
-            $recovered = $null
-            try { $recovered = Get-AgyFinalResponse (Get-AgyHomeDir) ([string]$call.ConversationId) } catch { $recovered = $null }
-            if ($recovered) {
-                $result.Success        = $true
-                $result.Response       = [string]$recovered.Text
-                $result.ModelUsed      = if ($conversationId) { $knownModel } else { $candidate }
-                $result.ConversationId = [string]$call.ConversationId
-                $result.StdErr         = "agy 프로세스가 끝나지 않아 워처가 끊었지만(사유: $($call.Reason)), 대화 기록(단계 #$($recovered.Index))에 최종 응답이 이미 있어 그 내용을 답으로 회수했습니다. 토큰 사용량은 agy 의 JSON 응답이 없어 기록하지 못했습니다."
-                Log "  회수: agy 가 끝나지 않아 끊었지만 대화 $($call.ConversationId)의 최종 응답(단계 #$($recovered.Index), $($recovered.Text.Length)자)이 이미 있어 성공으로 처리합니다. (토큰 사용량은 기록하지 못함)"
-                break
+        $askCount = 0
+        $maxAsks = if ($null -ne $AgyStallMaxAsks) { [int]$AgyStallMaxAsks } else { 2 }
+        $askPrompt = if ($AgyStallAskPrompt) { [string]$AgyStallAskPrompt } else { "직전 실행이 응답 없이 10분 넘게 멈춰 중단했습니다. 대화 기록을 보고 판단하세요. 1) 이미 끝났다면 최종 답변만 그대로 다시 쓰세요. 2) 남은 일이 있으면 이어서 끝까지 진행하고 최종 답변을 쓰세요. 3) 진행할 수 없으면 첫 줄에 [진행 불가] 와 사유를 쓰세요." }
+        $currentArgs = $agyArgs
+        $currentMarker = $marker
+        $currentInitialProbe = ""
+        $call = $null
+        $recoveredDone = $false
+        while ($true) {
+            $call = Invoke-AgyOnce $currentArgs $errFile $RuntimeDir $currentMarker $currentInitialProbe
+            if ($call.StdErr) { $result.StdErr = [string]$call.StdErr }
+
+            # 멈춤·마감으로 끊았는데 agy 가 이미 최종 응답을 대화 기록에 남겼다면(응답을 마친 뒤 프로세스만 안 끝난 경우, 실측 2건) 실패가 아니라 그 응답을 답으로 회수한다.
+            # 'hard'(최대 대기 시간)는 일하는 중이었던 것이라 회수하지 않는다. 사용량(토큰)은 agy 의 JSON 응답에만 있어 이 경우 비워 둔다.
+            if ($call.TimedOut -and @('stall', 'cap') -contains [string]$call.Reason -and $call.ConversationId) {
+                $recovered = $null
+                try { $recovered = Get-AgyFinalResponse (Get-AgyHomeDir) ([string]$call.ConversationId) } catch { $recovered = $null }
+                if ($recovered) {
+                    $result.Success        = $true
+                    $result.Response       = [string]$recovered.Text
+                    $result.ModelUsed      = if ($conversationId) { $knownModel } else { $candidate }
+                    $result.ConversationId = [string]$call.ConversationId
+                    $result.StdErr         = "agy 프로세스가 끝나지 않아 워처가 끊었지만(사유: $($call.Reason)), 대화 기록(단계 #$($recovered.Index))에 최종 응답이 이미 있어 그 내용을 답으로 회수했습니다. 토큰 사용량은 agy 의 JSON 응답이 없어 기록하지 못했습니다."
+                    Log "  회수: agy 가 끝나지 않아 끊었지만 대화 $($call.ConversationId)의 최종 응답(단계 #$($recovered.Index), $($recovered.Text.Length)자)이 이미 있어 성공으로 처리합니다. (토큰 사용량은 기록하지 못함)"
+                    $recoveredDone = $true
+                    break
+                }
             }
+
+            # 유예 시간까지 지나 멈춘 경우: 대화 ID 가 있고 질문 횟수가 최대치(기본 2회) 미만이면 같은 대화에 진행 상황을 묻는다.
+            if ($call.TimedOut -and $call.Reason -eq 'stall' -and $call.ConversationId -and $askCount -lt $maxAsks) {
+                $askCount++
+                $resumeConvId = [string]$call.ConversationId
+                $result.AskCount = $askCount
+                $result.ConversationId = $resumeConvId
+                if ($taskId -and (Get-Command Write-RunningClaim -ErrorAction SilentlyContinue)) {
+                    Write-RunningClaim $taskId @{
+                        probe_state     = "asked"
+                        ask_count       = $askCount
+                        probe_since     = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
+                        conversation_id = $resumeConvId
+                    }
+                }
+                Log ("  멈춤 확인: 이어서 물음 {0}/{1} (대화 {2})" -f $askCount, $maxAsks, $resumeConvId)
+                $resumeArgs = @('--conversation', $resumeConvId, '-p', $askPrompt, '--output-format', 'json')
+                $resumeModel = if ($conversationId) { $knownModel } else { $candidate }
+                if ($resumeModel -and $resumeModel -ne '(continue)' -and $resumeModel -ne '(session)') {
+                    $resumeArgs += @('--model', $resumeModel)
+                }
+                if ($executionMode) { $resumeArgs += @('--mode', $executionMode) }
+                foreach ($dir in @($targetCwd)) { if ($dir) { $resumeArgs += @('--add-dir', [string]$dir) } }
+                if ($skipPerm) { $resumeArgs += '--dangerously-skip-permissions' }
+                $currentArgs = $resumeArgs
+                $currentMarker = ""
+                $currentInitialProbe = "asked"
+                continue
+            }
+            break
         }
+        if ($recoveredDone) { break }
 
         if ($call.TimedOut) {
-
+            $result.TimedOutReason = [string]$call.Reason
+            if ($call.ConversationId) { $result.ConversationId = [string]$call.ConversationId }
             if ($call.Reason -eq 'stall') {
                 $idleMin = [math]::Round($call.IdleSeconds / 60, 1)
-                $result.ErrorMessage = "agy가 $idleMin 분 동안 진행하지 않아 중단했습니다 (멈춤 판정: 마지막 활동 $($call.LastActivity), 대화 ID $($call.ConversationId))"
-                Log "  멈춤: 대화 기록에 새 단계가 $idleMin 분 동안 없어 강제로 중단했습니다 (마지막 활동 $($call.LastActivity), 대화 $($call.ConversationId)). 이 작업은 실패로 기록합니다."
+                $askNote = if ($askCount -gt 0) { " (이어서 물음 ${askCount}/${maxAsks}회 후에도 멈춤)" } else { "" }
+                $result.ErrorMessage = "agy가 $idleMin 분 동안 진행하지 않아 중단했습니다$askNote (멈춤 판정: 마지막 활동 $($call.LastActivity), 대화 ID $($call.ConversationId))"
+                Log "  멈춤: 대화 기록에 새 단계가 $idleMin 분 동안 없어 강제로 중단했습니다$askNote (마지막 활동 $($call.LastActivity), 대화 $($call.ConversationId)). 이 작업은 실패로 기록합니다."
                 if ($call.LastStep) { Log "    $($call.LastStep)"; $result.ErrorMessage += " [$($call.LastStep)]" }
             } else {
                 $capMsg = if ($call.Reason -eq 'hard') { "agy 호출이 최대 대기 시간 $AgyHardTimeoutSeconds 초를 넘겨 중단했습니다 (작업 중이었지만 더 기다리지 않음)" } else { "agy 호출이 $AgyTimeoutSeconds 초를 넘겼고 $($call.CapNote) 멈춘 것으로 보고 중단했습니다 (타임아웃)" }
@@ -1095,9 +1392,16 @@ function Invoke-AgyWithFallback($safePrompt, $targetCwd, [bool]$skipPerm, $errFi
 
         if ($json.status -ne "ERROR" -and $json.response) {
 
-            # 성공
-
-            $result.Success        = $true
+            # 이어서 물은 응답이 "[진행 불가]"로 시작하면 실패로 기록하되 답변은 그대로 보존한다.
+            $respStr = [string]$json.response
+            $isBlocked = ($askCount -gt 0 -and ($respStr.TrimStart() -match '^\[진행 불가\]'))
+            if ($isBlocked) {
+                $result.Success      = $false
+                $result.Blocked      = $true
+                $result.ErrorMessage = $respStr.Trim()
+            } else {
+                $result.Success      = $true
+            }
 
             $result.Response       = $json.response
 
@@ -1117,6 +1421,9 @@ function Invoke-AgyWithFallback($safePrompt, $targetCwd, [bool]$skipPerm, $errFi
             }
 
             $result.ConversationId = [string](Get-JsonField $json @('conversation_id'))
+            if (-not $result.ConversationId -and $askCount -gt 0 -and $call.ConversationId) {
+                $result.ConversationId = [string]$call.ConversationId
+            }
 
             if ($conversationId -and $result.ConversationId -and $result.ConversationId -ne $conversationId) {
 
@@ -1708,9 +2015,8 @@ function Invoke-InboxTaskBody([System.IO.FileInfo]$file) {
             }
             Set-Content -Path $outFile -Value ($guardBanner + $cleanResponse) -Encoding UTF8
 
-            # 이어가는 세션에서 agy 가 보고하는 duration_seconds 는 그 대화를 처음 연 때부터의 누적이라(사이에 쉰 시간 포함) 이번 호출의 시간이 아니다.
-            # 그래서 이어가는 호출은 워처가 잰 이번 호출의 시간을 쓴다.
-            $useAgyDuration = [bool]$agyResult.AgyDuration -and -not $conversationId
+            # 이어가는 세션이나 멈춤 확인 후 이어서 물은 실행에서 agy 가 보고하는 duration_seconds 는 누적일 수 있으므로 워처 측정 시간을 쓴다.
+            $useAgyDuration = [bool]$agyResult.AgyDuration -and -not $conversationId -and ([int]$agyResult.AskCount -le 0)
             $elapsedForLog = if ($useAgyDuration) { [math]::Round([double]$agyResult.AgyDuration, 1) } else { $agyResult.ElapsedSec }
             $timeSrc = if ($useAgyDuration) { "agy 자체 보고" } elseif ($conversationId) { "워처 측정(이어가는 세션이라 agy 보고는 누적값)" } else { "워처 측정(폴백 시도 포함 총 시간)" }
             $agyIn = $agyResult.InTok
@@ -1836,12 +2142,49 @@ function Invoke-InboxTaskBody([System.IO.FileInfo]$file) {
             if ($sessionName -and $agyResult.ConversationId) {
                 Write-Session -Name $sessionName -ConversationId $agyResult.ConversationId -Cwd $targetCwds -Model $agyResult.ModelUsed
             }
+        } elseif ($agyResult.Blocked) {
+            # 멈춤 확인 후 이어서 물었을 때 "[진행 불가]" 로 답한 경우: 상태는 실패(ERROR)로 기록하되 답변 전문과 토큰 사용량은 그대로 남긴다.
+            $blockedResp = [string]$agyResult.Response
+            Set-Content -Path $outFile -Value ($guardBanner + $blockedResp) -Encoding UTF8
+            Log ("실패([진행 불가]): {0}" -f (($blockedResp -split "`r?`n", 2)[0]))
+            $recElapsed = $agyResult.ElapsedSec
+            $recModel   = $agyResult.ModelUsed
+            $agyIn = $agyResult.InTok; $agyOut = $agyResult.OutTok; $agyThink = $agyResult.ThinkTok; $agyTot = $agyResult.TotTok
+            $cumInTok = $agyIn; $cumOutTok = $agyOut; $cumThinkTok = $agyThink; $cumTotTok = $agyTot
+            $recInTok = $agyIn; $recOutTok = $agyOut; $recThinkTok = $agyThink; $recTotTok = $agyTot
+            $usageBasis = "own"
+            if ([bool]($sessionName -or $conversationId) -and $effectiveSessionId) {
+                $tPath = Get-AgyTranscriptPath (Get-AgyHomeDir) ([string]$effectiveSessionId)
+                $compactT = if ($tPath) { Join-Path (Split-Path -Parent $tPath) "transcript.jsonl" } else { $null }
+                $actualTPath = if ($compactT -and (Test-Path -LiteralPath $compactT)) { $compactT } elseif ($tPath -and (Test-Path -LiteralPath $tPath)) { $tPath } else { $null }
+                if ($actualTPath -and (Get-Command Update-AgyUsageState -ErrorAction SilentlyContinue) -and (Get-Command Get-AgyUsageSummary -ErrorAction SilentlyContinue)) {
+                    try {
+                        $tState = New-AgyUsageState $actualTPath
+                        Update-AgyUsageState $tState
+                        $sinceB = (Get-Date).AddSeconds(-([double]$agyResult.ElapsedSec + 5))
+                        $tSum = Get-AgyUsageSummary $tState 0 $sinceB
+                        if ($tSum -and $tSum.Turns -gt 0 -and ($tSum.Input -gt 0 -or $tSum.Output -gt 0 -or $tSum.Total -gt 0)) {
+                            $recInTok = $tSum.Input; $recOutTok = $tSum.Output; $recTotTok = $tSum.Total
+                            $recThinkTok = if ($tSum.Thinking -gt 0) { $tSum.Thinking } else { $null }
+                            $usageBasis = "delta"
+                        }
+                    } catch {}
+                }
+            }
+            Write-UsageRow $baseName $recModel $recAttempts $recTried $recInTok $recOutTok $recThinkTok $recTotTok $recElapsed "ERROR" $sessionName $effectiveSessionId $cumInTok $cumOutTok $cumThinkTok $cumTotTok $usageBasis
         } else {
             $failMsg = "agy 실행 실패 (시도한 모델: $triedStr) - $($agyResult.ErrorMessage)"
             if ($modelCheck.Kind -eq "model" -and -not $conversationId) { $failMsg += " [@model 로 지정한 모델이라 다른 모델로 자동 전환하지 않았습니다]" }
             if ($modelTier -and -not $conversationId) {
                 $nextTier = Get-AgyEscalationTier (Get-WatcherModelConfig) $modelTier
                 if ($nextTier) { $failMsg += " [단계 $modelTier. 한 단계 올려 다시 보낼 곳: $nextTier]" } else { $failMsg += " [단계 $modelTier]" }
+            }
+            if ($agyResult.TimedOutReason -eq 'stall' -and $effectiveSessionId -and (Get-Command Get-AgyCancelledWorkText -ErrorAction SilentlyContinue)) {
+                try {
+                    $stallSince = (Get-Date).AddSeconds(-([double]$agyResult.ElapsedSec + 5))
+                    $workText = Get-AgyCancelledWorkText (Get-AgyHomeDir) ([string]$effectiveSessionId) $stallSince
+                    if ($workText) { $failMsg = $failMsg + "`n`n" + $workText }
+                } catch {}
             }
 
             Set-Content -Path $outFile -Value ($guardBanner + $failMsg) -Encoding UTF8

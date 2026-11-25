@@ -46,6 +46,9 @@ namespace AgyUsage
         public long Offset;
         public int Calls, DurSec;
         public long In, Cc, Cr, Out;
+        // 본 세션에서 가장 컸던 한 호출의 컨텍스트(입력 + 캐시 쓰기 + 캐시 읽기)와 그 호출의 모델
+        public long CtxTokens;
+        public string CtxModel = "";
         public bool HasTool, Auto;
         public List<string> TaskIds = new List<string>();
         internal Dictionary<string, long[]> Usage = new Dictionary<string, long[]>();
@@ -233,6 +236,9 @@ namespace AgyUsage
                     if (string.IsNullOrEmpty(effort)) { effort = S(o, "effort"); }
                     if (!string.IsNullOrEmpty(effort)) { effort = effort.Trim().ToLowerInvariant(); int ec; cur.Efforts.TryGetValue(effort, out ec); cur.Efforts[effort] = ec + 1; }
                 }
+                long[] fin = cur.Usage[id];
+                long ctxNow = fin[0] + fin[1] + fin[2];
+                if (ctxNow > cur.CtxTokens) { cur.CtxTokens = ctxNow; cur.CtxModel = model; }
                 IEnumerable blocks = (content is string) ? null : content as IEnumerable;
                 if (blocks != null)
                 {
@@ -442,9 +448,10 @@ function Invoke-AgyUsageCollect([string]$DbPath, [string]$ProjectsDir, [string]$
                 elseif ($res.Questions.Count -gt 0) { [void]$db.Execute("DELETE FROM usage_questions WHERE session = ? AND q_ts >= ?", [object[]]@($session, [string]$res.Questions[0].QTs)) }
                 foreach ($q in $kept) {
                     $mode = if ($q.TaskIds.Count -gt 0) { 'delegate' } elseif ($q.HasTool) { 'direct' } else { 'chat' }
-                    [void]$db.Execute("INSERT OR REPLACE INTO usage_questions (session, q_ts, project, mode, claude_model, claude_effort, dur_sec, calls, in_tokens, cc_tokens, cr_tokens, out_tokens, task_ids, preview, auto, end_ts) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    [void]$db.Execute("INSERT OR REPLACE INTO usage_questions (session, q_ts, project, mode, claude_model, claude_effort, dur_sec, calls, in_tokens, cc_tokens, cr_tokens, out_tokens, task_ids, preview, auto, end_ts, ctx_tokens, ctx_model) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         [object[]]@($session, [string]$q.QTs, [string]$q.Project, $mode, [string]$q.Model, [string]$q.Effort, [long]$q.DurSec, [long]$q.Calls, [long]$q.In, [long]$q.Cc, [long]$q.Cr, [long]$q.Out,
-                            (@($q.TaskIds) -join ','), [string]$q.Preview, $(if ($q.Auto) { [long]1 } else { [long]0 }), [string]$q.EndTs))
+                            (@($q.TaskIds) -join ','), [string]$q.Preview, $(if ($q.Auto) { [long]1 } else { [long]0 }), [string]$q.EndTs,
+                            $(if ($q.CtxTokens -gt 0) { [long]$q.CtxTokens } else { $null }), $(if ($q.CtxModel) { [string]$q.CtxModel } else { $null })))
                 }
                 [void]$db.Execute("INSERT OR REPLACE INTO usage_files (path, offset, mtime) VALUES (?,?,?)", [object[]]@($filePath, [long]$res.NextOffset, $stamp))
             } | Out-Null
@@ -501,6 +508,9 @@ function Invoke-AgyUsageCollect([string]$DbPath, [string]$ProjectsDir, [string]$
                 [object[]]@([string]$sum.Models, [long]$sum.Tokens, [long]$sum.Sec, [long]$sum.Ok, [long]$sum.Fail, [long]$sum.Cancel, [string]$r['session'], [string]$r['q_ts']))
         }
 
+        # 4.5) 끝난 위임 중 task_models 가 비어 있고 대화 기록이 아직 남아 있는 건을 한 번씩 채운다(멱등)
+        try { [void](Invoke-AgyTaskModelsBackfillWithDb $db) } catch {}
+
         # 5) 보관: 90일 지난 행과, 더는 보지 않는 파일의 위치 기록을 지운다
         [void]$db.Execute("DELETE FROM usage_questions WHERE q_ts < ?", [object[]]@($cutIso))
         [void]$db.Execute("DELETE FROM usage_notes WHERE noted_at < ?", [object[]]@($cutIso))
@@ -551,17 +561,165 @@ function ConvertTo-AgyUsageAgyShort([string]$Models) {
     return ($parts -join ', ')
 }
 
+# 이미 열린 DB 연결에서 task_models 가 없는 완료 작업을 대화 기록으로 채운다(세션당 한 번만 읽고 멱등).
+function Invoke-AgyTaskModelsBackfillWithDb($Db, [string]$AgyHome = "") {
+    $res = @{ Checked = 0; Backfilled = 0; Rows = 0 }
+    if ($null -eq $Db) { return $res }
+    if (-not (Get-Command New-AgyUsageState -ErrorAction SilentlyContinue)) {
+        $progLib = Join-Path $script:AgyUsageScriptDir "agy-progress.ps1"
+        if ($script:AgyUsageScriptDir -and (Test-Path -LiteralPath $progLib)) { try { . $progLib } catch {} }
+    }
+    if (-not (Get-Command New-AgyUsageState -ErrorAction SilentlyContinue) -or -not (Get-Command Save-TaskModels -ErrorAction SilentlyContinue)) {
+        return $res
+    }
+    $homeDir = if ($AgyHome) {
+        $AgyHome
+    } elseif (Get-Command Get-AgyHomeDir -ErrorAction SilentlyContinue) {
+        Get-AgyHomeDir
+    } else {
+        Join-Path $env:USERPROFILE ".gemini\antigravity-cli"
+    }
+
+    $sql = "SELECT t.task_id, t.session_id, t.timestamp, t.elapsed_sec, t.process FROM tasks t LEFT JOIN task_models tm ON tm.task_id = t.task_id WHERE t.answer IS NOT NULL AND t.session_id IS NOT NULL AND t.session_id <> '' AND (tm.task_id IS NULL OR t.context_tokens IS NULL)"
+    $candidates = @($Db.Query($sql, $null))
+    $res.Checked = $candidates.Count
+    if ($candidates.Count -eq 0) { return $res }
+
+    $bySess = @{}
+    foreach ($c in $candidates) {
+        $sid = [string]$c['session_id']
+        if (-not $sid) { continue }
+        if (-not $bySess.ContainsKey($sid)) { $bySess[$sid] = New-Object System.Collections.ArrayList }
+        [void]$bySess[$sid].Add($c)
+    }
+
+    foreach ($sid in $bySess.Keys) {
+        try {
+            $tp = if (Get-Command Get-AgyTranscriptUsageFile -ErrorAction SilentlyContinue) {
+                Get-AgyTranscriptUsageFile $homeDir $sid
+            } else {
+                $cand = Get-AgyTranscriptPath $homeDir $sid
+                if ($cand -and (Test-Path -LiteralPath $cand -PathType Leaf)) { $cand } else { $null }
+            }
+            if (-not $tp) { continue }
+            $state = New-AgyUsageState $tp
+            Update-AgyUsageState $state
+            foreach ($t in $bySess[$sid]) {
+                try {
+                    $tid = [string]$t['task_id']
+                    if (-not $tid) { continue }
+                    $range = if (Get-Command Resolve-AgyTaskStepRange -ErrorAction SilentlyContinue) {
+                        Resolve-AgyTaskStepRange $state $t['process'] $t
+                    } else {
+                        @{ MinStep = 0; MaxStep = 0 }
+                    }
+                    $sum = Get-AgyUsageSummary $state $range.MaxStep $null $range.MinStep
+                    if ($null -ne $sum) {
+                        # 컨텍스트 크기(tasks.context_tokens)는 비어 있을 때만 채운다
+                        if (Get-Command Save-TaskContext -ErrorAction SilentlyContinue) { try { [void](Save-TaskContext $Db $tid $sum.Context) } catch {} }
+                        if (@($sum.ByModel).Count -gt 0 -and (Save-TaskModels $Db $tid $sum.ByModel)) {
+                            $res.Backfilled++
+                            $res.Rows += @($sum.ByModel).Count
+                        }
+                    }
+                } catch {}
+            }
+        } catch {}
+    }
+    return $res
+}
+
+# DB 경로를 받아 task_models 를 백필한다(대화 기록이 남아 있는 완료 작업만, 멱등).
+function Invoke-AgyTaskModelsBackfill([string]$DbPath, [string]$AgyHome = "") {
+    $res = @{ Checked = 0; Backfilled = 0; Rows = 0 }
+    if (-not $DbPath -or -not (Test-Path -LiteralPath $DbPath -PathType Leaf)) { return $res }
+    $db = Open-AgyDb $DbPath
+    try {
+        return (Invoke-AgyTaskModelsBackfillWithDb $db $AgyHome)
+    } finally {
+        $db.Dispose()
+    }
+}
+
 # /api/usage-stats 의 본문(JSON 글자). 기간은 UTC 기록 시각끼리 비교하고, 일별 묶음만 이 PC 의 현지 날짜로 한다.
-function Get-AgyUsageStatsJson([string]$DbPath, [int]$Days = 7, [bool]$Collecting = $false, [int]$RowLimit = 200) {
+# 모델 컨텍스트 창 크기: models.json 의 context_window({claude: {키: 토큰|null}, agy: {...}}) 를 models.local.json 이 키 단위로 덮어쓴다.
+# 반환: @{ claude = @{키 = 토큰}; agy = @{키 = 토큰} } (null · 잘못된 값은 "모름" 이라 넣지 않는다)
+function Get-AgyContextWindowConfig {
+    $cfgDir = ""
+    if ($env:AGY_MODELS_CONFIG_DIR) { $cfgDir = [string]$env:AGY_MODELS_CONFIG_DIR }
+    else {
+        $c1 = Join-Path (Split-Path (Split-Path $script:AgyUsageScriptDir -Parent) -Parent) "config"
+        $c2 = Join-Path $env:USERPROFILE ".samjil\delegate-agy\config"
+        if (Test-Path -LiteralPath (Join-Path $c1 "models.json") -PathType Leaf) { $cfgDir = $c1 }
+        elseif (Test-Path -LiteralPath (Join-Path $c2 "models.json") -PathType Leaf) { $cfgDir = $c2 }
+        else { $cfgDir = $c1 }
+    }
+    $res = @{ claude = @{}; agy = @{} }
+    foreach ($name in @("models.json", "models.local.json")) {
+        $p = Join-Path $cfgDir $name
+        if (-not (Test-Path -LiteralPath $p -PathType Leaf)) { continue }
+        try {
+            $raw = [System.IO.File]::ReadAllText($p, [System.Text.Encoding]::UTF8).TrimStart([char]0xFEFF)
+            if (-not $raw.Trim()) { continue }
+            $obj = ConvertFrom-Json -InputObject $raw -ErrorAction Stop
+            if ($null -eq $obj -or -not $obj.PSObject.Properties["context_window"] -or $null -eq $obj.context_window) { continue }
+            foreach ($side in @("claude", "agy")) {
+                $sp = $obj.context_window.PSObject.Properties[$side]
+                if ($null -eq $sp -or $null -eq $sp.Value) { continue }
+                foreach ($prop in $sp.Value.PSObject.Properties) {
+                    $key = ([string]$prop.Name).Trim().ToLowerInvariant()
+                    if (-not $key) { continue }
+                    $v = $prop.Value
+                    $n = [double]0
+                    if ($null -eq $v -or $v -is [bool] -or -not [double]::TryParse(([string]$v).Trim(), [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$n) -or $n -le 0) {
+                        if ($res[$side].ContainsKey($key)) { [void]$res[$side].Remove($key) }
+                        continue
+                    }
+                    $res[$side][$key] = [int64]$n
+                }
+            }
+        } catch {}
+    }
+    return $res
+}
+
+# 모델 이름에 들어 있는 키 가운데 가장 긴 것의 창 크기. 없거나 모르면 default, 그것도 없으면 $null.
+function Resolve-AgyContextWindow($Map, [string]$ModelId) {
+    if ($null -eq $Map) { return $null }
+    $id = ([string]$ModelId).ToLowerInvariant()
+    $best = ""
+    if ($id) { foreach ($k in $Map.Keys) { if ($k -ne "default" -and $id.Contains($k) -and $k.Length -gt $best.Length) { $best = $k } } }
+    if ($best) { return [int64]$Map[$best] }
+    if ($Map.ContainsKey("default")) { return [int64]$Map["default"] }
+    return $null
+}
+
+function Get-AgyUsageStatsJson([string]$DbPath, [int]$Days = 7, [bool]$Collecting = $false, [int]$RowLimit = 200, [string]$RuntimeDir = "", [string]$ProjectsDir = "", [datetime]$NowUtc = [datetime]::MinValue) {
     if (@(7, 30, 90) -notcontains $Days) { $Days = 7 }
+    $evalNow = if ($NowUtc -eq [datetime]::MinValue) { [datetime]::UtcNow } else { $NowUtc.ToUniversalTime() }
+
+    if (-not (Get-Command Get-LimitsEstimateAtTime -ErrorAction SilentlyContinue)) {
+        $leCands = @(
+            (Join-Path (Split-Path (Split-Path (Split-Path $script:AgyUsageScriptDir -Parent) -Parent) -Parent) "viewer\limits-estimate.ps1"),
+            (Join-Path $env:USERPROFILE ".samjil\viewer\limits-estimate.ps1")
+        )
+        foreach ($lc in $leCands) {
+            if ($lc -and (Test-Path -LiteralPath $lc -PathType Leaf)) {
+                try { . $lc; break } catch {}
+            }
+        }
+    }
+
     $rows = @()
     $updated = $null
     $taskInfo = @{}
+    $taskModelsMap = @{}
+    $claudeUsageMap = @{}
     if (Test-Path -LiteralPath $DbPath) {
         $db = Open-AgyDb $DbPath
         try {
             $updated = Get-AgyMeta $db 'usage_updated_at'
-            $since = ConvertTo-AgyUsageIso ([DateTime]::UtcNow.AddDays(-$Days))
+            $since = ConvertTo-AgyUsageIso ($evalNow.AddDays(-$Days))
             $rows = @($db.Query("SELECT * FROM usage_questions WHERE q_ts >= ? ORDER BY q_ts DESC", [object[]]@($since)))
             # 위임 질문의 작업별 모델 · 결과 · 걸린 시간(화면에서 작업을 펼칠 때 칩으로 보인다)
             $allIds = New-Object System.Collections.ArrayList
@@ -569,12 +727,108 @@ function Get-AgyUsageStatsJson([string]$DbPath, [int]$Days = 7, [bool]$Collectin
             for ($i = 0; $i -lt $allIds.Count; $i += 500) {
                 $chunk = @($allIds[$i..([math]::Min($i + 499, $allIds.Count - 1))])
                 $marks = (@($chunk | ForEach-Object { '?' }) -join ',')
-                foreach ($t in $db.Query("SELECT task_id, model, status, elapsed_sec, tried_models FROM tasks WHERE task_id IN ($marks)", [object[]]$chunk)) {
+                foreach ($t in $db.Query("SELECT task_id, model, status, elapsed_sec, tried_models, input_tokens, output_tokens, total_tokens, timestamp, context_tokens FROM tasks WHERE task_id IN ($marks)", [object[]]$chunk)) {
                     $taskInfo[[string]$t['task_id']] = $t
                 }
             }
+            # 위임 카드가 보이는 Claude 토큰(본 세션 · 서브 합계)은 claude_usage 에 얼려 둔 JSON 을 쓴다
+            for ($i = 0; $i -lt $allIds.Count; $i += 500) {
+                $chunk = @($allIds[$i..([math]::Min($i + 499, $allIds.Count - 1))])
+                $marks = (@($chunk | ForEach-Object { '?' }) -join ',')
+                try {
+                    foreach ($cu in $db.Query("SELECT task_id, json FROM claude_usage WHERE task_id IN ($marks)", [object[]]$chunk)) {
+                        if ($cu['json']) { try { $claudeUsageMap[[string]$cu['task_id']] = (ConvertFrom-Json -InputObject ([string]$cu['json'])) } catch {} }
+                    }
+                } catch {}
+            }
+            if ($allIds.Count -gt 0 -and (Get-Command Get-TaskModelsForIds -ErrorAction SilentlyContinue)) {
+                $taskModelsMap = Get-TaskModelsForIds $db ([string[]]@($allIds.ToArray()))
+            }
         } finally { $db.Dispose() }
     }
+
+    $agyInternal = $null
+    if ((Test-Path -LiteralPath $DbPath) -and (Get-Command Get-AgyTaskEstimatesInternal -ErrorAction SilentlyContinue)) {
+        try { $agyInternal = Get-AgyTaskEstimatesInternal $DbPath $RuntimeDir } catch { $agyInternal = $null }
+    }
+    $claudeInternal = $null
+    if (($RuntimeDir -or $ProjectsDir) -and (Get-Command Get-ClaudeLimitsEstimatesInternal -ErrorAction SilentlyContinue)) {
+        try { $claudeInternal = Get-ClaudeLimitsEstimatesInternal $RuntimeDir $ProjectsDir $evalNow } catch { $claudeInternal = $null }
+    }
+    $agyCostCfg = if (Get-Command Get-AgyQuotaCostConfig -ErrorAction SilentlyContinue) { Get-AgyQuotaCostConfig } else { $null }
+    $claudeCostCfg = if (Get-Command Get-ClaudeQuotaCostConfig -ErrorAction SilentlyContinue) { Get-ClaudeQuotaCostConfig } else { $null }
+    $ctxWinCfg = Get-AgyContextWindowConfig
+
+    $parseTsUtc = {
+        param([string]$s)
+        if (-not $s) { return $null }
+        $dt = [datetime]::MinValue
+        if ($s -match '(Z|[+-]\d{2}:?\d{2})$') {
+            $st = [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal
+            if ([datetime]::TryParse($s, [System.Globalization.CultureInfo]::InvariantCulture, $st, [ref]$dt)) { return $dt.ToUniversalTime() }
+        } else {
+            if ([datetime]::TryParse($s, [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeLocal, [ref]$dt)) { return $dt.ToUniversalTime() }
+        }
+        return $null
+    }
+    $tryDblVal = {
+        param($v)
+        if ($null -eq $v -or ($v -is [bool])) { return @{ Ok = $false; Val = 0.0 } }
+        $d = 0.0
+        if ([double]::TryParse(([string]$v).Trim(), [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$d)) {
+            if (-not [double]::IsNaN($d) -and -not [double]::IsInfinity($d)) { return @{ Ok = $true; Val = $d } }
+        }
+        return @{ Ok = $false; Val = 0.0 }
+    }
+    $buildQuotaSide = {
+        param([double]$CostUnits, [long]$RawTokens, $AtEst, $MeasuredObj = $null)
+        if ($null -eq $AtEst) { return $null }
+        $side = [ordered]@{
+            raw_tokens = $RawTokens
+            cost_units = [math]::Round($CostUnits, 2)
+        }
+        $hasAny = $false
+        if ($null -ne $AtEst.five_hour -and $AtEst.five_hour.est_cost -gt 0) {
+            $fhSrc = $AtEst.five_hour
+            $fh = [ordered]@{
+                est         = [long]$fhSrc.est
+                est_cost    = [long]$fhSrc.est_cost
+                five_points = [int]$fhSrc.five_points
+                share_pct   = $(if ($CostUnits -gt 0.0) { [math]::Round((100.0 * $CostUnits / [double]$fhSrc.est_cost), 2) } else { 0.0 })
+            }
+            if ($fhSrc.Contains("initial") -and $fhSrc.initial) { $fh["initial"] = $true }
+            if ($fhSrc.Contains("backfill") -and $fhSrc.backfill) {
+                $fh["backfill"] = $true
+                if ($fhSrc.Contains("estimated_at")) { $fh["estimated_at"] = [string]$fhSrc.estimated_at }
+            }
+            $side["five_hour"] = $fh
+            $hasAny = $true
+        }
+        if ($null -ne $AtEst.weekly -and $AtEst.weekly.est_cost -gt 0) {
+            $wkSrc = $AtEst.weekly
+            $wk = [ordered]@{
+                est       = [long]$wkSrc.est
+                est_cost  = [long]$wkSrc.est_cost
+                share_pct = $(if ($CostUnits -gt 0.0) { [math]::Round((100.0 * $CostUnits / [double]$wkSrc.est_cost), 2) } else { 0.0 })
+            }
+            if ($wkSrc.Contains("backfill") -and $wkSrc.backfill) {
+                $wk["backfill"] = $true
+                if ($wkSrc.Contains("estimated_at")) { $wk["estimated_at"] = [string]$wkSrc.estimated_at }
+            }
+            $side["weekly"] = $wk
+            $hasAny = $true
+        }
+        if ($null -ne $AtEst.sessions) {
+            $side["sessions"] = $AtEst.sessions
+            $hasAny = $true
+        }
+        if ($null -ne $MeasuredObj) {
+            $side["measured"] = $MeasuredObj
+        }
+        if (-not $hasAny) { return $null }
+        return $side
+    }
+
     $items = New-Object System.Collections.ArrayList
     foreach ($r in $rows) {
         $claude = ConvertTo-AgyUsageShortModel ([string]$r['claude_model'])
@@ -593,7 +847,8 @@ function Get-AgyUsageStatsJson([string]$DbPath, [int]$Days = 7, [bool]$Collectin
         } else { $(if ($claudeLabel) { $claudeLabel } else { '?' }) }
         # 각 위임 작업 중 한도 · 과부하로 앞 모델이 실패하고 다른 모델로 넘어간 경우, 그 실패한 모델의 짧은 이름 목록(성공한 작업만 센다)
         $failedList = New-Object System.Collections.ArrayList
-        foreach ($tid in @(([string]$r['task_ids'] -split ',') | Where-Object { $_ })) {
+        $rowTaskIds = @(([string]$r['task_ids'] -split ',') | Where-Object { $_ })
+        foreach ($tid in $rowTaskIds) {
             $ti = $taskInfo[$tid]
             if ($ti -and ([string]$ti['status']).ToUpperInvariant() -eq 'OK' -and $ti['tried_models']) {
                 $rawChain = @(([string]$ti['tried_models']) -split '\s*->\s*' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
@@ -615,19 +870,188 @@ function Get-AgyUsageStatsJson([string]$DbPath, [int]$Days = 7, [bool]$Collectin
             }
         }
         $agyFailed = [string[]]@($failedList | Select-Object -Unique)
+        $qRealMap = @{}
+        foreach ($tid in $rowTaskIds) {
+            if ($taskModelsMap.ContainsKey($tid)) {
+                foreach ($tm in @($taskModelsMap[$tid])) {
+                    $mName = [string]$tm.model
+                    if (-not $mName) { continue }
+                    if (-not $qRealMap.ContainsKey($mName)) {
+                        $qRealMap[$mName] = @{ model = $mName; input = [int64]0; cache = [int64]0; output = [int64]0; thinking = [int64]0; total = [int64]0; steps = 0 }
+                    }
+                    $qr = $qRealMap[$mName]
+                    $qr.input += [int64]$tm.input
+                    $qr.cache += [int64]$tm.cache
+                    $qr.output += [int64]$tm.output
+                    $qr.thinking += [int64]$tm.thinking
+                    $qr.total += ([int64]$tm.input + [int64]$tm.output)
+                    $qr.steps += [int]$tm.steps
+                }
+            }
+        }
+        $qRealModels = @($qRealMap.Values | Sort-Object -Property @{ Expression = { $_.total }; Descending = $true }, @{ Expression = { $_.model }; Ascending = $true } | ForEach-Object {
+            [pscustomobject][ordered]@{
+                model    = [string]$_.model
+                short    = (ConvertTo-AgyUsageAgyShort ([string]$_.model))
+                total    = [int64]$_.total
+                input    = [int64]$_.input
+                cache    = [int64]$_.cache
+                output   = [int64]$_.output
+                thinking = [int64]$_.thinking
+                steps    = [int]$_.steps
+            }
+        })
+
+        $qIn = [long]$r['in_tokens']; $qCc = [long]$r['cc_tokens']; $qCr = [long]$r['cr_tokens']; $qOut = [long]$r['out_tokens']
+        $qClaudeTok = $qIn + $qCc + $qOut
+        $qClaudeModels = if ($qClaudeTok -gt 0) {
+            @([pscustomobject][ordered]@{
+                model = [string]$r['claude_model']
+                short = $(if ($claude) { $claude } else { 'Claude' })
+                total = [int64]$qClaudeTok
+            })
+        } else { @() }
+
+        # 질문 하나의 모든 토큰(위임 카드와 같은 항목): agy 는 작업별 실제 모델 합, Claude 는 본 세션 · 서브
+        $sumU = { param($List) $o = [ordered]@{ total = [int64]0; calls = [int64]0; input = [int64]0; cache_write = [int64]0; cache_read = [int64]0; output = [int64]0 }
+            foreach ($u in @($List)) { if ($null -eq $u) { continue }
+                foreach ($pair in @(@('total','total'), @('calls','calls'), @('input','in'), @('cache_write','cache_write'), @('cache_read','cache_read'), @('output','out'))) {
+                    $pv = $u.PSObject.Properties[$pair[1]]; if ($null -ne $pv -and $null -ne $pv.Value) { $o[$pair[0]] += [int64]$pv.Value } } }
+            return $o }
+        $tkMainList = New-Object System.Collections.ArrayList; $tkSubList = New-Object System.Collections.ArrayList
+        foreach ($tid in $rowTaskIds) {
+            if (-not $claudeUsageMap.ContainsKey($tid)) { continue }
+            $cuo = $claudeUsageMap[$tid]
+            if ($null -ne $cuo.PSObject.Properties['main'] -and $null -ne $cuo.main) { [void]$tkMainList.Add($cuo.main) }
+            if ($null -ne $cuo.PSObject.Properties['sub'] -and $null -ne $cuo.sub) { [void]$tkSubList.Add($cuo.sub) }
+        }
+        $tkMain = if ($tkMainList.Count -gt 0) { & $sumU $tkMainList } else {
+            [ordered]@{ total = [int64]($qIn + $qCc + $qOut); calls = [int64]$r['calls']; input = [int64]$qIn; cache_write = [int64]$qCc; cache_read = [int64]$qCr; output = [int64]$qOut } }
+        $tkSub = if ($tkSubList.Count -gt 0) { & $sumU $tkSubList } else { $null }
+        $tkHasSub = ($null -ne $tkSub -and ($tkSub.total -gt 0 -or $tkSub.calls -gt 0))
+        # 컨텍스트: 본 세션은 수집기가 질문마다 저장한 값, 서브는 위임별 Claude 토큰 JSON 의 가장 큰 호출
+        $mkCtx = { param([int64]$Tok, [string]$Model, $WinMap)
+            if ($Tok -le 0) { return $null }
+            return [pscustomobject][ordered]@{ tokens = $Tok; model = $Model; window = (Resolve-AgyContextWindow $WinMap $Model) } }
+        $ctxMainTok = [int64]0
+        if ($null -ne $r['ctx_tokens'] -and -not ($r['ctx_tokens'] -is [System.DBNull])) { [int64]::TryParse([string]$r['ctx_tokens'], [ref]$ctxMainTok) | Out-Null }
+        $ctxMainModel = if ($null -ne $r['ctx_model'] -and -not ($r['ctx_model'] -is [System.DBNull])) { [string]$r['ctx_model'] } else { "" }
+        $ctxSubTok = [int64]0; $ctxSubModel = ""
+        foreach ($sj in $tkSubList) {
+            $sc = $sj.PSObject.Properties['ctx']
+            if ($null -ne $sc -and $null -ne $sc.Value -and [int64]$sc.Value -gt $ctxSubTok) {
+                $ctxSubTok = [int64]$sc.Value
+                $sm = $sj.PSObject.Properties['ctx_model']; $ctxSubModel = if ($null -ne $sm -and $null -ne $sm.Value) { [string]$sm.Value } else { "" }
+            }
+        }
+        $tkClaudeCtx = [pscustomobject][ordered]@{ main = (& $mkCtx $ctxMainTok $ctxMainModel $ctxWinCfg.claude); sub = (& $mkCtx $ctxSubTok $ctxSubModel $ctxWinCfg.claude) }
+        $tkClaude = [ordered]@{
+            context     = $tkClaudeCtx
+            total       = [int64]($tkMain.total + $(if ($tkHasSub) { $tkSub.total } else { 0 }))
+            input       = [int64]($tkMain.input + $(if ($tkHasSub) { $tkSub.input } else { 0 }))
+            cache_write = [int64]($tkMain.cache_write + $(if ($tkHasSub) { $tkSub.cache_write } else { 0 }))
+            cache_read  = [int64]($tkMain.cache_read + $(if ($tkHasSub) { $tkSub.cache_read } else { 0 }))
+            output      = [int64]($tkMain.output + $(if ($tkHasSub) { $tkSub.output } else { 0 }))
+            main        = [pscustomobject]$tkMain
+            sub         = $(if ($tkHasSub) { [pscustomobject]$tkSub } else { $null })
+        }
+        $tkAgyModels = @($qRealModels | ForEach-Object { [pscustomobject][ordered]@{ model = $_.model; input = $_.input; cache = $_.cache; output = $_.output; thinking = $_.thinking; total = $_.total } })
+        $tkAgyIn = [int64]0; $tkAgyCache = [int64]0; $tkAgyOut = [int64]0; $tkAgyThink = [int64]0
+        foreach ($m in $tkAgyModels) { $tkAgyIn += $m.input; $tkAgyCache += $m.cache; $tkAgyOut += $m.output; $tkAgyThink += $m.thinking }
+        if ($tkAgyModels.Count -eq 0 -and $rowTaskIds.Count -gt 0) {
+            foreach ($tid in $rowTaskIds) {
+                $ti = $taskInfo[$tid]; if (-not $ti) { continue }
+                $fi = & $tryDblVal $ti['input_tokens']; $fo = & $tryDblVal $ti['output_tokens']
+                if ($fi.Ok -and $fi.Val -gt 0) { $tkAgyIn += [int64]$fi.Val }
+                if ($fo.Ok -and $fo.Val -gt 0) { $tkAgyOut += [int64]$fo.Val }
+            }
+        }
+        # 컨텍스트 = 이 질문의 위임들 가운데 가장 컸던 값(없으면 null)
+        $tkAgyCtx = $null; $tkAgyCtxModel = ""
+        foreach ($tid in $rowTaskIds) {
+            $ti = $taskInfo[$tid]; if (-not $ti) { continue }
+            $cv = $ti['context_tokens']
+            if ($null -ne $cv -and -not ($cv -is [System.DBNull])) {
+                $cl = [int64]0
+                if ([int64]::TryParse([string]$cv, [ref]$cl) -and $cl -gt 0 -and ($null -eq $tkAgyCtx -or $cl -gt $tkAgyCtx)) { $tkAgyCtx = $cl; $tkAgyCtxModel = [string]$ti['model'] }
+            }
+        }
+        $tkAgy = [ordered]@{
+            total = [int64]($tkAgyIn + $tkAgyOut); input = $tkAgyIn; cache = $tkAgyCache; output = $tkAgyOut; thinking = $tkAgyThink
+            context = $tkAgyCtx; context_model = $(if ($null -ne $tkAgyCtx) { $tkAgyCtxModel } else { $null })
+            context_window = $(if ($null -ne $tkAgyCtx) { Resolve-AgyContextWindow $ctxWinCfg.agy $tkAgyCtxModel } else { $null })
+            models = [object[]]$tkAgyModels
+        }
+        $tokensObj = [pscustomobject][ordered]@{ agy = [pscustomobject]$tkAgy; claude = [pscustomobject]$tkClaude }
+
+        $qEndUtc = & $parseTsUtc ([string]$r['end_ts'])
+        if ($null -eq $qEndUtc) { $qEndUtc = & $parseTsUtc ([string]$r['q_ts']) }
+        if ($null -eq $qEndUtc) { $qEndUtc = $evalNow }
+
+        $qQuota = [ordered]@{}
+        if ($null -ne $claudeInternal -and (Get-Command Get-LimitsEstimateAtTime -ErrorAction SilentlyContinue)) {
+            $cRawAll = $qIn + $qCc + $qCr + $qOut
+            $cCost = if ($cRawAll -gt 0 -and $null -ne $claudeCostCfg -and (Get-Command Get-ClaudeMessageCostUnits -ErrorAction SilentlyContinue)) {
+                Get-ClaudeMessageCostUnits ([string]$r['claude_model']) ([double]$qIn) ([double]$qCc) ([double]$qCr) ([double]$qOut) $claudeCostCfg
+            } else { 0.0 }
+            $cAtEst = Get-LimitsEstimateAtTime $claudeInternal.Timeline $claudeInternal.WeekGroups $qEndUtc
+            $cSide = & $buildQuotaSide $cCost $cRawAll $cAtEst $null
+            if ($null -ne $cSide) { $qQuota["claude"] = $cSide }
+        }
+
+        if ([string]$r['mode'] -eq 'delegate' -and $rowTaskIds.Count -gt 0 -and $null -ne $agyInternal -and (Get-Command Get-LimitsEstimateAtTime -ErrorAction SilentlyContinue)) {
+            $qAgyCost = 0.0
+            $qAgyRaw = 0L
+            $agyRefUtc = $qEndUtc
+            $qMeasured = $null
+            foreach ($tid in $rowTaskIds) {
+                $ti = $taskInfo[$tid]
+                if ($ti) {
+                    $inR = & $tryDblVal $ti['input_tokens']
+                    $outR = & $tryDblVal $ti['output_tokens']
+                    $totR = & $tryDblVal $ti['total_tokens']
+                    $inV = if ($inR.Ok -and $inR.Val -gt 0.0) { $inR.Val } else { 0.0 }
+                    $outV = if ($outR.Ok -and $outR.Val -gt 0.0) { $outR.Val } else { 0.0 }
+                    $hasIO = (($inR.Ok -or $outR.Ok) -and ($inV + $outV -gt 0.0))
+                    $totV = if ($totR.Ok -and $totR.Val -gt 0.0) { $totR.Val } elseif ($hasIO) { $inV + $outV } else { 0.0 }
+                    $qAgyRaw += [long][math]::Round($totV)
+                    if ($totV -gt 0.0 -and $null -ne $agyCostCfg -and (Get-Command Get-AgyTaskCostUnits -ErrorAction SilentlyContinue)) {
+                        $tModels = if ($taskModelsMap.ContainsKey($tid)) { @($taskModelsMap[$tid]) } else { @() }
+                        $tInf = @{ Model = [string]$ti['model']; InputTokens = $inV; OutputTokens = $outV; HasInOut = $hasIO; TotalTokens = $totV }
+                        $qAgyCost += Get-AgyTaskCostUnits $tInf $tModels $agyCostCfg
+                    }
+                    $tFin = & $parseTsUtc ([string]$ti['timestamp'])
+                    if ($null -ne $tFin -and $tFin -gt $agyRefUtc) { $agyRefUtc = $tFin }
+                }
+                if ($agyInternal.Estimates -and $agyInternal.Estimates.ContainsKey($tid)) {
+                    $estRec = $agyInternal.Estimates[$tid]
+                    if ($estRec -and $estRec.Contains("measured_at")) {
+                        $mDt = & $parseTsUtc ([string]$estRec.measured_at)
+                        if ($null -ne $mDt -and $mDt -gt $agyRefUtc) { $agyRefUtc = $mDt }
+                    }
+                    if ($rowTaskIds.Count -eq 1 -and $estRec -and $estRec.Contains("measured")) {
+                        $qMeasured = $estRec.measured
+                    }
+                }
+            }
+            $aAtEst = Get-LimitsEstimateAtTime $agyInternal.Timeline $agyInternal.WeekGroups $agyRefUtc
+            $aSide = & $buildQuotaSide $qAgyCost $qAgyRaw $aAtEst $qMeasured
+            if ($null -ne $aSide) { $qQuota["agy"] = $aSide }
+        }
+
         $local = $null
         try { $local = ([DateTime]::Parse([string]$r['q_ts'], [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AdjustToUniversal)).ToLocalTime() } catch { $local = Get-Date }
-        [void]$items.Add([pscustomobject][ordered]@{
+        $rowObj = [ordered]@{
             q_ts = [string]$r['q_ts']; end_ts = [string]$r['end_ts']; session = [string]$r['session']; project = [string]$r['project']
             mode = [string]$r['mode']; claude_model = $claude; claude_effort = $effort; claude_label = $claudeLabel
             agent_model = $agent; agent_effort = $agentEffort; agent_label = $agentLabel; agy_models = $agy; combo = $combo
-            agy_failed = $agyFailed
+            agy_failed = $agyFailed; real_models = [object[]]$qRealModels; claude_models = [object[]]$qClaudeModels
             dur_sec = [long]$r['dur_sec']; calls = [long]$r['calls']
-            tokens = ([long]$r['in_tokens'] + [long]$r['cc_tokens'] + [long]$r['out_tokens']); cr_tokens = [long]$r['cr_tokens']
+            tokens = $qClaudeTok; cr_tokens = $qCr
             agy_tokens = $(if ($null -eq $r['agy_tokens']) { $null } else { [long]$r['agy_tokens'] })
             agy_sec = $(if ($null -eq $r['agy_sec']) { $null } else { [long]$r['agy_sec'] })
-            task_ids = [string[]]@(([string]$r['task_ids'] -split ',') | Where-Object { $_ })
-            tasks = @(@(([string]$r['task_ids'] -split ',') | Where-Object { $_ }) | ForEach-Object {
+            task_ids = [string[]]$rowTaskIds
+            tasks = @($rowTaskIds | ForEach-Object {
                 $ti = $taskInfo[$_]
                 $sec = $null
                 if ($ti) { $d = [double]0; if ([double]::TryParse([string]$ti['elapsed_sec'], [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$d)) { $sec = [long][math]::Round($d) } }
@@ -642,7 +1066,10 @@ function Get-AgyUsageStatsJson([string]$DbPath, [int]$Days = 7, [bool]$Collectin
             task_ok = [long]$(if ($null -eq $r['task_ok']) { 0 } else { $r['task_ok'] }); task_fail = [long]$(if ($null -eq $r['task_fail']) { 0 } else { $r['task_fail'] }); task_cancel = [long]$(if ($null -eq $r['task_cancel']) { 0 } else { $r['task_cancel'] })
             reason = [string]$r['reason']; preview = [string]$r['preview']; auto = ([long]$r['auto'] -eq 1)
             day = $local.ToString("yyyy-MM-dd")
-        })
+            tokens_detail = $tokensObj
+        }
+        if ($qQuota.Count -gt 0) { $rowObj["quota"] = $qQuota }
+        [void]$items.Add([pscustomobject]$rowObj)
     }
 
     $byMode = [ordered]@{}
@@ -668,11 +1095,30 @@ function Get-AgyUsageStatsJson([string]$DbPath, [int]$Days = 7, [bool]$Collectin
     $byModel = New-Object System.Collections.ArrayList
     foreach ($g in @($items | Group-Object combo | Sort-Object Count -Descending)) {
         $set = @($g.Group)
+        $gRealMap = @{}
+        foreach ($it in $set) {
+            foreach ($rm in @($it.real_models)) {
+                if ($null -eq $rm -or -not $rm.model) { continue }
+                $mName = [string]$rm.model
+                if (-not $gRealMap.ContainsKey($mName)) {
+                    $gRealMap[$mName] = @{ model = $mName; short = [string]$rm.short; total = [int64]0 }
+                }
+                $gRealMap[$mName].total += [int64]$rm.total
+            }
+        }
+        $gRealModels = @($gRealMap.Values | Sort-Object -Property @{ Expression = { $_.total }; Descending = $true }, @{ Expression = { $_.model }; Ascending = $true } | ForEach-Object {
+            [pscustomobject][ordered]@{
+                model = [string]$_.model
+                short = [string]$_.short
+                total = [int64]$_.total
+            }
+        })
         [void]$byModel.Add([ordered]@{
             combo = [string]$g.Name; mode = [string]$set[0].mode; count = $set.Count
             dur_median = (Get-AgyUsageMedian @($set | ForEach-Object { $_.dur_sec }))
             tokens_median = (Get-AgyUsageMedian @($set | ForEach-Object { $_.tokens }))
             agy_tokens_median = (Get-AgyUsageMedian @($set | ForEach-Object { $_.agy_tokens }))
+            real_models = [object[]]$gRealModels
         })
     }
 
@@ -689,21 +1135,44 @@ function Get-AgyUsageStatsJson([string]$DbPath, [int]$Days = 7, [bool]$Collectin
         [void]$daily.Add([ordered]@{ date = $key; direct = $d.direct; delegate = $d.delegate; chat = $d.chat })
     }
 
+    $limitsSummary = [ordered]@{}
+    if ($null -ne $claudeInternal) {
+        $clLat = $claudeInternal.Latest
+        $clOut = [ordered]@{ basis = $claudeInternal.Basis }
+        if ($clLat.Contains("five_hour")) { $clOut["five_hour"] = $clLat["five_hour"] }
+        if ($clLat.Contains("seven_day")) { $clOut["weekly"] = $clLat["seven_day"] }
+        if ($clLat.Contains("sessions")) { $clOut["sessions"] = $clLat["sessions"] }
+        $limitsSummary["claude"] = $clOut
+    }
+    if ($null -ne $agyInternal) {
+        $agLat = $agyInternal.Latest
+        $agOut = [ordered]@{ basis = $agyInternal.Basis }
+        if ($agLat.Contains("five_hour")) { $agOut["five_hour"] = $agLat["five_hour"] }
+        if ($agLat.Contains("weekly")) { $agOut["weekly"] = $agLat["weekly"] }
+        if ($agLat.Contains("sessions")) { $agOut["sessions"] = $agLat["sessions"] }
+        $limitsSummary["agy"] = $agOut
+    }
+
     $result = [ordered]@{
         updated_at = $updated
         collecting = $Collecting
         days = $Days
         summary = $summary
+        limits = $limitsSummary
         by_model = [object[]]$byModel.ToArray()
         daily = [object[]]$daily.ToArray()
         rows = [object[]]@($items | Select-Object -First $RowLimit)
     }
-    return (ConvertTo-Json -InputObject $result -Depth 6 -Compress)
+    return (ConvertTo-Json -InputObject $result -Depth 10 -Compress)
 }
 
 if ($UsageCollect) {
     try {
         if (-not (Get-Command Open-AgyDb -ErrorAction SilentlyContinue)) { . (Join-Path $PSScriptRoot "agy-db.ps1") }
+        if (-not (Get-Command New-AgyUsageState -ErrorAction SilentlyContinue)) {
+            $progPath = Join-Path $PSScriptRoot "agy-progress.ps1"
+            if (Test-Path -LiteralPath $progPath) { . $progPath }
+        }
         if (-not $UsageProjectsDir) { $UsageProjectsDir = if ($env:CLAUDE_PROJECTS_DIR) { $env:CLAUDE_PROJECTS_DIR } else { Join-Path $env:USERPROFILE ".claude\projects" } }
         $collected = Invoke-AgyUsageCollect $UsageDbPath $UsageProjectsDir $UsageRuntimeDir $UsageRetentionDays
         Write-Output ("collected: files={0} questions={1} ran={2}" -f $collected.Files, $collected.Questions, $collected.Ran)

@@ -69,11 +69,13 @@ function Test-WatcherAlive {
 
     $hbFile = Join-Path (Join-Path $RuntimeDir "heartbeat") ("hb_{0}.txt" -f $ComputerName)
     $hb = Get-Item -LiteralPath $hbFile -ErrorAction SilentlyContinue
-    if ($hb -and (((Get-Date) - $hb.LastWriteTime).TotalSeconds -le $StaleSeconds)) {
+    if ($StaleSeconds -gt 0 -and $hb -and (((Get-Date) - $hb.LastWriteTime).TotalSeconds -le $StaleSeconds)) {
         # @(if ...) 로 감쌉니다: if 식은 원소 하나짜리 배열을 풀어 버려서 .Count 가 비게 됩니다.
         $rawProcs = @(if ($GetWatcherProcesses) { & $GetWatcherProcesses } else { Get-WatcherProcessList $RuntimeDir })
         $procs = @($rawProcs | Where-Object {
-            if ($_.PSObject.Properties['CommandLine'] -and (Get-Command "Test-WatcherCommandLineForRuntime" -ErrorAction SilentlyContinue)) {
+            if ($_.PSObject.Properties['CommandLine'] -and (Get-Command "Test-AgyWatcherProcessAlive" -ErrorAction SilentlyContinue)) {
+                Test-AgyWatcherProcessAlive -Process $_ -RuntimeDir $RuntimeDir -ComputerName $ComputerName -StaleThresholdSeconds $StaleSeconds
+            } elseif ($_.PSObject.Properties['CommandLine'] -and (Get-Command "Test-WatcherCommandLineForRuntime" -ErrorAction SilentlyContinue)) {
                 $_.CommandLine -like "*watch-agy.ps1*" -and (Test-WatcherCommandLineForRuntime $_.CommandLine $RuntimeDir)
             } else {
                 $true

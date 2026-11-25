@@ -137,7 +137,7 @@ function Get-AgyQuotaSnapshot([string]$CacheFile, [int]$MaxAgeSec = 600, [script
         $checkedDt = ConvertTo-AgyUtcDateTime ([string]$cached.checked_at)
         if ($null -ne $checkedDt) {
             $cacheAgeSec = ($now - $checkedDt).TotalSeconds
-            if ($cacheAgeSec -lt $MaxAgeSec) {
+            if ($MaxAgeSec -gt 0 -and $cacheAgeSec -lt $MaxAgeSec) {
                 return $cached
             }
         }
@@ -150,7 +150,7 @@ function Get-AgyQuotaSnapshot([string]$CacheFile, [int]$MaxAgeSec = 600, [script
         $raw = $null
     }
 
-    $parsed = ConvertFrom-AgyUsageText ([string]$raw)
+    $parsed = (ConvertFrom-AgyUsageText ([string]$raw))
     $parsedKeys = @($parsed.Keys)
     if ($parsedKeys.Count -gt 0) {
         $snap = [ordered]@{ checked_at = $now.ToString("yyyy-MM-ddTHH:mm:ssZ") }
@@ -169,6 +169,21 @@ function Get-AgyQuotaSnapshot([string]$CacheFile, [int]$MaxAgeSec = 600, [script
             } catch {
                 Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
             }
+        }
+        if ($CacheFile -and $parsed.Contains('gemini_5h') -and $parsed.Contains('gemini_weekly')) {
+            try {
+                if (-not (Get-Command Add-UsageHistory -ErrorAction SilentlyContinue)) {
+                    $histLib = Join-Path $PSScriptRoot "usage-history.ps1"
+                    if (-not (Test-Path -LiteralPath $histLib -PathType Leaf)) { $histLib = Join-Path (Split-Path $PSScriptRoot -Parent) "usage-history.ps1" }
+                    if (Test-Path -LiteralPath $histLib -PathType Leaf) { . $histLib }
+                }
+                if (Get-Command Add-UsageHistory -ErrorAction SilentlyContinue) {
+                    $rtDir = Split-Path -Path $CacheFile -Parent
+                    $e5 = $parsed.Item('gemini_5h')
+                    $ew = $parsed.Item('gemini_weekly')
+                    [void](Add-UsageHistory -RuntimeDir $rtDir -Src "agy" -FiveUsed (100 - [int]$e5.pct) -FiveReset ([string]$e5.reset) -WeekUsed (100 - [int]$ew.pct) -WeekReset ([string]$ew.reset) -AtUtc $now)
+                }
+            } catch {}
         }
         return $snap
     }

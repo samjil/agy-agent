@@ -55,6 +55,97 @@ function writeAtomic(targetPath, text) {
   }
 }
 
+function normalizeIsoSec(iso) {
+  return String(iso || "").replace(/\.\d{3}Z$/, "Z");
+}
+
+function findLastClaudeHistory(histPath) {
+  if (!fs.existsSync(histPath)) return null;
+  const stat = fs.statSync(histPath);
+  const len = stat.size;
+  if (len <= 0) return null;
+
+  const tailSize = Math.min(len, 65536);
+  const offset = len - tailSize;
+  const buf = Buffer.alloc(tailSize);
+  const fd = fs.openSync(histPath, "r");
+  let readBytes = 0;
+  try {
+    readBytes = fs.readSync(fd, buf, 0, tailSize, offset);
+  } finally {
+    try { fs.closeSync(fd); } catch (e) {}
+  }
+
+  let lines = buf.toString("utf8", 0, readBytes).replace(/^\uFEFF/, "").split(/\r?\n/).filter(Boolean);
+  if (offset > 0 && lines.length > 0) lines = lines.slice(1);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    try {
+      const o = JSON.parse(lines[i]);
+      if (o && o.src === "claude") return o;
+    } catch (e) {}
+  }
+
+  if (offset > 0) {
+    const allLines = fs.readFileSync(histPath, "utf8").replace(/^\uFEFF/, "").split(/\r?\n/).filter(Boolean);
+    for (let i = allLines.length - 1; i >= 0; i--) {
+      try {
+        const o = JSON.parse(allLines[i]);
+        if (o && o.src === "claude") return o;
+      } catch (e) {}
+    }
+  }
+  return null;
+}
+
+function appendUsageHistory(runtimeDir, checkedAtIso, five, seven) {
+  if (!runtimeDir || !five || !seven) return;
+  if (typeof five.used_pct !== "number" || !isFinite(five.used_pct) || five.used_pct < 0 || five.used_pct > 100) return;
+  if (typeof seven.used_pct !== "number" || !isFinite(seven.used_pct) || seven.used_pct < 0 || seven.used_pct > 100) return;
+  if (!five.resets_at || !seven.resets_at) return;
+
+  const fiveInt = Math.round(five.used_pct);
+  const weekInt = Math.round(seven.used_pct);
+  const fiveReset = normalizeIsoSec(five.resets_at);
+  const weekReset = normalizeIsoSec(seven.resets_at);
+  const atIso = normalizeIsoSec(checkedAtIso);
+
+  const histPath = path.join(runtimeDir, "usage-history.jsonl");
+  const last = findLastClaudeHistory(histPath);
+  if (last) {
+    if (last.five === fiveInt && last.week === weekInt &&
+        normalizeIsoSec(last.five_reset) === fiveReset &&
+        normalizeIsoSec(last.week_reset) === weekReset) {
+      return;
+    }
+  }
+
+  fs.mkdirSync(runtimeDir, { recursive: true });
+  const line = JSON.stringify({
+    src: "claude",
+    at: atIso,
+    five: fiveInt,
+    five_reset: fiveReset,
+    week: weekInt,
+    week_reset: weekReset
+  });
+  fs.appendFileSync(histPath, line + "\n", "utf8");
+
+  if (fs.statSync(histPath).size > 1048576) {
+    const cutoffMs = Date.parse(atIso) - 60 * 86400 * 1000;
+    const allLines = fs.readFileSync(histPath, "utf8").replace(/^\uFEFF/, "").split(/\r?\n/).filter(Boolean);
+    const kept = [];
+    for (let i = 0; i < allLines.length; i++) {
+      try {
+        const o = JSON.parse(allLines[i]);
+        if (!o || !o.at) continue;
+        const ms = Date.parse(o.at);
+        if (!isNaN(ms) && ms >= cutoffMs) kept.push(allLines[i]);
+      } catch (e) {}
+    }
+    writeAtomic(histPath, kept.length > 0 ? kept.join("\n") + "\n" : "");
+  }
+}
+
 function main() {
   const raw = readStdin().replace(/^\uFEFF/, "").trim();
   if (!raw) return;
@@ -76,6 +167,7 @@ function main() {
   const runtimeDir = process.env.AGY_DELEGATE_RUNTIME || path.join(os.homedir(), ".samjil", "delegate-agy", "runtime");
   const targetFile = path.join(runtimeDir, "claude-limits.json");
   writeAtomic(targetFile, JSON.stringify(payload));
+  try { appendUsageHistory(runtimeDir, payload.checked_at, five, seven); } catch (e) {}
 
   const parts = [];
   if (five) parts.push("5h " + Math.round(five.used_pct) + "%");

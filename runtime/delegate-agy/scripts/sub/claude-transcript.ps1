@@ -291,10 +291,16 @@ function Get-ClaudeDelegationUsage([string]$MainTranscriptPath = "", [string]$Ta
         $usage = $msg["usage"]
         if ($null -eq $usage -or -not ($usage -is [System.Collections.IDictionary])) { return $null }
         $msgId = if ($msg["id"]) { [string]$msg["id"] } elseif ($obj["uuid"]) { [string]$obj["uuid"] } else { "line_$lineNum" }
+        $cw = (& $toLong $usage["cache_creation_input_tokens"])
+        if ($cw -eq 0L -and ($usage["cache_creation"] -is [System.Collections.IDictionary])) {
+            $ccDict = $usage["cache_creation"]
+            $cw = (& $toLong $ccDict["ephemeral_5m_input_tokens"]) + (& $toLong $ccDict["ephemeral_1h_input_tokens"])
+        }
         return @{
             id          = $msgId
+            model       = $model
             in          = (& $toLong $usage["input_tokens"])
-            cache_write = (& $toLong $usage["cache_creation_input_tokens"])
+            cache_write = $cw
             cache_read  = (& $toLong $usage["cache_read_input_tokens"])
             out         = (& $toLong $usage["output_tokens"])
             content     = $msg["content"]
@@ -309,6 +315,7 @@ function Get-ClaudeDelegationUsage([string]$MainTranscriptPath = "", [string]$Ta
         $matchedIds = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
 
         $awaitReview = $false
+        $reviewFound = $false
         $launchMsgId = ""
         $launchIsAsync = $false
         $seenLaunchResult = $false
@@ -365,6 +372,7 @@ function Get-ClaudeDelegationUsage([string]$MainTranscriptPath = "", [string]$Ta
                         if ($awaitReview) {
                             [void]$matchedIds.Add($mid)
                             $awaitReview = $false
+                            $reviewFound = $true
                         }
                     }
 
@@ -493,7 +501,7 @@ function Get-ClaudeDelegationUsage([string]$MainTranscriptPath = "", [string]$Ta
                         if ($u2.cache_read -gt $prev2.cache_read) { $prev2.cache_read = $u2.cache_read }
                         if ($u2.out -gt $prev2.out) { $prev2.out = $u2.out }
                     } else {
-                        $subUsage[$mid2] = @{ in = $u2.in; cache_write = $u2.cache_write; cache_read = $u2.cache_read; out = $u2.out }
+                        $subUsage[$mid2] = @{ in = $u2.in; cache_write = $u2.cache_write; cache_read = $u2.cache_read; out = $u2.out; model = $u2.model }
                     }
                 }
             } catch {
@@ -502,9 +510,11 @@ function Get-ClaudeDelegationUsage([string]$MainTranscriptPath = "", [string]$Ta
             }
 
             if ($subUsage.Count -gt 0) {
-                $sIn = 0L; $sCw = 0L; $sCr = 0L; $sOut = 0L
+                $sIn = 0L; $sCw = 0L; $sCr = 0L; $sOut = 0L; $sCtx = 0L; $sCtxModel = ""
                 foreach ($v in $subUsage.Values) {
                     $sIn += $v.in; $sCw += $v.cache_write; $sCr += $v.cache_read; $sOut += $v.out
+                    $vCtx = [long]($v.in + $v.cache_write + $v.cache_read)
+                    if ($vCtx -gt $sCtx) { $sCtx = $vCtx; $sCtxModel = [string]$v.model }
                 }
                 $subResult = [ordered]@{
                     in         = $sIn
@@ -513,12 +523,16 @@ function Get-ClaudeDelegationUsage([string]$MainTranscriptPath = "", [string]$Ta
                     out        = $sOut
                     total      = ($sIn + $sCw + $sCr + $sOut)
                     calls      = $subUsage.Count
+                    ctx        = $sCtx
+                    ctx_model  = $sCtxModel
                 }
             }
         }
     }
 
     if ($mainCalls -eq 0 -and $null -eq $subResult) { return $null }
+
+    $hasReview = if ($AgentId) { [bool]($handbackAfterMsgId -or $syncAfterLaunchMsgId) } else { [bool]$reviewFound }
 
     return [ordered]@{
         main = [ordered]@{
@@ -529,6 +543,7 @@ function Get-ClaudeDelegationUsage([string]$MainTranscriptPath = "", [string]$Ta
             total       = ($mainIn + $mainCw + $mainCr + $mainOut)
             calls       = $mainCalls
         }
-        sub  = $subResult
+        sub          = $subResult
+        review_found = $hasReview
     }
 }

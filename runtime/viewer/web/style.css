@@ -695,6 +695,24 @@ code { font-family: var(--font-mono); font-size: 0.92em; }
 .watcher-start-msg.is-error { color: var(--err); }
 .watcher-start-msg[hidden] { display: none; }
 
+.update-notice {
+  display: block;
+  margin: 0;
+  padding: 0 4px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--ink-2);
+  text-decoration: none;
+  width: calc(var(--sidebar-w) - 29px);
+  flex-shrink: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.update-notice:hover { color: var(--link); text-decoration: underline; text-underline-offset: 2px; }
+.update-notice:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; border-radius: 2px; }
+.update-notice[hidden] { display: none; }
+
 .sidebar-controls {
   display: flex;
   align-items: center;
@@ -815,6 +833,9 @@ code { font-family: var(--font-mono); font-size: 0.92em; }
     margin-bottom: -8px;
     opacity: 0;
     transition: max-height var(--sidebar-dur) var(--sidebar-ease), margin var(--sidebar-dur) var(--sidebar-ease), opacity 0.1s ease;
+  }
+  .app-sidebar.collapsed .update-notice {
+    display: none;
   }
   /* 테마 선택은 접힌 폭(60px)에 들어가지 않아 접힐 때 함께 접는다(보이지 않는 동안 포커스도 가지 않게) */
   .app-sidebar.collapsed .theme-switch {
@@ -1172,19 +1193,6 @@ code { font-family: var(--font-mono); font-size: 0.92em; }
 .pg-token-detail { color: var(--ink-3); font-size: var(--fs-xs); }
 /* 진행 중 카드의 토큰 세부(입력 · 출력 · 현재 컨텍스트) */
 
-/* 위임 카드의 토큰 블록: agy · Claude 소스별 2줄(총합 + 한도 추정, 세부 내역)을 왼쪽 정렬 흐름으로 둔다. */
-.meta.token-meta { display: flex; flex-wrap: nowrap; align-items: baseline; column-gap: 0; row-gap: 2px; margin-top: 4px; font-size: var(--fs-xs); color: var(--ink-3); }
-.meta.token-meta .meta-head { margin-right: 14px; flex: 0 0 auto; }
-.tok-list { display: flex; flex-direction: column; gap: 4px; flex: 1 1 auto; min-width: 0; }
-.tok-source { display: flex; align-items: baseline; min-width: 0; }
-.tok-src { flex: 0 0 auto; min-width: 4.5em; color: var(--ink-3); white-space: nowrap; }
-.tok-body { flex: 1 1 auto; min-width: 0; }
-.tok-main { line-height: 1.5; font-variant-numeric: tabular-nums; white-space: normal; overflow-wrap: anywhere; }
-.tok-total-num { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums; }
-.tok-limits { color: var(--ink-3); font-variant-numeric: tabular-nums; }
-.tok-share { color: var(--ink-3); font-variant-numeric: tabular-nums; }
-.tok-share.tok-share-hi { color: var(--ink); }
-.tok-detail { color: var(--ink-3); font-size: 0.9em; font-variant-numeric: tabular-nums; line-height: 1.5; min-width: 0; white-space: normal; overflow-wrap: anywhere; }
 .party-legend { display: inline-flex; align-items: center; gap: 6px; }
 
 .qa-session-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
@@ -1262,6 +1270,8 @@ code { font-family: var(--font-mono); font-size: 0.92em; }
 .meta-item.mono, .ts { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 .ts { color: var(--ink-2); }
 .meta-item.model { font-family: var(--font-mono); }
+/* 모델 줄은 실제 모델 이름이 붙어 길어질 수 있다: 머리말 옆 남은 폭을 채우고 그 안에서 줄바꿈한다(다음 줄로 밀리거나 카드 밖으로 넘치지 않게). */
+.meta.model-meta > .meta-item.model { white-space: normal; min-width: 0; flex: 1 1 0; overflow-wrap: anywhere; }
 /* 맨 윗줄에서 눈에 띄어야 하는 것은 모델과 소요 시간뿐이다. 색은 상태 배지 전용이라 밝기와 굵기로만 올린다. */
 .meta-item.model,
 .meta-item.elapsed {
@@ -2890,7 +2900,6 @@ span.task-more {
   white-space: nowrap;
 }
 .usage-clip-wide { max-width: 360px; }
-.usage-task { margin-left: 8px; font-size: var(--fs-xs); color: var(--agy); text-underline-offset: 3px; white-space: nowrap; }
 /* 질문 기록 표는 가로 스크롤 없이 한 줄: 질문 칸이 남은 폭을 모두 쓰고(끝에서 말줄임, 툴팁에 전체),
    나머지 칸은 내용만큼만 차지한다. width: 100% + max-width: 0 은 "남은 폭을 갖되 내용 때문에 넓어지지 않는" 칸을 만드는 방법. */
 .usage-table td.usage-q, .usage-table th.usage-q { width: 100%; max-width: 0; }
@@ -2902,13 +2911,59 @@ span.task-more {
 #usage-models th.usage-model { width: 100%; min-width: 16em; white-space: normal; overflow-wrap: anywhere; }
 .usage-model-line { display: block; overflow: hidden; text-overflow: ellipsis; }
 .usage-model-agy { color: var(--ink-3); }
-.usage-task-more { margin-left: 8px; padding: 0 7px; border: 1px solid var(--line); border-radius: 999px; background: transparent; color: var(--agy); font: inherit; font-size: var(--fs-xs); line-height: 1.5; cursor: pointer; }
-.usage-task-more[aria-expanded="true"] { background: var(--agy-soft); }
-.usage-task-more:hover { background: var(--raised); color: var(--ink); }
-.usage-task-more:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
-/* 방식 칸의 "작업 N" 을 펼치면 그 행 바로 아래에 표 전체 폭의 줄이 열린다: 작업마다 "작업 1 · hydrogen-medium · 성공 · 12분" 칩 */
-.usage-table tr.usage-detail > td { padding: 0 0 10px; border-bottom: 1px solid var(--line); white-space: normal; }
-.usage-table tbody tr:has(+ tr.usage-detail:not([hidden])) > td { border-bottom-color: transparent; }
+.usage-model-real { color: var(--ink-3); }
+.usage-model-tokens { margin-top: 2px; color: var(--ink-3); font-variant-numeric: tabular-nums; overflow-wrap: break-word; }
+.usage-limits-banner {
+  margin: 10px 0 4px;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--raised);
+  font-size: var(--fs-xs);
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.5;
+}
+.usage-limits-title { color: var(--ink-3); font-weight: 500; }
+.usage-limits-side { cursor: help; }
+/* 모델 조합 · 질문 기록 CSS Grid 행: 목록 자체 폭(@container)으로 넓음/쌓임을 전환한다. */
+.usage-grid {
+  margin-top: 14px;
+  font-size: var(--fs-sm);
+  container-type: inline-size;
+}
+.usage-grid-models { container-name: usage-models; }
+.usage-grid:empty { display: none; }
+.usage-grid-row {
+  display: grid;
+  align-items: start;
+  column-gap: 12px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--line);
+}
+.usage-grid-row:not(.usage-grid-head):hover { background: var(--hover-veil); }
+.usage-grid-head {
+  font-size: var(--fs-xs);
+  font-weight: 500;
+  color: var(--ink-3);
+  padding-top: 0;
+  align-items: end;
+}
+.usage-grid-head .usage-cell.num {
+  white-space: normal;
+  line-height: 1.3;
+}
+.usage-grid-models .usage-grid-row {
+  grid-template-columns: minmax(18em, 1fr) 4em 7.5em 7.5em 7.5em;
+  column-gap: 10px;
+}
+.usage-cell { min-width: 0; }
+.usage-cell.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.usage-cell-model { white-space: normal; overflow-wrap: break-word; line-height: 1.45; }
+.usage-model-name { white-space: nowrap; }
+.usage-grid .usage-model-line { overflow: visible; text-overflow: clip; white-space: normal; overflow-wrap: break-word; }
+.usage-grid .usage-when,
+.usage-grid .usage-mode-cell { white-space: nowrap; }
 .usage-chips { display: flex; flex-wrap: wrap; gap: 6px; padding-left: 12px; border-left: 2px solid var(--agy-soft); }
 .usage-chip { display: inline-block; padding: 1px 8px; border: 1px solid var(--line); border-radius: 999px; font-size: var(--fs-xs); color: var(--ink-2); text-decoration: none; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .usage-chip:hover { border-color: var(--agy); color: var(--ink); }
@@ -2970,19 +3025,152 @@ span.task-more {
   font-variant-numeric: tabular-nums;
 }
 
-@media (max-width: 720px) {
+/* 질문 기록: 요약 한 줄(시각 · 방식 · 프로젝트 · 질문 · 소요 · 토큰 · 5시간 지분) + 누르면 열리는 상세.
+   질문 글이 줄의 중심이고, 눈에 띄는 것은 오른쪽 5시간 지분 막대(Claude 위, agy 아래) 하나뿐이다. 색은 두 에이전트 색(--claude · --agy)과 기존 슬레이트만 쓴다. */
+.usage-list {
+  margin-top: 14px;
+  font-size: var(--fs-sm);
+  container: usage-list / inline-size;
+}
+.usage-list:empty { display: none; }
+.ur { border-bottom: 1px solid var(--line); }
+.ur-sum {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 3px 10px;
+  min-width: 0;
+  padding: 9px 4px 9px 2px;
+  cursor: pointer;
+}
+.ur-sum:hover { background: var(--hover-veil); }
+.ur-sum:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.ur-when { flex: none; width: 7.4em; color: var(--ink-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ur-mode { flex: none; width: 6.4em; white-space: nowrap; }
+.ur-proj { flex: none; width: 9em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink-3); font-size: var(--fs-xs); }
+.ur-q { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--ink); }
+.ur-nums { flex: none; display: flex; align-items: center; justify-content: flex-end; gap: 14px; font-variant-numeric: tabular-nums; }
+.ur-dur { width: 5.6em; text-align: right; color: var(--ink-2); white-space: nowrap; }
+.ur-tok { width: 4.4em; text-align: right; color: var(--ink); white-space: nowrap; }
+.ur-share { width: 104px; min-height: 1px; }
+.ur-meter { display: flex; flex-direction: column; gap: 3px; }
+.ur-m { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; cursor: help; }
+.ur-m-name { width: 4.2em; color: var(--ink-3); font-size: var(--fs-xs); }
+.ur-m-track { flex: none; width: 48px; height: 4px; border-radius: 2px; background: var(--line); overflow: hidden; }
+.ur-m-fill { display: block; height: 100%; border-radius: 2px; }
+.ur-m-claude .ur-m-fill { background: var(--claude); }
+.ur-m-agy .ur-m-fill { background: var(--agy); }
+.ur-m-pct { min-width: 3.6em; font-size: 11px; line-height: 1.15; color: var(--ink-2); }
+.ur-m-hi .ur-m-pct { color: var(--warn); font-weight: 600; }
+
+/* 요약 줄 아래에 늘 보이는 모델 · 토큰 줄. 왼쪽 끝은 질문 글과 같고(시각 · 방식 · 프로젝트 칸 폭 + 칸 사이 간격), 좁은 목록에서는 줄 왼쪽 끝에 붙는다. 테두리 없이 간격으로만 구분한다. */
+.ur-toks {
+  flex: 1 0 100%;
+  min-width: 0;
+  padding: 0 0 2px calc(13.8 * var(--fs-sm) + 9 * var(--fs-xs) + 30px);
+  font-size: var(--fs-xs);
+  line-height: 1.55;
+  cursor: default;
+}
+.ur-toks .ur-models { margin-bottom: 1px; color: var(--ink-3); }
+.ur-tk { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 10px; margin: 0; min-width: 0; font-variant-numeric: tabular-nums; }
+.ur-tk-src { flex: none; width: 3.6em; color: var(--ink-3); }
+.ur-tk-n { flex: none; font-family: var(--font-mono); font-size: var(--fs-sm); color: var(--ink); font-variant-numeric: tabular-nums; }
+.ur-tk-bd { flex: 1 1 22em; min-width: 0; color: var(--ink-3); overflow-wrap: anywhere; }
+.ur-tk-sep { color: var(--line-strong); }
+.ur-tk-sess { color: var(--ink-3); white-space: normal; }
+.ur-tk-models .ur-tk-bd { flex-basis: 0; font-family: var(--font-mono); }
+.ur-tk-mn { color: var(--ink-2); }
+.ur-tk-none { color: var(--ink-3); }
+.ur-detail {
+  display: grid;
+  gap: 12px;
+  margin: 0 0 14px 6px;
+  padding: 2px 0 2px 14px;
+  border-left: 2px solid var(--line-strong);
+  min-width: 0;
+}
+.ur-detail[hidden] { display: none; }
+.ur-models { font-family: var(--font-mono); font-size: var(--fs-xs); line-height: 1.6; color: var(--ink-2); overflow-wrap: break-word; }
+.ur-models .usage-model-line { display: inline; }
+.ur-models .usage-model-agy { margin-left: 0.5em; }
+.ur-detail .usage-chips.ur-tasks { padding-left: 0; border-left: 0; }
+.ur-ledger-wrap { max-width: 100%; overflow-x: auto; }
+.ur-ledger { border-collapse: collapse; font-size: var(--fs-xs); font-variant-numeric: tabular-nums; }
+.ur-ledger th, .ur-ledger td { padding: 3px 0 3px 18px; text-align: right; white-space: nowrap; font-weight: 400; }
+.ur-ledger thead th { color: var(--ink-3); font-weight: 500; padding-top: 0; }
+.ur-ledger tbody th { padding-left: 0; padding-right: 18px; text-align: left; color: var(--ink-2); }
+.ur-ledger tbody th small { color: var(--ink-3); font-size: inherit; }
+.ur-ledger td { color: var(--ink); }
+.ur-ledger .ur-sum-row th, .ur-ledger .ur-sum-row td { border-top: 1px solid var(--line); font-weight: 700; color: var(--ink); }
+.ur-think { margin-left: 6px; color: var(--ink-3); font-size: 11px; font-weight: 400; }
+.ur-ledger-note, .ur-none { margin: 4px 0 0; font-size: var(--fs-xs); color: var(--ink-3); }
+.ur-none { margin: 0; }
+.ur-quota { display: grid; gap: 4px; }
+.ur-quota-row { display: flex; align-items: center; gap: 12px; }
+.ur-quota-k { flex: none; width: 4.8em; font-size: var(--fs-xs); color: var(--ink-3); }
+/* 주간 배수 칸: 막대 자리(트랙 + 퍼센트)를 "5시간 × 7.5" 글자가 차지해 위 두 줄과 같은 세로줄에 선다. */
+.ur-m-sess { font-size: 11px; line-height: 1.15; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+.ur-quota-v { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 18px; font-size: var(--fs-xs); color: var(--ink-2); }
+/* 출처 칸 너비를 고정해 5시간 · 주간 줄에서 Claude 와 agy 가 같은 세로줄에 선다. */
+/* 한도 칸 한 줄 = 출처 이름 · 막대 · 퍼센트 · "토큰 / 한도". 칸 폭을 고정해(가장 긴 "6,712,928 / 801,000,000" 이 들어가는 폭)
+   5시간 · 주간 · 주간 배수 · 컨텍스트 네 줄에서 Claude · agy 칸과 그 안의 숫자가 같은 세로줄에 선다. */
+.ur-quota-v .ur-m { flex: 0 0 25rem; min-width: 0; }
+.ur-quota-v .ur-m-empty { cursor: default; }
+.ur-quota-v .ur-m-ctx { align-items: center; }
+.ur-quota-v .ur-m-pct { flex: 0 0 3.6em; }
+.ur-m-ctxn { font-size: 11px; line-height: 1.15; font-variant-numeric: tabular-nums; }
+.ur-m-ctxn-n { font-family: var(--font-mono); color: var(--ink); }
+.ur-foot { display: grid; gap: 4px; }
+.ur-foot p { margin: 0; font-size: var(--fs-xs); color: var(--ink-3); line-height: 1.5; }
+.ur-reason-k { color: var(--ink-3); font-weight: 500; }
+.ur-full {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  line-clamp: 4;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.ur-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+/* 좁은 목록(< 720px): 1줄 시각 · 방식 · 프로젝트, 2줄 질문, 3줄 소요 · 토큰 · 지분. 장부 표는 자기 상자 안에서 가로로 민다. */
+@container usage-list (max-width: 719.98px) {
+  .ur-sum { flex-wrap: wrap; row-gap: 4px; }
+  .ur-when { width: auto; }
+  .ur-mode { width: auto; }
+  .ur-proj { flex: 1 1 0; width: auto; min-width: 0; }
+  .ur-q { flex: 1 0 100%; }
+  .ur-nums { flex: 1 0 100%; justify-content: flex-start; }
+  .ur-dur, .ur-tok { width: auto; text-align: left; }
+  .ur-detail { margin-left: 2px; padding-left: 10px; }
+  .ur-toks { padding-left: 0; }
+  .ur-tk-src { width: auto; min-width: 3.6em; }
+  .ur-tk-bd { flex-basis: 100%; }
+  .ur-tk-models .ur-tk-bd { flex-basis: 100%; }
+}
+
+/* 모델 조합 좁은 목록(< 620px): 첫 줄 모델, 둘째 줄 숫자를 "항목 값" 쌍으로 */
+@container usage-models (max-width: 619.98px) {
+  .usage-grid-head { display: none; }
+  .usage-grid-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    column-gap: 14px;
+    row-gap: 4px;
+  }
+  .usage-cell-model { flex: 1 0 100%; width: 100%; }
+  .usage-cell.num { text-align: left; }
+  .usage-cell.num:empty { display: none; }
+  .usage-cell[data-label]::before { content: attr(data-label) " "; color: var(--ink-3); font-size: var(--fs-xs); }
+  .usage-grid-row.usage-grid-head { display: none; }
+}
+
+@media (max-width: 760px) {
   .usage .stat-line { flex-direction: column; gap: 10px; }
   .usage-head { align-items: flex-start; }
   .usage-bars { height: 120px; gap: 1px; }
-  /* 좁은 화면의 질문 기록: 표 대신 두 줄 행 — 윗줄 질문, 아랫줄 시각 · 방식 · 모델 · 숫자(이름을 붙여서) */
-  .usage-table.usage-rows thead { display: none; }
-  .usage-table.usage-rows, .usage-table.usage-rows tbody { display: block; }
-  .usage-table.usage-rows tbody tr { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 12px; row-gap: 2px; padding: 8px 0; border-bottom: 1px solid var(--line); }
-  .usage-table.usage-rows tbody td { border: 0; padding: 0; text-align: left; }
-  .usage-table.usage-rows td.usage-q { order: -1; flex: 1 0 100%; width: auto; max-width: 100%; }
-  .usage-table.usage-rows td.usage-model { max-width: 100%; }
-  .usage-table.usage-rows tbody tr[hidden] { display: none; }
-  .usage-table.usage-rows tr.usage-detail > td { flex: 1 0 100%; padding: 0; }
-  .usage-table.usage-rows td[data-label]::before { content: attr(data-label) " "; color: var(--ink-3); font-size: var(--fs-xs); }
 }
 

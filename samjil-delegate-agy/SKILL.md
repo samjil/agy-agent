@@ -76,6 +76,8 @@ Pick a tier and write it as `@model: <tier>` (details and fallbacks: `references
 
 If the user asks to delegate and the job belongs on the "keep" side, say so in one line and offer to do it directly; follow the user's choice. agy has no web search. Never trust factual claims from agy without checking.
 
+**Unsure how the agy CLI itself works** (flags, slash commands, output fields, settings, file locations)? Check `agy --help`, `agy help <subcommand>` and `agy models` first; if that does not answer it, ask agy before guessing or asking the user: a read-only `@model: quick` delegation without `@cwd` ("answer from what you know, no tools, say when unsure, give exact flag/field names"). When the Gemini 5-hour quota is used up, ask a Claude model inside agy directly (its quota is separate): `agy -p "<question>" --model claude-sonnet-5-5-low`. Treat the answer as unverified until you have run the flag or command once yourself.
+
 ### Optimize execution with slash commands (`@cmd` / `@mode`)
 
 Pair `@model:` with an optional `@cmd:` or `@mode:` directive when the task shape warrants it (details: `references/brief-and-commands.md`):
@@ -123,10 +125,10 @@ Budget per delegated task: **at most 3 Claude calls** (5 when you escalate once)
    ```
    The submit prints `[단계] <tier> (<model>) · 대기 한도 <s>` on stderr. Then, in the same message, run the wait in the background (`run_in_background`):
    `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$S/submit-task.ps1" -Poll <ID> -CancelOnTimeout` (without `-MaxWaitSec` it waits up to the tier's limit).
-   - `DEAD`: start the watcher first (`ensure-agy-running.ps1 -ConfirmDelaySeconds 0 -StaleThresholdSeconds 0`). `MANUAL_STOP` means the user stopped it on purpose: ask before starting, or do the job yourself. Details: `references/watcher.md`.
+   - `DEAD` or `MANUAL_STOP`: submit anyway — `submit-task.ps1` starts the watcher, or runs the task directly when the watcher cannot start. Never ask the user and never do the job yourself just because the watcher is off. Details: `references/watcher.md`.
    - Leave out `@cwd` for tasks that need no files. For tasks that read or write project files, confirm the project folder with the user once per conversation and say that agy runs with permissions skipped inside it (suggest it be under git). Never guess a folder. Before a large edit, save `git diff` somewhere first.
    - `@cwd` may point outside the current repository, for example a synced documents folder such as `@cwd: D:\OneDrive - Example\Projects\my-webview`. The same rules apply (confirm the folder with the user; if it is not under git, copy the files you will change somewhere first).
-   - In the Claude desktop app (when the `mcp__ccd_session_mgmt__get_usage` tool exists), call it in the same message as the submit (parallel, no extra call). In call 2, prefix the check command with `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$S/note-claude-limits.ps1" -FiveHourPct <percentUsed> -FiveHourReset <resetsAt> -WeekPct <percentUsed> -WeekReset <resetsAt> ;` from its `plan.windows` (5-hour limit / Weekly · all models). It feeds the viewer's Claude limit estimate. Skip it when the tool is missing or returns no plan.
+   - In the Claude desktop app (when `mcp__ccd_session_mgmt__get_usage` exists), call it in parallel with the first tool call of **every** question that uses tools (direct or delegated), at most once per 10 minutes, and prefix the next shell command with `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$S/note-claude-limits.ps1" -FiveHourPct <percentUsed> -FiveHourReset <resetsAt> -WeekPct <percentUsed> -WeekReset <resetsAt> ;` from `plan.windows` (5-hour limit / Weekly · all models). Skip when missing or empty.
 2. **Call 2: read the result and check it in one command**: the `-Poll` output, `git diff --stat` (and the diff you need to read) and the key test command, together in one shell call.
 3. **Call 3 (only if needed): fix the remainder yourself.**
 
@@ -152,7 +154,7 @@ Never pass agy output on unchecked. Bar: "as good as if Claude had done it".
 
 Never end an answer with a delegation tag, estimate line or level tag, whether you delegated or not. How each question was handled (direct or delegated, models, time, tokens) is collected from the conversation record and shown on the viewer's "실측 통계" page (`http://127.0.0.1:8787/#/stats`). Only the reason is yours to leave, in one short line:
 
-- **Direct:** prefix the question's first shell command with the note, in the same call: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$USERPROFILE/.samjil/delegate-agy/scripts/note-choice.ps1" -Mode direct -Reason "two-line edit, brief costs more" ; <your command>`. Never make a separate call for it. A question that needs no shell command leaves no note.
+- **Direct:** prefix the question's first shell command with the note, in the same call: `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$USERPROFILE/.samjil/delegate-agy/scripts/note-choice.ps1" -Mode direct -Reason "two-line edit, brief costs more" ; <your command>`. When also recording desktop usage (`note-claude-limits.ps1`), chain both prefixes in one command (`note-choice.ps1 ... ; note-claude-limits.ps1 ... ; <your command>`). Never make a separate call for either. A question that needs no shell command leaves no note.
 - **Delegated:** add `@reason: <one line>` to the brief's directive lines. It is recorded and not sent to agy.
 
 Nothing enforces this; a missing reason shows as "기록 없음". When you answer in Korean, the Korean rules and wording are in `references/full-rules-ko.md`.

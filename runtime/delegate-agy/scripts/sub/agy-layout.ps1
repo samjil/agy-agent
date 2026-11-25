@@ -51,6 +51,67 @@ function Test-WatcherCommandLineForRuntime(
     return ($normRuntime -eq $normDefault)
 }
 
+# 프로세스 명령줄에 -NoExit 가 들어 있는지 검사합니다(start-agy.ps1 콘솔 창처럼 스크립트가 끝나도 남아 있는 셸 판별용).
+function Test-WatcherCommandLineHasNoExit([string]$CommandLine) {
+    if (-not $CommandLine) { return $false }
+    return ($CommandLine -match '(?i)(?:^|\s)-NoExit(?:\s|$)')
+}
+
+# 보조 프로세스 검사(fallback 2)에서 프로세스 하나가 살아 있는 워처인지 판별합니다.
+# - 명령줄에 watch-agy.ps1 이 있고 지정한 런타임 폴더의 워처여야 합니다.
+# - -NoExit 가 없는 프로세스는 기존 규칙대로 살아 있는 것으로 봅니다.
+# - -NoExit 가 있는 프로세스는 스크립트가 끝나도 셸이 남아 있으므로, 잠금 파일의 PID 와 일치하거나
+#   이 PC 의 하트비트가 최근($StaleThresholdSeconds 이내, 0 이하면 비활성)일 때만 살아 있는 것으로 봅니다.
+function Test-AgyWatcherProcessAlive {
+    param(
+        $Process,
+        [string]$RuntimeDir,
+        [string]$ComputerName = $env:COMPUTERNAME,
+        [int]$StaleThresholdSeconds = 300,
+        [int]$LockPid = -1,
+        [string]$DefaultRuntimeDir = ""
+    )
+    if ($null -eq $Process) { return $false }
+    $cmdLine = ""
+    if ($Process.PSObject.Properties['CommandLine']) { $cmdLine = [string]$Process.CommandLine }
+    if ($cmdLine -notlike "*watch-agy.ps1*") { return $false }
+    if (-not (Test-WatcherCommandLineForRuntime $cmdLine $RuntimeDir $DefaultRuntimeDir)) { return $false }
+
+    if (-not (Test-WatcherCommandLineHasNoExit $cmdLine)) {
+        return $true
+    }
+
+    $procPid = 0
+    if ($Process.PSObject.Properties['ProcessId']) {
+        try { $procPid = [int]$Process.ProcessId } catch { $procPid = 0 }
+    } elseif ($Process.PSObject.Properties['Id']) {
+        try { $procPid = [int]$Process.Id } catch { $procPid = 0 }
+    }
+
+    $layout = Get-AgyLayout $RuntimeDir $ComputerName
+    $effectiveLockPid = $LockPid
+    if ($effectiveLockPid -lt 0) {
+        $effectiveLockPid = 0
+        if (Test-Path -LiteralPath $layout.LockFile -PathType Leaf) {
+            try { $effectiveLockPid = [int]((Get-Content -LiteralPath $layout.LockFile -Raw -ErrorAction SilentlyContinue).Trim()) } catch { $effectiveLockPid = 0 }
+        }
+    }
+    if ($effectiveLockPid -gt 0 -and $procPid -gt 0 -and $procPid -eq $effectiveLockPid) {
+        return $true
+    }
+
+    if ($StaleThresholdSeconds -gt 0) {
+        $hbFile = Join-Path $layout.HeartbeatDir ("hb_{0}.txt" -f $ComputerName)
+        $hb = Get-Item -LiteralPath $hbFile -ErrorAction SilentlyContinue
+        if ($hb) {
+            $ageSec = [int]((Get-Date) - $hb.LastWriteTime).TotalSeconds
+            if ($ageSec -le $StaleThresholdSeconds) { return $true }
+        }
+    }
+
+    return $false
+}
+
 function Get-AgyDataDir([string]$RuntimeDir) {
     if ($env:AGY_DELEGATE_DATA) { return $env:AGY_DELEGATE_DATA }
     $trimmed = $RuntimeDir.TrimEnd('\', '/')

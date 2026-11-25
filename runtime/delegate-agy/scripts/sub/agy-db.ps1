@@ -217,7 +217,12 @@ function Initialize-AgySqlite {
 #   18: tasks 에 Gemini 가 프롬프트만으로 산정한 예상 시간(estimated_sec) 추가 (2026-11-20 부터 쓰지 않음).
 #   19: usage_questions 에 위임을 보낸 서브에이전트 모델(agent_model · agent_effort) 추가. claude-meta 에서 채우므로 usage_files 는 비우지 않는다.
 #   20: claude_usage(위임별 Claude 토큰 집계 캐시) 추가. 다른 표는 건드리지 않는다.
-$script:AgyDbSchemaVersion = 20
+#   21: task_limits(완료된 위임별 한도 추정 스냅샷) 추가. 다른 표는 건드리지 않는다.
+#   22: task_quota(위임 완료 직후 실측한 agy 남은 한도) 추가. task_limits 에서 예전 gemini 항목 제거(claude 는 유지).
+#   23: task_models(위임별 실제 실행 모델 토큰) 추가. 다른 표는 건드리지 않는다.
+#   24: tasks 에 context_tokens(위임 호출에서 가장 컸던 컨텍스트 크기) 열 추가. 끝날 때 워처가 쓰고, 옛 위임은 실측 통계 수집의 백필이 채운다.
+#   25: usage_questions 에 본 세션에서 가장 컸던 한 호출의 컨텍스트(ctx_tokens · ctx_model) 추가. 열을 더할 때 usage_files 를 비워 예전 질문도 다시 계산한다.
+$script:AgyDbSchemaVersion = 25
 $script:AgyDbSchemaSql = @(
     "CREATE TABLE IF NOT EXISTS tasks (
         task_id TEXT PRIMARY KEY NOT NULL,
@@ -225,7 +230,7 @@ $script:AgyDbSchemaSql = @(
         input_tokens TEXT, output_tokens TEXT, thinking_tokens TEXT, total_tokens TEXT, elapsed_sec TEXT,
         status TEXT, session TEXT, session_id TEXT, question TEXT, answer TEXT, process TEXT,
         cum_input_tokens TEXT, cum_output_tokens TEXT, cum_thinking_tokens TEXT, cum_total_tokens TEXT, usage_basis TEXT,
-        estimated_sec TEXT,
+        estimated_sec TEXT, context_tokens INTEGER,
         updated_seq INTEGER NOT NULL DEFAULT 0)",
     "CREATE INDEX IF NOT EXISTS idx_tasks_seq ON tasks(updated_seq)",
     "CREATE INDEX IF NOT EXISTS idx_tasks_timestamp ON tasks(timestamp)",
@@ -239,6 +244,28 @@ $script:AgyDbSchemaSql = @(
         json TEXT,
         src_mtime TEXT,
         computed_at TEXT)",
+    "CREATE TABLE IF NOT EXISTS task_limits (
+        task_id TEXT PRIMARY KEY NOT NULL,
+        json TEXT,
+        captured_at TEXT)",
+    "CREATE TABLE IF NOT EXISTS task_quota (
+        task_id TEXT PRIMARY KEY NOT NULL,
+        measured_at TEXT,
+        five_used REAL,
+        five_reset TEXT,
+        week_used REAL,
+        week_reset TEXT,
+        concurrent INTEGER NOT NULL DEFAULT 0)",
+    "CREATE INDEX IF NOT EXISTS idx_task_quota_measured_at ON task_quota(measured_at)",
+    "CREATE TABLE IF NOT EXISTS task_models (
+        task_id TEXT NOT NULL,
+        model TEXT NOT NULL,
+        input INTEGER NOT NULL DEFAULT 0,
+        cache INTEGER NOT NULL DEFAULT 0,
+        output INTEGER NOT NULL DEFAULT 0,
+        thinking INTEGER NOT NULL DEFAULT 0,
+        steps INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(task_id, model))",
     # 실측 통계: 대화 기록 파일별로 어디까지 읽었는지 / Claude 가 남긴 사유 / 질문 한 건의 측정값(시각은 모두 UTC ISO 글자)
     "CREATE TABLE IF NOT EXISTS usage_files (path TEXT PRIMARY KEY NOT NULL, offset INTEGER NOT NULL DEFAULT 0, mtime TEXT)",
     "CREATE TABLE IF NOT EXISTS usage_notes (id INTEGER PRIMARY KEY, session TEXT, noted_at TEXT, mode TEXT, reason TEXT)",
@@ -250,6 +277,7 @@ $script:AgyDbSchemaSql = @(
         in_tokens INTEGER, cc_tokens INTEGER, cr_tokens INTEGER, out_tokens INTEGER,
         agy_tokens INTEGER, agy_sec INTEGER, task_ids TEXT, task_ok INTEGER, task_fail INTEGER, task_cancel INTEGER,
         reason TEXT, preview TEXT, auto INTEGER DEFAULT 0, end_ts TEXT,
+        ctx_tokens INTEGER, ctx_model TEXT,
         PRIMARY KEY(session, q_ts))",
     "CREATE INDEX IF NOT EXISTS idx_usage_questions_ts ON usage_questions(q_ts)"
 )
@@ -279,6 +307,10 @@ function Initialize-AgyDbSchema($Db, [string]$Path = "") {
             try { [void]$Db.Execute("ALTER TABLE tasks ADD COLUMN $cName TEXT", $null) } catch {}
         }
     }
+    # 스키마 v24: 컨텍스트 크기 열(숫자). 값은 비어 있다가 위임이 끝날 때 · 백필에서 채워진다.
+    if ($taskCols.Count -gt 0 -and -not $taskCols.ContainsKey('context_tokens')) {
+        try { [void]$Db.Execute("ALTER TABLE tasks ADD COLUMN context_tokens INTEGER", $null) } catch {}
+    }
 
     # 스키마 v17: 실측 통계 질문 표에 Claude 노력 단계 열. 예전 DB 에 열을 더하면 읽은 위치(usage_files)를 비워 다음 수집이 처음부터 다시 읽게 한다.
     try {
@@ -293,6 +325,12 @@ function Initialize-AgyDbSchema($Db, [string]$Path = "") {
             if ($uqCols.Count -gt 0 -and -not $uqCols.ContainsKey($col)) {
                 [void]$Db.Execute("ALTER TABLE usage_questions ADD COLUMN $col TEXT", $null)
             }
+        }
+        # 스키마 v25: 가장 컸던 한 호출의 컨텍스트. 예전 질문도 채우려고 읽은 위치(usage_files)를 비운다.
+        if ($uqCols.Count -gt 0 -and -not $uqCols.ContainsKey('ctx_tokens')) {
+            [void]$Db.Execute("ALTER TABLE usage_questions ADD COLUMN ctx_tokens INTEGER", $null)
+            [void]$Db.Execute("ALTER TABLE usage_questions ADD COLUMN ctx_model TEXT", $null)
+            [void]$Db.Execute("DELETE FROM usage_files", $null)
         }
     } catch {}
 
@@ -405,6 +443,35 @@ function Initialize-AgyDbSchema($Db, [string]$Path = "") {
             [void]$Db.Execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('usage_delta_migrated', '1')", $null)
         }
     }
+
+    # 스키마 v22: 기존 task_limits 의 gemini 항목은 제거하고 claude 만 남긴다(빈 행은 삭제).
+    try {
+        $tlGemRows = @($Db.Query("SELECT task_id, json FROM task_limits WHERE json LIKE '%gemini%'", $null))
+        if ($tlGemRows.Count -gt 0) {
+            Invoke-AgyDbTransaction $Db {
+                foreach ($tr in $tlGemRows) {
+                    $tid = [string]$tr['task_id']
+                    $rawJson = [string]$tr['json']
+                    if (-not $tid -or -not $rawJson) { continue }
+                    try {
+                        $obj = ConvertFrom-Json -InputObject $rawJson -ErrorAction Stop
+                        if ($null -eq $obj -or -not ($obj.PSObject.Properties['gemini'])) { continue }
+                        $kept = [ordered]@{}
+                        foreach ($p in $obj.PSObject.Properties) {
+                            if ($p.Name -eq 'gemini') { continue }
+                            $kept[$p.Name] = $p.Value
+                        }
+                        if ($kept.Count -eq 0) {
+                            [void]$Db.Execute("DELETE FROM task_limits WHERE task_id = ?", [object[]]@($tid))
+                        } else {
+                            $newJson = ConvertTo-Json -InputObject $kept -Depth 6 -Compress
+                            [void]$Db.Execute("UPDATE task_limits SET json = ? WHERE task_id = ?", [object[]]@($newJson, $tid))
+                        }
+                    } catch {}
+                }
+            }
+        }
+    } catch {}
 
     [void]$Db.Execute(("PRAGMA user_version = {0}" -f $script:AgyDbSchemaVersion), $null)
 }
@@ -768,4 +835,259 @@ function Set-ClaudeUsageCache($Db, [string]$TaskId, [string]$Json, [string]$SrcM
         'INSERT INTO claude_usage (task_id, json, src_mtime, computed_at) VALUES (?, ?, ?, ?) ON CONFLICT(task_id) DO UPDATE SET json=excluded.json, src_mtime=excluded.src_mtime, computed_at=excluded.computed_at',
         [object[]]@($TaskId, $Json, $SrcMtime, $ComputedAt)
     )
+}
+
+# ============================================================================
+# task_limits (완료된 위임별 한도 추정 스냅샷 — 최초 1회만 저장, 덮어쓰지 않음)
+# ============================================================================
+
+function Get-TaskLimitsSnapshot($Db, [string]$TaskId) {
+    if (-not $TaskId) { return $null }
+    $rows = $Db.Query('SELECT json, captured_at FROM task_limits WHERE task_id = ?', [object[]]@($TaskId))
+    if ($rows.Count -eq 0) { return $null }
+    $r = $rows[0]
+    return @{
+        json        = if ($null -ne $r['json']) { [string]$r['json'] } else { "" }
+        captured_at = if ($null -ne $r['captured_at']) { [string]$r['captured_at'] } else { "" }
+    }
+}
+
+function Get-TaskLimitsMap($Db) {
+    $map = @{}
+    foreach ($r in @($Db.Query('SELECT task_id, json, captured_at FROM task_limits', $null))) {
+        $tid = [string]$r['task_id']
+        if (-not $tid) { continue }
+        $map[$tid] = @{
+            json        = if ($null -ne $r['json']) { [string]$r['json'] } else { "" }
+            captured_at = if ($null -ne $r['captured_at']) { [string]$r['captured_at'] } else { "" }
+        }
+    }
+    return $map
+}
+
+function Set-TaskLimitsSnapshot($Db, [string]$TaskId, [string]$Json, [string]$CapturedAt) {
+    if (-not $TaskId -or -not $Json) { return $false }
+    $n = $Db.Execute(
+        'INSERT OR IGNORE INTO task_limits (task_id, json, captured_at) VALUES (?, ?, ?)',
+        [object[]]@($TaskId, $Json, $CapturedAt)
+    )
+    return ($n -gt 0)
+}
+
+# ============================================================================
+# task_quota (위임 완료 직후 실측한 agy 남은 한도 — 최초 1회만 저장, 덮어쓰지 않음)
+# ============================================================================
+
+function Save-TaskQuota($Db, [string]$TaskId, [string]$MeasuredAt, $FiveUsed, [string]$FiveReset, $WeekUsed, [string]$WeekReset, $Concurrent = 0) {
+    if (-not $TaskId) { return $false }
+    $fu = if ($null -ne $FiveUsed) { [double]$FiveUsed } else { $null }
+    $fr = if ($FiveReset) { [string]$FiveReset } else { $null }
+    $wu = if ($null -ne $WeekUsed) { [double]$WeekUsed } else { $null }
+    $wr = if ($WeekReset) { [string]$WeekReset } else { $null }
+    $conc = if ($Concurrent -is [bool]) { if ($Concurrent) { 1 } else { 0 } } else { if ([int]$Concurrent -ne 0) { 1 } else { 0 } }
+
+    $owned = $false
+    $conn = $Db
+    if ($Db -is [string]) {
+        $conn = Open-AgyDb ([string]$Db)
+        $owned = $true
+    }
+    try {
+        $n = $conn.Execute(
+            'INSERT OR IGNORE INTO task_quota (task_id, measured_at, five_used, five_reset, week_used, week_reset, concurrent) VALUES (?, ?, ?, ?, ?, ?, ?)',
+            [object[]]@($TaskId, $MeasuredAt, $fu, $fr, $wu, $wr, $conc)
+        )
+        return ($n -gt 0)
+    } finally {
+        if ($owned -and $null -ne $conn) { $conn.Dispose() }
+    }
+}
+
+function Get-TaskQuotaMap($Db) {
+    $map = @{}
+    $owned = $false
+    $conn = $Db
+    if ($Db -is [string]) {
+        $p = [string]$Db
+        if (-not $p -or -not (Test-Path -LiteralPath $p -PathType Leaf)) { return $map }
+        $conn = Open-AgyDb $p
+        $owned = $true
+    }
+    try {
+        foreach ($r in @($conn.Query('SELECT task_id, measured_at, five_used, five_reset, week_used, week_reset, concurrent FROM task_quota', $null))) {
+            $tid = [string]$r['task_id']
+            if (-not $tid) { continue }
+            $map[$tid] = @{
+                task_id     = $tid
+                measured_at = if ($null -ne $r['measured_at']) { [string]$r['measured_at'] } else { "" }
+                five_used   = if ($null -ne $r['five_used']) { [double]$r['five_used'] } else { $null }
+                five_reset  = if ($null -ne $r['five_reset']) { [string]$r['five_reset'] } else { "" }
+                week_used   = if ($null -ne $r['week_used']) { [double]$r['week_used'] } else { $null }
+                week_reset  = if ($null -ne $r['week_reset']) { [string]$r['week_reset'] } else { "" }
+                concurrent  = if ($null -ne $r['concurrent']) { [int]$r['concurrent'] } else { 0 }
+            }
+        }
+        return $map
+    } finally {
+        if ($owned -and $null -ne $conn) { $conn.Dispose() }
+    }
+}
+
+# ============================================================================
+# task_models (위임별 실제 실행 모델 토큰 — 최초 1회만 저장, 덮어쓰지 않음)
+# ============================================================================
+
+function Save-TaskModels($Db, [string]$TaskId, $Models) {
+    if (-not $TaskId -or $null -eq $Models) { return $false }
+    $items = New-Object System.Collections.ArrayList
+    foreach ($m in @($Models)) {
+        if ($null -eq $m) { continue }
+        $getVal = {
+            param($obj, [string]$k1, [string]$k2)
+            if ($obj -is [System.Collections.IDictionary]) {
+                if ($obj.Contains($k1)) { return $obj[$k1] }
+                if ($obj.Contains($k2)) { return $obj[$k2] }
+            } elseif ($obj.PSObject) {
+                $p1 = $obj.PSObject.Properties[$k1]
+                if ($null -ne $p1) { return $p1.Value }
+                $p2 = $obj.PSObject.Properties[$k2]
+                if ($null -ne $p2) { return $p2.Value }
+            }
+            return $null
+        }
+        $name = [string](& $getVal $m 'Model' 'model')
+        if ([string]::IsNullOrWhiteSpace($name)) { continue }
+        $inp = [int64](& $getVal $m 'Input' 'input')
+        $cac = [int64](& $getVal $m 'Cache' 'cache')
+        $out = [int64](& $getVal $m 'Output' 'output')
+        $thk = [int64](& $getVal $m 'Thinking' 'thinking')
+        $stp = [int](& $getVal $m 'Steps' 'steps')
+        [void]$items.Add([ordered]@{ model = $name.Trim(); input = $inp; cache = $cac; output = $out; thinking = $thk; steps = $stp })
+    }
+    if ($items.Count -eq 0) { return $false }
+
+    $owned = $false
+    $conn = $Db
+    if ($Db -is [string]) {
+        $conn = Open-AgyDb ([string]$Db)
+        $owned = $true
+    }
+    try {
+        $existing = @($conn.Query('SELECT 1 AS has_row FROM task_models WHERE task_id = ? LIMIT 1', [object[]]@($TaskId)))
+        if ($existing.Count -gt 0) { return $false }
+        $inserted = Invoke-AgyDbTransaction $conn {
+            $cnt = 0
+            foreach ($it in $items) {
+                $n = $conn.Execute(
+                    'INSERT OR IGNORE INTO task_models (task_id, model, input, cache, output, thinking, steps) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                    [object[]]@($TaskId, $it.model, $it.input, $it.cache, $it.output, $it.thinking, $it.steps)
+                )
+                if ($n -gt 0) { $cnt++ }
+            }
+            return ($cnt -gt 0)
+        }
+        return [bool]$inserted
+    } finally {
+        if ($owned -and $null -ne $conn) { $conn.Dispose() }
+    }
+}
+
+# 위임 한 건의 컨텍스트 크기(그 호출에서 마지막 턴이 모델에 보낸 입력 = 캐시 밖 입력 + 캐시 읽기)를 tasks.context_tokens 에 저장한다.
+# 비어 있을 때만 쓰고(덮어쓰지 않음) 0 이하 값은 저장하지 않는다. 저장했으면 true.
+function Save-TaskContext($Db, [string]$TaskId, $Context) {
+    if (-not $TaskId -or $null -eq $Context) { return $false }
+    $ctx = [int64]0
+    if (-not [int64]::TryParse([string]$Context, [ref]$ctx) -or $ctx -le 0) { return $false }
+    $owned = $false
+    $conn = $Db
+    if ($Db -is [string]) {
+        $conn = Open-AgyDb ([string]$Db)
+        $owned = $true
+    }
+    try {
+        $n = $conn.Execute('UPDATE tasks SET context_tokens = ? WHERE task_id = ? AND context_tokens IS NULL', [object[]]@($ctx, $TaskId))
+        return ($n -gt 0)
+    } finally {
+        if ($owned -and $null -ne $conn) { $conn.Dispose() }
+    }
+}
+
+function ConvertTo-TaskModelEntry($Row) {
+    $inp = if ($null -ne $Row['input']) { [int64]$Row['input'] } else { [int64]0 }
+    $cac = if ($null -ne $Row['cache']) { [int64]$Row['cache'] } else { [int64]0 }
+    $out = if ($null -ne $Row['output']) { [int64]$Row['output'] } else { [int64]0 }
+    $thk = if ($null -ne $Row['thinking']) { [int64]$Row['thinking'] } else { [int64]0 }
+    $stp = if ($null -ne $Row['steps']) { [int]$Row['steps'] } else { 0 }
+    return [pscustomobject][ordered]@{
+        model    = [string]$Row['model']
+        input    = $inp
+        cache    = $cac
+        output   = $out
+        thinking = $thk
+        total    = ($inp + $out)
+        steps    = $stp
+    }
+}
+
+function Get-TaskModelsForIds($Db, [string[]]$TaskIds) {
+    $map = @{}
+    $uniqueIds = @($TaskIds | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+    if ($uniqueIds.Count -eq 0) { return $map }
+
+    $owned = $false
+    $conn = $Db
+    if ($Db -is [string]) {
+        $p = [string]$Db
+        if (-not $p -or -not (Test-Path -LiteralPath $p -PathType Leaf)) { return $map }
+        $conn = Open-AgyDb $p
+        $owned = $true
+    }
+    try {
+        $grouped = @{}
+        for ($i = 0; $i -lt $uniqueIds.Count; $i += 500) {
+            $chunk = @($uniqueIds[$i..([Math]::Min($i + 499, $uniqueIds.Count - 1))])
+            $marks = (@($chunk | ForEach-Object { '?' }) -join ',')
+            foreach ($r in @($conn.Query("SELECT task_id, model, input, cache, output, thinking, steps FROM task_models WHERE task_id IN ($marks)", [object[]]$chunk))) {
+                $tid = [string]$r['task_id']
+                if (-not $tid) { continue }
+                if (-not $grouped.ContainsKey($tid)) { $grouped[$tid] = New-Object System.Collections.ArrayList }
+                [void]$grouped[$tid].Add((ConvertTo-TaskModelEntry $r))
+            }
+        }
+        foreach ($tid in $grouped.Keys) {
+            $sorted = @($grouped[$tid] | Sort-Object -Property @{ Expression = { $_.total }; Descending = $true }, @{ Expression = { $_.model }; Ascending = $true })
+            $map[$tid] = $sorted
+        }
+        return $map
+    } finally {
+        if ($owned -and $null -ne $conn) { $conn.Dispose() }
+    }
+}
+
+function Get-TaskModelsMap($Db) {
+    $map = @{}
+    $owned = $false
+    $conn = $Db
+    if ($Db -is [string]) {
+        $p = [string]$Db
+        if (-not $p -or -not (Test-Path -LiteralPath $p -PathType Leaf)) { return $map }
+        $conn = Open-AgyDb $p
+        $owned = $true
+    }
+    try {
+        $grouped = @{}
+        foreach ($r in @($conn.Query('SELECT task_id, model, input, cache, output, thinking, steps FROM task_models', $null))) {
+            $tid = [string]$r['task_id']
+            if (-not $tid) { continue }
+            if (-not $grouped.ContainsKey($tid)) { $grouped[$tid] = New-Object System.Collections.ArrayList }
+            [void]$grouped[$tid].Add((ConvertTo-TaskModelEntry $r))
+        }
+        foreach ($tid in $grouped.Keys) {
+            $sorted = @($grouped[$tid] | Sort-Object -Property @{ Expression = { $_.total }; Descending = $true }, @{ Expression = { $_.model }; Ascending = $true })
+            $map[$tid] = $sorted
+        }
+        return $map
+    } finally {
+        if ($owned -and $null -ne $conn) { $conn.Dispose() }
+    }
 }
