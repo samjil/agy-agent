@@ -9,7 +9,7 @@
 # 사용법:
 #   .\stop-agy.ps1                         # 워처 및 워치독 안전 종료 (PowerShell)
 
-param([string]$RepoRoot = (Split-Path -Path $PSScriptRoot -Parent), [string]$RuntimeDir = "")
+param([string]$RepoRoot = (Split-Path -Path $PSScriptRoot -Parent), [string]$RuntimeDir = "", [string]$ModelsConfigDir = "")
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
@@ -78,6 +78,38 @@ if ($watchdogProcs.Count -gt 0) {
 }
 
 
+
+function Set-SubAccountsPauseFlags {
+    $amPath = Join-Path $PSScriptRoot "sub\agy-models.ps1"
+    $abPath = Join-Path $PSScriptRoot "sub\agy-sub-bridge.ps1"
+    if (-not (Test-Path -LiteralPath $amPath -PathType Leaf) -or -not (Test-Path -LiteralPath $abPath -PathType Leaf)) { return }
+    try {
+        . $amPath
+        . $abPath
+        $cfgDir = if ($ModelsConfigDir) {
+            $ModelsConfigDir
+        } elseif ($env:AGY_MODELS_CONFIG_DIR) {
+            $env:AGY_MODELS_CONFIG_DIR
+        } else {
+            Join-Path (Split-Path $PSScriptRoot -Parent) "config"
+        }
+        $cfg = Get-AgyModelConfig $cfgDir
+        if (-not $cfg -or -not $cfg.SubAccounts -or -not $cfg.SubAccounts.Enabled) { return }
+        $bridgeRoot = Get-AgySubBridgeRoot $cfg.SubAccounts
+        $stamp = "paused manually at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')`r`n"
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        foreach ($slot in @($cfg.SubAccounts.Slots)) {
+            $slLayout = Get-AgySubSlotLayout -BridgeRoot $bridgeRoot -SlotId $slot.Id
+            New-Item -ItemType Directory -Force -Path (Split-Path $slLayout.PauseFlag -Parent) | Out-Null
+            [System.IO.File]::WriteAllText($slLayout.PauseFlag, $stamp, $utf8NoBom)
+            Write-Host "[+] 부계정 일시 정지 플래그 설정($($slot.Id)): $($slLayout.PauseFlag)" -ForegroundColor Green
+        }
+    } catch {
+        Write-Warning "부계정 pause.flag 설정 중 오류: $($_.Exception.Message)"
+    }
+}
+
+Set-SubAccountsPauseFlags
 
 if (-not (Test-Path $LogsDir)) {
 

@@ -188,6 +188,41 @@ try {
     Write-Output "[samjil-delegate-agy] 명세를 정할 수 있는 구현 · 수정 · 시험과 양 많은 단순 작업은 Hydrogen/Neon/Carbon 단계(@model: quick · build · build-hard · feature · feature-carbon · deep, 필요 시 @cmd: goal · swarm · run-workflow · boost · browser · plan)로 위임하고, 맥락이 필요한 일 · 한두 줄 수정은 직접 처리. 매우 복잡한 결정은 Neon(think) 또는 Carbon(think-carbon)과 상의한다(스킬 참고). 코드 · 문서 · 설정 파일 · xlsx/pptx 를 고치거나 만드는 일은 사용자가 위임이라고 말하지 않아도, 직접 시작하거나 Agent 도구로 넘기기 전에 samjil-delegate-agy 스킬을 먼저 불러온다. Agent 도구(Claude 서브에이전트)는 agy 로 못 하는 일(DB 조회 · VPN · 브라우저 · 메일 · 대화 맥락 판단)이거나 agy 가 실패 · 시간 초과했을 때만 쓴다."
     Write-Output $watcherLine
 
+    # 처리 안 한 위임 실패 · 취소 원인 요약 (DB 가 있을 때만, 1.5초 이내 응답을 위해 BusyMs=1000)
+    try {
+        $dbLib = Join-Path $PSScriptRoot "agy-db.ps1"
+        $docLib = Join-Path $PSScriptRoot "agy-failure-doctor.ps1"
+        if ((Test-Path -LiteralPath $dbLib -PathType Leaf) -and (Test-Path -LiteralPath $docLib -PathType Leaf)) {
+            $hookDbPath = ""
+            if ($env:AGY_DELEGATE_DB) {
+                $hookDbPath = $env:AGY_DELEGATE_DB
+            } else {
+                $layoutLib = Join-Path $PSScriptRoot "agy-layout.ps1"
+                if (Test-Path -LiteralPath $layoutLib -PathType Leaf) {
+                    . $layoutLib
+                    $hookDbPath = (Get-AgyLayout $RuntimeDir).DbPath
+                } else {
+                    $rtTrim = $RuntimeDir.TrimEnd('\', '/')
+                    if ((Split-Path -Leaf $rtTrim) -eq "runtime") {
+                        $hookDbPath = Join-Path (Split-Path $rtTrim -Parent) "data\delegate.db"
+                    } else {
+                        $hookDbPath = Join-Path $rtTrim "data\delegate.db"
+                    }
+                }
+            }
+            if ($hookDbPath -and (Test-Path -LiteralPath $hookDbPath -PathType Leaf)) {
+                . $dbLib
+                . $docLib
+                [void](Update-AgyFailureRecords -DbPath $hookDbPath -BusyMs 1000)
+                $inbox = Get-AgyFailureInbox -DbPath $hookDbPath -Days 30 -BusyMs 1000
+                if ($inbox -and [int]$inbox.total -ge 1) {
+                    $catSummary = (@($inbox.categories | Select-Object -First 4 | ForEach-Object { "{0} {1}" -f $_.label, $_.count })) -join ", "
+                    Write-Output ("agy 위임 실패 · 취소 중 처리 안 한 원인 {0}건({1}). 사용자 작업과 별개로 한 줄로 알리고, 원하면 samjil-delegate-agy 스킬의 '실패 원인 개선' 절차(diagnose-failures.ps1 로 분석 → 수정 제안 → -Ack 처리 표시)를 따른다." -f [int]$inbox.total, $catSummary)
+                }
+            }
+        }
+    } catch {}
+
     # 새 버전 안내(캐시만 읽음)와 백그라운드 확인 예약(완료는 기다리지 않고 다음 세션에서 반영)
     try {
         $effectiveInstallRoot = if ($InstallRoot) { $InstallRoot } elseif ($env:SAMJIL_INSTALL_ROOT) { $env:SAMJIL_INSTALL_ROOT } else { Join-Path $home_ ".samjil" }

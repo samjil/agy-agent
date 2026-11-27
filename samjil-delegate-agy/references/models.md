@@ -6,10 +6,11 @@ Write `@model: <tier>` in the directive lines. The tiers, their models, fallback
 |---|---|---|---|
 | `quick` | lookups, summaries, translation, format conversion, short questions (fastest, lowest quota) | hydrogen-low -> hydrogen-medium -> neon-low | 3 min |
 | `build` | boilerplate, unit tests, simple UI, clearly specified repeated edits (50%+ less quota than Carbon) | hydrogen-medium -> hydrogen-high -> neon-low | 8 min |
+| `build-high` | higher-reasoning Hydrogen implementation & same-level `agy-sub` delegation from a `high` session | hydrogen-high -> hydrogen-medium -> neon-medium | 10 min |
 | `build-hard` | multi-file edits, refactors, debugging, many edge cases, or failed `build` (~30% less quota than Carbon) | neon-medium -> neon-high -> hydrogen-xhigh -> carbon-medium | 12 min |
 | `feature` | multi-file feature where agy also plans the split and the steps (Neon plans/reviews + Hydrogen executes) | orchestrator-neon -> neon-high -> orchestrator-carbon -> hydrogen-high | 20 min |
 | `feature-carbon` | hard architecture/initial design across multiple files (Carbon reads/designs read-only + Hydrogen executes; ~24% less quota and ~19% faster than Carbon alone) | orchestrator-carbon -> carbon-high -> orchestrator-neon -> neon-high | 20 min |
-| `think` | design review, root cause of a hard bug, consultation (handoff default; Neon) | neon-high -> neon-medium -> carbon-high -> hydrogen-high | 20 min |
+| `think` | design review, root cause of a hard bug, consultation (Neon) | neon-high -> neon-medium -> carbon-high -> hydrogen-high | 20 min |
 | `think-carbon` | architecture/initial design, unexplained multi-service bug, hard legacy logic, final review before big changes — problems Neon could not solve (heaviest quota) | carbon-high -> carbon-medium -> neon-high -> neon-xhigh | 20 min |
 | `deep` | extreme logic in few files (algorithms, concurrency, parsers/state machines, numeric precision, performance targets), fixing a bug whose cause `think`/`think-carbon` found, failed `build-hard` re-sent | neon-xhigh (Extra) -> neon-high -> carbon-high -> hydrogen-xhigh | 20 min |
 

@@ -13,16 +13,31 @@
 #   .\start-agy.ps1 -Hidden                 # 콘솔 창 없이 백그라운드로 시작(로그는 logs\watcher.log)
 
 param(
-    [string]$RepoRoot    = (Split-Path -Path $PSScriptRoot -Parent),
-    [string]$RuntimeDir  = "",
-    [int]$WaitSeconds    = 30,
-    [switch]$CheckOnly   = $false,
-    [switch]$Hidden      = $false
+    [string]$RepoRoot        = (Split-Path -Path $PSScriptRoot -Parent),
+    [string]$RuntimeDir      = "",
+    [string]$ModelsConfigDir = "",
+    [int]$WaitSeconds        = 30,
+    [switch]$CheckOnly       = $false,
+    [switch]$Hidden          = $false
 )
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 try { chcp 65001 > $null } catch {}
+
+if (-not $CheckOnly) {
+    try {
+        $updateLib = Join-Path $PSScriptRoot "sub\update-check.ps1"
+        if (Test-Path -LiteralPath $updateLib -PathType Leaf) {
+            . $updateLib
+            $updNotice = Get-SamjilUpdateNotice -InstallRoot ""
+            if ($updNotice -and $updNotice.Available) {
+                Write-Host ("[알림] agy-agent 새 버전 {0} 이 나왔습니다(설치본 {1}). 업데이트: irm https://raw.githubusercontent.com/samjil/agy-agent/main/install.ps1 | iex" -f $updNotice.Latest, $updNotice.Installed) -ForegroundColor Yellow
+            }
+            Start-SamjilUpdateFetchBackground -InstallRoot ""
+        }
+    } catch {}
+}
 
 
 
@@ -90,9 +105,12 @@ $targets = @(
     "sub\watch-agy.ps1",
     "sub\agy-task-worker.ps1",
     "sub\ensure-agy-running.ps1",
-    "sub\handoff-pump.ps1",
     "sub\agy-rules.ps1",
     "sub\agy-gitguard.ps1",
+    "sub\agy-sub-bridge.ps1",
+    "sub\sub-supervisor.ps1",
+    "setup-sub-accounts.ps1",
+    "switch-sub-agy.ps1",
     "sub\log-qa.ps1"
 )
 
@@ -306,6 +324,35 @@ if (Test-WatcherAlive) {
 # -----------------------------------------------------------------------------
 # 3. 워처 기동 (기본: 새 콘솔 창 / -Hidden: 창 없이 백그라운드)
 # -----------------------------------------------------------------------------
+$amPath = Join-Path $PSScriptRoot "sub\agy-models.ps1"
+$abPath = Join-Path $PSScriptRoot "sub\agy-sub-bridge.ps1"
+if ((Test-Path -LiteralPath $amPath -PathType Leaf) -and (Test-Path -LiteralPath $abPath -PathType Leaf)) {
+    try {
+        . $amPath
+        . $abPath
+        $cfgDir = if ($ModelsConfigDir) {
+            $ModelsConfigDir
+        } elseif ($env:AGY_MODELS_CONFIG_DIR) {
+            $env:AGY_MODELS_CONFIG_DIR
+        } else {
+            Join-Path (Split-Path $PSScriptRoot -Parent) "config"
+        }
+        $subCfgRes = Get-AgyModelConfig $cfgDir
+        if ($subCfgRes -and $subCfgRes.SubAccounts -and $subCfgRes.SubAccounts.Enabled) {
+            $bridgeRoot = Get-AgySubBridgeRoot $subCfgRes.SubAccounts
+            foreach ($slot in @($subCfgRes.SubAccounts.Slots)) {
+                $slLayout = Get-AgySubSlotLayout -BridgeRoot $bridgeRoot -SlotId $slot.Id
+                if (Test-Path -LiteralPath $slLayout.PauseFlag -PathType Leaf) {
+                    Remove-Item -LiteralPath $slLayout.PauseFlag -Force -ErrorAction SilentlyContinue
+                    Write-Host "[+] 부계정 일시 정지 해제($($slot.Id)): $($slLayout.PauseFlag)" -ForegroundColor Green
+                }
+            }
+        }
+    } catch {
+        Write-Warning "부계정 pause.flag 해제 중 오류: $($_.Exception.Message)"
+    }
+}
+
 if ($Hidden) {
     # agy-spawn.ps1 의 Win32 CreateProcessW(CREATE_NO_WINDOW + STARTF_USESHOWWINDOW/SW_HIDE) 로 콘솔 창 없이 완전히 분리된 백그라운드 프로세스로 기동합니다.
     $launched = $false

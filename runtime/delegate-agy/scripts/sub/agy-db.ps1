@@ -82,6 +82,22 @@ namespace AgySqlite
             return new Db(h);
         }
 
+        public static Db OpenReadOnly(string path, int busyMs)
+        {
+            byte[] p = Encoding.UTF8.GetBytes(path + "\0");
+            IntPtr h;
+            // 1 = SQLITE_OPEN_READONLY
+            int rc = sqlite3_open_v2(p, out h, 1, IntPtr.Zero);
+            if (rc != OK)
+            {
+                string m = "열 수 없음";
+                if (h != IntPtr.Zero) { m = Marshal.PtrToStringAnsi(sqlite3_errmsg(h)); sqlite3_close_v2(h); }
+                throw new SqliteException(rc, "SQLite 읽기 전용 열기 실패(" + rc + "): " + m + " [" + path + "]");
+            }
+            sqlite3_busy_timeout(h, busyMs);
+            return new Db(h);
+        }
+
         IntPtr Prepare(string sql, object[] args)
         {
             IntPtr stmt;
@@ -222,7 +238,9 @@ function Initialize-AgySqlite {
 #   23: task_models(위임별 실제 실행 모델 토큰) 추가. 다른 표는 건드리지 않는다.
 #   24: tasks 에 context_tokens(위임 호출에서 가장 컸던 컨텍스트 크기) 열 추가. 끝날 때 워처가 쓰고, 옛 위임은 실측 통계 수집의 백필이 채운다.
 #   25: usage_questions 에 본 세션에서 가장 컸던 한 호출의 컨텍스트(ctx_tokens · ctx_model) 추가. 열을 더할 때 usage_files 를 비워 예전 질문도 다시 계산한다.
-$script:AgyDbSchemaVersion = 25
+#   26: 다중 계정 풀 지원: tasks 에 account · fallback_from · account_note, agy_sessions 에 account, 부계정 /usage 집계용 sub_quota 표 추가 (usage_files 비우지 않음).
+#   27: 위임 실패·취소 자동 분류 및 처리 표시(ack) 기록용 task_failures 표 추가.
+$script:AgyDbSchemaVersion = 27
 $script:AgyDbSchemaSql = @(
     "CREATE TABLE IF NOT EXISTS tasks (
         task_id TEXT PRIMARY KEY NOT NULL,
@@ -231,13 +249,15 @@ $script:AgyDbSchemaSql = @(
         status TEXT, session TEXT, session_id TEXT, question TEXT, answer TEXT, process TEXT,
         cum_input_tokens TEXT, cum_output_tokens TEXT, cum_thinking_tokens TEXT, cum_total_tokens TEXT, usage_basis TEXT,
         estimated_sec TEXT, context_tokens INTEGER,
+        account TEXT, fallback_from TEXT, account_note TEXT,
         updated_seq INTEGER NOT NULL DEFAULT 0)",
     "CREATE INDEX IF NOT EXISTS idx_tasks_seq ON tasks(updated_seq)",
     "CREATE INDEX IF NOT EXISTS idx_tasks_timestamp ON tasks(timestamp)",
     "CREATE TABLE IF NOT EXISTS agy_sessions (
         name TEXT PRIMARY KEY NOT NULL COLLATE NOCASE,
         conversation_id TEXT, cwd TEXT NOT NULL DEFAULT '[]', model TEXT,
-        created_at TEXT, last_used_at TEXT, turn_count INTEGER NOT NULL DEFAULT 0)",
+        created_at TEXT, last_used_at TEXT, turn_count INTEGER NOT NULL DEFAULT 0,
+        account TEXT DEFAULT 'primary')",
     "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY NOT NULL, value TEXT)",
     "CREATE TABLE IF NOT EXISTS claude_usage (
         task_id TEXT PRIMARY KEY NOT NULL,
@@ -257,6 +277,16 @@ $script:AgyDbSchemaSql = @(
         week_reset TEXT,
         concurrent INTEGER NOT NULL DEFAULT 0)",
     "CREATE INDEX IF NOT EXISTS idx_task_quota_measured_at ON task_quota(measured_at)",
+    "CREATE TABLE IF NOT EXISTS sub_quota (
+        task_id TEXT PRIMARY KEY NOT NULL,
+        slot_id TEXT NOT NULL,
+        measured_at TEXT,
+        five_used REAL,
+        five_reset TEXT,
+        week_used REAL,
+        week_reset TEXT,
+        login_epoch INTEGER NOT NULL DEFAULT 1)",
+    "CREATE INDEX IF NOT EXISTS idx_sub_quota_slot ON sub_quota(slot_id, measured_at)",
     "CREATE TABLE IF NOT EXISTS task_models (
         task_id TEXT NOT NULL,
         model TEXT NOT NULL,
@@ -266,6 +296,17 @@ $script:AgyDbSchemaSql = @(
         thinking INTEGER NOT NULL DEFAULT 0,
         steps INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY(task_id, model))",
+    "CREATE TABLE IF NOT EXISTS task_failures (
+        task_id TEXT PRIMARY KEY NOT NULL,
+        category TEXT NOT NULL,
+        label TEXT,
+        detail TEXT,
+        failed_at TEXT,
+        classified_at TEXT,
+        rule_version INTEGER NOT NULL DEFAULT 0,
+        acked_at TEXT,
+        ack_note TEXT)",
+    "CREATE INDEX IF NOT EXISTS idx_task_failures_ack ON task_failures(acked_at)",
     # 실측 통계: 대화 기록 파일별로 어디까지 읽었는지 / Claude 가 남긴 사유 / 질문 한 건의 측정값(시각은 모두 UTC ISO 글자)
     "CREATE TABLE IF NOT EXISTS usage_files (path TEXT PRIMARY KEY NOT NULL, offset INTEGER NOT NULL DEFAULT 0, mtime TEXT)",
     "CREATE TABLE IF NOT EXISTS usage_notes (id INTEGER PRIMARY KEY, session TEXT, noted_at TEXT, mode TEXT, reason TEXT)",
@@ -286,53 +327,74 @@ $script:AgyDbSchemaSql = @(
 # 값은 모두 글자(예전 jsonl 기록이 숫자도 글자로 담았다). process 는 도구 목록의 JSON 글자이고 NULL = "모름", "[]" = "없음".
 $script:QaRecordFields = @('timestamp', 'computer_name', 'task_id', 'source', 'model', 'attempts', 'tried_models', 'input_tokens', 'output_tokens',
     'thinking_tokens', 'total_tokens', 'elapsed_sec', 'status', 'session', 'session_id', 'question', 'answer', 'process',
-    'cum_input_tokens', 'cum_output_tokens', 'cum_thinking_tokens', 'cum_total_tokens', 'usage_basis', 'estimated_sec')
+    'cum_input_tokens', 'cum_output_tokens', 'cum_thinking_tokens', 'cum_total_tokens', 'usage_basis', 'estimated_sec',
+    'account', 'fallback_from', 'account_note')
 
 function Initialize-AgyDbSchema($Db, [string]$Path = "") {
     [void]$Db.Execute("PRAGMA journal_mode=WAL", $null)
-    foreach ($sql in $script:AgyDbSchemaSql) { [void]$Db.Execute($sql, $null) }
-    # 스키마 v3: tasks 표에 누적 토큰(cum_*) 및 산출 기준(usage_basis) 열 추가 및 기존 기록 마이그레이션
-    $taskCols = @{}
-    try {
+    $alreadyCurrent = Invoke-AgyDbTransaction $Db {
+        $verRows = @($Db.Query("PRAGMA user_version", $null))
+        if ($verRows.Count -gt 0 -and [int64]$verRows[0]["user_version"] -ge $script:AgyDbSchemaVersion) {
+            return $true
+        }
+        foreach ($sql in $script:AgyDbSchemaSql) { [void]$Db.Execute($sql, $null) }
+        # 스키마 v3: tasks 표에 누적 토큰(cum_*) 및 산출 기준(usage_basis) 열 추가
+        $taskCols = @{}
         $tInfo = $Db.Query("PRAGMA table_info(tasks)", $null)
         if ($tInfo) {
             foreach ($row in $tInfo) {
                 if ($row["name"]) { $taskCols[[string]$row["name"]] = $true }
             }
         }
-    } catch {}
-    $neededTaskCols = @('cum_input_tokens', 'cum_output_tokens', 'cum_thinking_tokens', 'cum_total_tokens', 'usage_basis', 'estimated_sec')
-    foreach ($cName in $neededTaskCols) {
-        if ($taskCols.Count -gt 0 -and -not $taskCols.ContainsKey($cName)) {
-            try { [void]$Db.Execute("ALTER TABLE tasks ADD COLUMN $cName TEXT", $null) } catch {}
+        $neededTaskCols = @('cum_input_tokens', 'cum_output_tokens', 'cum_thinking_tokens', 'cum_total_tokens', 'usage_basis', 'estimated_sec')
+        foreach ($cName in $neededTaskCols) {
+            if ($taskCols.Count -gt 0 -and -not $taskCols.ContainsKey($cName)) {
+                [void]$Db.Execute("ALTER TABLE tasks ADD COLUMN $cName TEXT", $null)
+            }
         }
-    }
-    # 스키마 v24: 컨텍스트 크기 열(숫자). 값은 비어 있다가 위임이 끝날 때 · 백필에서 채워진다.
-    if ($taskCols.Count -gt 0 -and -not $taskCols.ContainsKey('context_tokens')) {
-        try { [void]$Db.Execute("ALTER TABLE tasks ADD COLUMN context_tokens INTEGER", $null) } catch {}
-    }
+        # 스키마 v24: 컨텍스트 크기 열(숫자). 값은 비어 있다가 위임이 끝날 때 · 백필에서 채워진다.
+        if ($taskCols.Count -gt 0 -and -not $taskCols.ContainsKey('context_tokens')) {
+            [void]$Db.Execute("ALTER TABLE tasks ADD COLUMN context_tokens INTEGER", $null)
+        }
+        # 스키마 v26: tasks/agy_sessions 다중 계정 추적 열
+        foreach ($cName in @('account', 'fallback_from', 'account_note')) {
+            if ($taskCols.Count -gt 0 -and -not $taskCols.ContainsKey($cName)) {
+                [void]$Db.Execute("ALTER TABLE tasks ADD COLUMN $cName TEXT", $null)
+            }
+        }
+        $sessCols = @{}
+        foreach ($row in @($Db.Query("PRAGMA table_info(agy_sessions)", $null))) { if ($row["name"]) { $sessCols[[string]$row["name"]] = $true } }
+        if ($sessCols.Count -gt 0 -and -not $sessCols.ContainsKey('account')) {
+            [void]$Db.Execute("ALTER TABLE agy_sessions ADD COLUMN account TEXT DEFAULT 'primary'", $null)
+        }
 
-    # 스키마 v17: 실측 통계 질문 표에 Claude 노력 단계 열. 예전 DB 에 열을 더하면 읽은 위치(usage_files)를 비워 다음 수집이 처음부터 다시 읽게 한다.
-    try {
+        # 스키마 v17/v19/v25: 실측 통계 질문 표 열 보강 (오류 시 롤백해 user_version 이 앞서 올라가지 않게 함)
         $uqCols = @{}
         foreach ($row in @($Db.Query("PRAGMA table_info(usage_questions)", $null))) { if ($row["name"]) { $uqCols[[string]$row["name"]] = $true } }
+        $clearUsageFiles = $false
         if ($uqCols.Count -gt 0 -and -not $uqCols.ContainsKey('claude_effort')) {
             [void]$Db.Execute("ALTER TABLE usage_questions ADD COLUMN claude_effort TEXT", $null)
-            [void]$Db.Execute("DELETE FROM usage_files", $null)
+            $clearUsageFiles = $true
         }
-        # 스키마 v19: 위임을 보낸 서브에이전트 모델 · 노력 단계 열. claude-meta 에서 채우므로 usage_files 는 비우지 않는다.
         foreach ($col in @('agent_model', 'agent_effort')) {
             if ($uqCols.Count -gt 0 -and -not $uqCols.ContainsKey($col)) {
                 [void]$Db.Execute("ALTER TABLE usage_questions ADD COLUMN $col TEXT", $null)
             }
         }
-        # 스키마 v25: 가장 컸던 한 호출의 컨텍스트. 예전 질문도 채우려고 읽은 위치(usage_files)를 비운다.
         if ($uqCols.Count -gt 0 -and -not $uqCols.ContainsKey('ctx_tokens')) {
             [void]$Db.Execute("ALTER TABLE usage_questions ADD COLUMN ctx_tokens INTEGER", $null)
+            $clearUsageFiles = $true
+        }
+        if ($uqCols.Count -gt 0 -and -not $uqCols.ContainsKey('ctx_model')) {
             [void]$Db.Execute("ALTER TABLE usage_questions ADD COLUMN ctx_model TEXT", $null)
+            $clearUsageFiles = $true
+        }
+        if ($clearUsageFiles) {
             [void]$Db.Execute("DELETE FROM usage_files", $null)
         }
-    } catch {}
+        return $false
+    }
+    if ($alreadyCurrent) { return }
 
     # 기존 기록 마이그레이션 (한 번만, 되돌릴 수 있게)
     $alreadyMigrated = $false
@@ -491,6 +553,11 @@ function Open-AgyDb([string]$Path, [int]$BusyMs = 10000) {
         throw
     }
     return $db
+}
+
+function Open-AgyDbReadOnly([string]$Path, [int]$BusyMs = 3000) {
+    Initialize-AgySqlite
+    return [AgySqlite.Db]::OpenReadOnly($Path, $BusyMs)
 }
 
 # BEGIN IMMEDIATE ... COMMIT 으로 Body 를 실행한다. 오류가 나면 ROLLBACK 하고 그 오류를 그대로 던진다. Body 가 돌려준 값을 돌려준다.
@@ -739,6 +806,7 @@ function Get-AgySessionRow($Db, [string]$Key) {
     $rows = $Db.Query('SELECT * FROM agy_sessions WHERE name=?', [object[]]@($Key))
     if ($rows.Count -eq 0) { return $null }
     $r = $rows[0]
+    $acc = if ($r.ContainsKey('account') -and $null -ne $r['account'] -and [string]$r['account']) { [string]$r['account'] } else { 'primary' }
     return [pscustomobject][ordered]@{
         name            = [string]$r['name']
         conversation_id = [string]$r['conversation_id']
@@ -747,12 +815,14 @@ function Get-AgySessionRow($Db, [string]$Key) {
         created_at      = [string]$r['created_at']
         last_used_at    = [string]$r['last_used_at']
         turn_count      = [int]$r['turn_count']
+        account         = $acc
     }
 }
 
-function Set-AgySessionRow($Db, [string]$Key, [string]$ConversationId, $Cwd, [string]$Model, [string]$CreatedAt, [string]$LastUsedAt, [int]$TurnCount) {
-    [void]$Db.Execute('INSERT INTO agy_sessions (name, conversation_id, cwd, model, created_at, last_used_at, turn_count) VALUES (?,?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET conversation_id=excluded.conversation_id, cwd=excluded.cwd, model=excluded.model, created_at=excluded.created_at, last_used_at=excluded.last_used_at, turn_count=excluded.turn_count',
-        [object[]]@($Key, $ConversationId, (ConvertTo-AgyJsonArray $Cwd), $Model, $CreatedAt, $LastUsedAt, $TurnCount))
+function Set-AgySessionRow($Db, [string]$Key, [string]$ConversationId, $Cwd, [string]$Model, [string]$CreatedAt, [string]$LastUsedAt, [int]$TurnCount, [string]$Account = 'primary') {
+    if (-not $Account) { $Account = 'primary' }
+    [void]$Db.Execute('INSERT INTO agy_sessions (name, conversation_id, cwd, model, created_at, last_used_at, turn_count, account) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(name) DO UPDATE SET conversation_id=excluded.conversation_id, cwd=excluded.cwd, model=excluded.model, created_at=excluded.created_at, last_used_at=excluded.last_used_at, turn_count=excluded.turn_count, account=excluded.account',
+        [object[]]@($Key, $ConversationId, (ConvertTo-AgyJsonArray $Cwd), $Model, $CreatedAt, $LastUsedAt, $TurnCount, $Account))
 }
 
 # 경로로 부르는 세션 읽기. DB 가 없으면 $null.
@@ -903,6 +973,97 @@ function Save-TaskQuota($Db, [string]$TaskId, [string]$MeasuredAt, $FiveUsed, [s
     }
 }
 
+# ============================================================================
+# sub_quota (부계정 슬롯별 비동기 /usage 기록 — 구글 계정 교체 시 login_epoch 증가)
+# ============================================================================
+
+function Save-SubTaskQuota($Db, [string]$TaskId, [string]$SlotId, [string]$MeasuredAt, $FiveUsed, [string]$FiveReset, $WeekUsed, [string]$WeekReset) {
+    if (-not $TaskId -or -not $SlotId) { return $false }
+    $fu = if ($null -ne $FiveUsed) { [double]$FiveUsed } else { $null }
+    $fr = if ($FiveReset) { [string]$FiveReset } else { $null }
+    $wu = if ($null -ne $WeekUsed) { [double]$WeekUsed } else { $null }
+    $wr = if ($WeekReset) { [string]$WeekReset } else { $null }
+
+    $owned = $false
+    $conn = $Db
+    if ($Db -is [string]) {
+        $conn = Open-AgyDb ([string]$Db)
+        $owned = $true
+    }
+    try {
+        $inserted = Invoke-AgyDbTransaction $conn {
+            $dup = @($conn.Query('SELECT 1 AS has_row FROM sub_quota WHERE task_id = ? LIMIT 1', [object[]]@($TaskId)))
+            if ($dup.Count -gt 0) { return $false }
+
+            $epoch = [int64]1
+            $prevRows = @($conn.Query('SELECT five_used, five_reset, week_used, week_reset, login_epoch FROM sub_quota WHERE slot_id = ? ORDER BY measured_at DESC, rowid DESC LIMIT 1', [object[]]@($SlotId)))
+            if ($prevRows.Count -gt 0) {
+                $pr = $prevRows[0]
+                $epoch = if ($null -ne $pr['login_epoch'] -and [int64]$pr['login_epoch'] -ge 1) { [int64]$pr['login_epoch'] } else { [int64]1 }
+                $st = [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal
+                $inv = [System.Globalization.CultureInfo]::InvariantCulture
+                $parseDt = { param([string]$s) $d = [datetime]::MinValue; if ($s -and [datetime]::TryParse($s, $inv, $st, [ref]$d)) { return $d.ToUniversalTime() }; return $null }
+                $wrDt = & $parseDt $wr; $pWrDt = & $parseDt ([string]$pr['week_reset'])
+                $frDt = & $parseDt $fr; $pFrDt = & $parseDt ([string]$pr['five_reset'])
+                $mDt = & $parseDt $MeasuredAt
+                $swapped = $false
+                if ($null -ne $wu -and $null -ne $pr['week_used']) {
+                    $pWu = [double]$pr['week_used']
+                    $sameWk = ($null -ne $wrDt -and $null -ne $pWrDt -and [math]::Abs(($wrDt - $pWrDt).TotalSeconds) -le 120.0)
+                    $earlyReset = ($null -ne $wrDt -and $null -ne $pWrDt -and [math]::Abs(($wrDt - $pWrDt).TotalSeconds) -gt 120.0 -and $null -ne $mDt -and $mDt -lt $pWrDt)
+                    if (($sameWk -and $wu -lt ($pWu - 1.0)) -or $earlyReset) { $swapped = $true }
+                }
+                if (-not $swapped -and $null -ne $fu -and $null -ne $pr['five_used']) {
+                    $pFu = [double]$pr['five_used']
+                    $sameFive = ($null -ne $frDt -and $null -ne $pFrDt -and [math]::Abs(($frDt - $pFrDt).TotalSeconds) -le 120.0)
+                    if ($sameFive -and $fu -lt ($pFu - 2.0)) { $swapped = $true }
+                }
+                if ($swapped) { $epoch++ }
+            }
+
+            $n = $conn.Execute(
+                'INSERT OR IGNORE INTO sub_quota (task_id, slot_id, measured_at, five_used, five_reset, week_used, week_reset, login_epoch) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+                [object[]]@($TaskId, $SlotId, $MeasuredAt, $fu, $fr, $wu, $wr, $epoch)
+            )
+            return ($n -gt 0)
+        }
+        return [bool]$inserted
+    } finally {
+        if ($owned -and $null -ne $conn) { $conn.Dispose() }
+    }
+}
+
+function Get-LatestSubQuotas($Db) {
+    $map = @{}
+    $owned = $false
+    $conn = $Db
+    if ($Db -is [string]) {
+        $p = [string]$Db
+        if (-not $p -or -not (Test-Path -LiteralPath $p -PathType Leaf)) { return $map }
+        $conn = Open-AgyDb $p
+        $owned = $true
+    }
+    try {
+        foreach ($r in @($conn.Query('SELECT task_id, slot_id, measured_at, five_used, five_reset, week_used, week_reset, login_epoch FROM sub_quota ORDER BY measured_at DESC, rowid DESC', $null))) {
+            $sid = [string]$r['slot_id']
+            if (-not $sid -or $map.ContainsKey($sid)) { continue }
+            $map[$sid] = @{
+                task_id     = [string]$r['task_id']
+                slot_id     = $sid
+                measured_at = if ($null -ne $r['measured_at']) { [string]$r['measured_at'] } else { "" }
+                five_used   = if ($null -ne $r['five_used']) { [double]$r['five_used'] } else { $null }
+                five_reset  = if ($null -ne $r['five_reset']) { [string]$r['five_reset'] } else { "" }
+                week_used   = if ($null -ne $r['week_used']) { [double]$r['week_used'] } else { $null }
+                week_reset  = if ($null -ne $r['week_reset']) { [string]$r['week_reset'] } else { "" }
+                login_epoch = if ($null -ne $r['login_epoch']) { [int64]$r['login_epoch'] } else { 1L }
+            }
+        }
+        return $map
+    } finally {
+        if ($owned -and $null -ne $conn) { $conn.Dispose() }
+    }
+}
+
 function Get-TaskQuotaMap($Db) {
     $map = @{}
     $owned = $false
@@ -973,9 +1134,9 @@ function Save-TaskModels($Db, [string]$TaskId, $Models) {
         $owned = $true
     }
     try {
-        $existing = @($conn.Query('SELECT 1 AS has_row FROM task_models WHERE task_id = ? LIMIT 1', [object[]]@($TaskId)))
-        if ($existing.Count -gt 0) { return $false }
         $inserted = Invoke-AgyDbTransaction $conn {
+            $existing = @($conn.Query('SELECT 1 AS has_row FROM task_models WHERE task_id = ? LIMIT 1', [object[]]@($TaskId)))
+            if ($existing.Count -gt 0) { return $false }
             $cnt = 0
             foreach ($it in $items) {
                 $n = $conn.Execute(

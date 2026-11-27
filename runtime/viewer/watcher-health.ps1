@@ -127,6 +127,19 @@ function Start-EnsureWatcherProcess([string]$EnsureScript, [string]$RuntimeDir, 
 
 # 주기 점검 상태. IntervalSeconds 마다 한 번 점검합니다(첫 점검은 시작 후 한 주기 뒤:
 # 뷰어 시작 시점의 워처 기동은 serve-viewer.ps1 이 따로 처리합니다).
+<#
+.SYNOPSIS
+테스트용 워처 점검 주기(ms)를 환경변수 SAMJIL_TEST_WATCHER_CHECK_MS 에서 읽습니다.
+#>
+function Get-WatcherHealthTestIntervalMs {
+    $raw = [Environment]::GetEnvironmentVariable("SAMJIL_TEST_WATCHER_CHECK_MS")
+    if ($raw -match '^\d+$') {
+        $v = [int]$raw
+        if ($v -gt 0) { return $v }
+    }
+    return 0
+}
+
 # IntervalSeconds 가 0 이하이면 자동 점검은 하지 않고, "켜기" 요청만 처리하는 상태가 됩니다.
 function New-WatcherHealthState {
     param(
@@ -137,12 +150,13 @@ function New-WatcherHealthState {
         [scriptblock]$GetWatcherProcesses = $null,
         [string]$ComputerName = $env:COMPUTERNAME
     )
+    $tMs = Get-WatcherHealthTestIntervalMs
     return @{
         RuntimeDir          = $RuntimeDir
         ComputerName        = $ComputerName
         EnsureScript        = $EnsureScript
         IntervalSeconds     = $IntervalSeconds
-        NextCheckAt         = if ($IntervalSeconds -gt 0) { $Now.AddSeconds($IntervalSeconds) } else { [datetime]::MaxValue }
+        NextCheckAt         = if ($IntervalSeconds -gt 0) { if ($tMs -gt 0) { $Now.AddMilliseconds($tMs) } else { $Now.AddSeconds($IntervalSeconds) } } else { [datetime]::MaxValue }
         LastCheckAt         = $null
         LastLaunchAt        = $null
         LaunchCount         = 0
@@ -161,7 +175,8 @@ function Invoke-WatcherHealthTick {
         [scriptblock]$Launcher = { param($script, $runtime) Start-EnsureWatcherProcess $script $runtime }
     )
     if ($Now -lt $State.NextCheckAt) { return $null }
-    $State.NextCheckAt = $Now.AddSeconds($State.IntervalSeconds)
+    $tMs = Get-WatcherHealthTestIntervalMs
+    $State.NextCheckAt = if ($tMs -gt 0 -and $State.IntervalSeconds -gt 0) { $Now.AddMilliseconds($tMs) } else { $Now.AddSeconds($State.IntervalSeconds) }
     $State.LastCheckAt = $Now
 
     $alive = [bool](Test-WatcherAlive -RuntimeDir $State.RuntimeDir -ComputerName $State.ComputerName -GetWatcherProcesses $State.GetWatcherProcesses).Alive

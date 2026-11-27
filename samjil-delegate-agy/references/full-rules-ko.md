@@ -77,10 +77,11 @@ agy 가 할 수 있는 일을 Agent 도구로 넘기지 않는다. **Agent 도�
 |---|---|---|---|
 | `quick` | 조회 · 요약 · 번역 · 형식 변환 · 짧은 질문 (가장 빠르고 한도 최소) | Hydrogen low | 3분 |
 | `build` | 보일러플레이트 · 단위 테스트 · 단순 UI · 명세가 분명한 반복 수정 (**코드 작업 기본**, Carbon 대비 한도 50%+ 절감) | Hydrogen medium | 8분 |
+| `build-high` | Hydrogen 상위 추론 구현 · `high` 세션(Orchestrator 실행기 포함)의 `agy-sub` 동급 위임 | Hydrogen high | 10분 |
 | `build-hard` | 다중 파일 수정 · 리팩터링 · 디버깅 · 경계 조건이 많은 일반 실무 구현 · build 실패 재시도 (Carbon 대비 한도 ~30% 절감) | Neon medium | 12분 |
 | `feature` | 여러 파일 새 기능에서 작업 나누기 · 하위 계획까지 agy 에 맡길 때 (Neon 계획/검토 + Hydrogen 실행) | Orchestrator (Neon) | 20분 |
 | `feature-carbon` | 아키텍처·초기 설계가 까다로운 다중 파일 기능 (Carbon 읽기 전용 설계 + Hydrogen 실행, 단독 Carbon 대비 한도 ~24% 절감·~19% 빠름) | Orchestrator (Carbon) | 20분 |
-| `think` | 파일 수정은 적고 깊은 추론: 설계 검토 · 난해한 버그 원인 분석 · 상의 (협의 기본, 주력 Neon) | Neon high | 20분 |
+| `think` | 파일 수정은 적고 깊은 추론: 설계 검토 · 난해한 버그 원인 분석 · 상의 (주력 Neon) | Neon high | 20분 |
 | `think-carbon` | 아키텍처·초기 설계, 원인 불명 다중 서비스 버그, 난해한 레거시, 대규모 변경 최종 검토 — Neon 으로 풀지 못한 일 (한도 소모 최대) | Carbon high | 20분 |
 | `deep` | 파일 수는 적어도 논리가 극도로 까다로운 구현: 알고리즘 · 동시성/경쟁 조건 · 파서/상태 기계 · 수치 정밀도 · 측정 목표가 있는 성능 개선 · think/think-carbon 이 원인을 짚은 버그의 수정 · build-hard 실패의 다시 보내기 | Neon Extra (xhigh) | 20분 |
 
@@ -111,7 +112,7 @@ agy 가 할 수 있는 일을 Agent 도구로 넘기지 않는다. **Agent 도�
 
 기준: 여러 모듈에 걸친 설계, 되돌리기 어려운 구조 변경, 원인이 안 보이는 버그, 방향이 둘 이상이라 고르기 어려운 결정.
 
-- 상의는 `samjil-handoff` 채널(협의)로 한다. 협의 기본 단계는 `think`(Neon high)이며, 최난도 아키텍처·초기 설계·원인 불명 다중 서비스 버그·난해한 레거시·대규모 변경 최종 검토처럼 세컨드 오피니언이나 Neon 으로 풀리지 않는 판단이 필요하면 메시지 머리말에 `위임모델: think-carbon` 을 적는다.
+- 상의는 `submit-task.ps1` 위임(`@model: think` 기본, 이어서 논의할 때는 `@session: consult-<주제>`)으로 한다. 최난도 아키텍처·초기 설계·원인 불명 다중 서비스 버그·난해한 레거시·대규모 변경 최종 검토처럼 세컨드 오피니언이나 Neon 으로 풀리지 않는 판단이 필요하면 `@model: think-carbon` 을 적는다.
 - 보내는 것: 문제, 선택지, Claude 의 추천과 이유, **관련 파일 경로와 지켜야 할 제약**(상대 모델은 이 대화를 모른다). 그리고 항상 "단순 동의 금지 — 반론 · 놓친 경계 조건 · 대안 위주로, 바꾸기를 권하는 것은 번호 목록으로"를 넣는다.
 - 횟수: 원칙 1회 왕복, 최대 2회(핵심 아키텍처 결정 시 Neon/Carbon 교차 세컨드 오피니언 등). 상의 호출은 위임 한 건의 "Claude 호출 3회" 한도와 따로 센다.
 - 상의가 대기 한도(20분)를 넘기거나 실패하면 다시 묻지 않고 혼자 결정하고, 상의하지 못했다는 사실을 사용자에게 알린다.
@@ -125,7 +126,7 @@ agy 가 할 수 있는 일을 Agent 도구로 넘기지 않는다. **Agent 도�
 - 한도 안에 안 끝나면 그 대기가 작업을 취소하고(`===CANCELLED=== <ID>`, 종료 코드 4) Claude 가 직접 한다. 단계의 대기 한도가 지났을 때 작업이 여전히 진행 중(새 단계·도구 출력 등)이거나 대기열에서 차례를 기다리는 중이면 계속 기다리며, 최근 5분 동안 진행이 없거나 2시간 절대 한도를 넘기면 취소한다. 반복해서 확인하지 않는다(확인할 때마다 대화 전체를 다시 읽는다).
 - `-MaxWaitSec <초>` 는 `-WaitSeconds` 와 같은 뜻이고 주면 그것을 쓴다(안 주고 `-CancelOnTimeout` 도 없으면 기본 170초). 
 - 일찍 취소하려면 `submit-task.ps1 -Cancel <ID>`: 대기 중이면 inbox 의 지시 파일을 치우고, 실행 중이면 `running\<ID>.json` 의 작업자 프로세스 트리를 끝낸다. 워처가 취소 표시(`running\<ID>.cancel`)를 보고 그 작업을 실패가 아니라 **취소(CANCELLED)** 로 마무리하고(워처가 꺼져 있으면 submit-task 가 직접 마무리한다), 뷰어 카드는 "취소"로 보인다. 이미 끝난 작업은 `===DONE===`, 없는 작업은 `===NOTFOUND===` 이다.
-
+- **상태는 추측하지 않고 확인한다:** 사용자에게 위임이 "아직 도는 중" · "기다리는 중"이라고 말하기 전에 `submit-task.ps1 -Status <ID>`(즉시 끝나는 읽기 전용 확인. `===STATUS=== <ID> <상태> | ...`, 종료 코드 0 끝남 / 2 대기열 · 실행 중 / 4 작업자 사라짐)로 실제 상태를 보고 "몇 시에 끝남", "실행 중, 마지막 활동 N초 전", "작업자 사라짐"처럼 구체적으로 알린다. 대기를 맡긴 서브에이전트가 "백그라운드 작업을 기다리는 중"으로 오래 남아 있으면 그냥 기다리지 말고 `-Status` 와 그 서브에이전트가 띄운 프로세스를 직접 확인한다. 서브에이전트에게는 대기 · 시험마다 벽시계 상한(예: "15분을 넘기면 그때까지의 결과로 보고")을 준다.
 ### 5. 다시 보내기는 사다리대로 한 단계 · 한 번만
 
 - 시험에서 막히면 `build` → `build-hard`, `build-hard` → `deep` 으로 **한 단계만** 올려 한 번 다시 보낸다(같은 브리프 + 무엇이 실패했는지). 워처의 실패 메시지에도 `[단계 build. 한 단계 올려 다시 보낼 곳: build-hard]` 처럼 적힌다.
@@ -136,6 +137,7 @@ agy 가 할 수 있는 일을 Agent 도구로 넘기지 않는다. **Agent 도�
 ### 6. 위임 한 건의 Claude 호출은 3회 이내 (다시 보내면 5회)
 
 1. **호출 1**: 워처 확인 + 제출(`-NoWait`) + 백그라운드 대기(`-Poll <ID> -CancelOnTimeout`)를 한 메시지에서. 큰 수정 전에는 `git diff` 를 먼저 저장해 둔다.
+   - 제출 출력에 `===UPDATE_AVAILABLE===`(종료 코드 5)가 나오면 아무것도 대기열에 들어가지 않은 것이다. 사용자에게 새 버전이 있음을 한 줄로 알리고 먼저 업데이트할지(출력된 PowerShell 명령 또는 뷰어 업데이트 버튼) 묻는다. 업데이트하지 않고 진행하려면 같은 브리프를 그대로 다시 보낸다(같은 버전은 24시간 동안 통과한다).
 2. **호출 2**: 결과 읽기와 확인을 한 명령으로 — `-Poll` 결과 + `git diff --stat`(필요한 diff) + 시험 명령.
 3. **호출 3**(필요하면): 직접 보완.
 - **Claude 데스크톱 앱 사용률 수집:** `mcp__ccd_session_mgmt__get_usage` 도구가 있으면 도구를 쓰는 **모든 질문(직접 · 위임 공통)**의 첫 도구 호출과 병렬로 부른다(최대 10분에 한 번). 이어지는 다음 셸 명령 앞에 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$USERPROFILE/.samjil/delegate-agy/scripts/note-claude-limits.ps1" -FiveHourPct <percentUsed> -FiveHourReset <resetsAt> -WeekPct <percentUsed> -WeekReset <resetsAt> ;` 를 붙여 `plan.windows`(5-hour limit / Weekly · all models) 값을 남긴다(뷰어 한도 추정용; 도구가 없거나 `plan` 이 비면 건너뜀).
@@ -211,6 +213,33 @@ agy 의 플래그 · 슬래시 명령 · 출력 필드 · 설정 · 파일 위�
 - 사실 주장(수치, 최신 정보, 인용)은 확인하거나 뺀다.
 - **미달이면 다시 맡기지 않고 직접 고친다**(위 "다시 맡기지 않는다"). 사소한 오류는 바로 고친다.
 - agy 가 작업 중인 저장소에는 Claude 나 서브에이전트가 같은 때에 쓰지 않는다.
+
+## 실패 원인 개선 (세션 시작 알림 → 원인 분석 → 수정 제안 → 처리 표시)
+
+위임이 실패 · 취소되면 원인이 자동으로 분류되어 DB(`task_failures` 표)에 남는다. 워처가 1분마다 분류하고, 세션 시작 훅 · 뷰어 · 진단 명령도 열 때마다 분류한다. 분류는 다음과 같다.
+
+| 분류 | 뜻 | 보통의 조치 |
+|---|---|---|
+| `quota_exhausted` 한도 소진 | Individual quota reached · 429 | 재설정까지 부계정 · 다른 한도 묶음으로 보내거나 직접 처리. 워처는 소진 뒤 같은 묶음 폴백을 건너뛰고 표시 파일로 바로 실패한다 |
+| `server_overloaded` 서버 과부하 | 503 · No capacity | 잠시 뒤 재시도. `@model` 을 모델 이름 하나로 고정하지 말고 단계로 보내 폴백을 허용 |
+| `model_error` 모델 오류 · 400 | 모델 미인식 · invalid model selection · HTTP 400 | `agy models` 로 가용 목록 확인, `models.json` · `models.local.json` 단계 모델 확인 |
+| `brief_problem` 브리프 문제 | 없는 `@cwd` · 쓸 수 없는 `@model` · `$` 확장된 경로 · `[NEED INFO]` | 브리프는 따옴표 있는 here-doc(`<<'EOF'`)으로 보내고 지시 줄 값을 확인 |
+| `stalled` 멈춤 | 진행 없음으로 취소 · 이어 물어도 멈춤 | 작업을 더 작게 나누거나 단계를 올림. 멈춤 판정이 틀렸으면 agy-progress 수정 |
+| `timeout` 시간 초과 | 대기 한도 · 2시간 상한을 넘김 | 단계 대기 한도 · 작업 크기 점검 |
+| `watcher_problem` 워처 · 작업자 문제 | 작업자가 사라짐 · 시작 후 결과 없이 반복 종료 · 작업자 오류 | `watcher.log` 의 `[작업 ID]` 줄과 `작업자 오류` 줄 확인, 워처 재시작 |
+| `account_problem` 계정 · 부계정 문제 | 부계정 오프라인 · 로그인 · 주 계정 폴백 꺼짐 | `switch-sub-agy.ps1` 로 부계정 로그인 확인 |
+| `transient_backend` 일시 오류 | 빈 대화 ID · 인증 지연 · 스트림 끊김 | 다시 보내기. 반복되면 agy 로그인 상태 확인 |
+| `content_blocked` 안전 필터 | 모델 출력이 안전 필터에 막힘 | 지시문 표현 조정 |
+| `unknown` 미분류 | 위에 없음 | 답 전문과 로그를 보고 분류 규칙(`agy-failure-doctor.ps1`) 추가 검토 |
+
+사용자 취소(`user_cancelled`)와 기능 도입 전 3일 넘은 기록은 자동으로 처리 표시된다.
+
+**세션 시작 훅이 "처리 안 한 원인 n건"을 알리면** 다음 순서로 한다.
+
+1. **알린다:** 사용자의 실제 요청과 함께 한 줄로 알린다. 세션을 이 일로 가로채지 않는다. 사용자가 처리를 원할 때만 이어 간다.
+2. **원인 분석:** `powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$S/diagnose-failures.ps1"`(처리 안 한 원인이 맨 위, `-Json` 은 상세). 뷰어에서는 실측 통계 › 실패 · 취소 진단. 분류별 예시 작업의 답(`data/tasks/outbox/<ID>.response.md`)과 `runtime/logs/watcher.log` 의 `[<ID>]` 줄을 읽고, 분류가 맞는지부터 본다(틀리면 분류 규칙도 고칠 거리다).
+3. **수정 제안:** 분류마다 한 줄씩 무엇이 문제였고 무엇을 고칠지(런타임 코드 · 설정 · 브리프 습관), 또는 "외부 요인이라 고칠 것 없음"(한도 재설정 · 503)을 제안한다. 런타임 코드 수정은 보통 위임(명세 + 시험)으로 하고, 설정 · 정책 변경은 사용자에게 먼저 묻는다.
+4. **처리 표시:** 분석을 마친 것만 `diagnose-failures.ps1 -Ack -Category <분류> -Note "<한 일>"`(또는 `-TaskId <ID>`, 전부면 `-All`)로 표시한다. 고친 뒤에도 같은 원인이 새로 생기면 다시 알림에 뜬다.
 
 ## 사전 조건 및 런타임 자동 확인/설치
 
@@ -473,7 +502,7 @@ $S -Poll <ID1>,<ID2>
   모델을 바꿔 새 대화로 옮기려면 `@upgrade: true`(이전 질문·답 2쌍을 글로 붙인다).
 - `지정한 @model 을 쓸 수 없습니다` 오류는 값이 단계 이름도 허용 모델도 아니라는 뜻이다(워처는 agy를 부르지 않는다). 오류에 적힌 목록으로 고쳐 다시 보낸다.
 - **성능 · 한도 특성**: Carbon(`high` AA 60, ~56 tok/s, 첫 토큰 ~73초, 기준 100%, $4/$20), Neon(`high` 60 / `xhigh` 61, AA Coding Agent 1위 58.64, ~101–110 tok/s, 첫 토큰 ~41초, 한도 ~30–32% 절감, $3/$15), Hydrogen(`high` 51 / `xhigh` 54, ~165–170 tok/s, 첫 토큰 ~20초, 한도 50%+ 절감, $1.50/$7.50). `Orchestrator (Carbon)` 은 단독 Carbon 대비 한도 ~24% 절감 · 완료 속도 ~19% 빠르다.
-- **멈춤 확인 · 이어서 묻기 (`AGY_STALL_SECONDS` / `AGY_STALL_GRACE_SECONDS`):** 새 단계가 `AGY_STALL_SECONDS`(기본 300초) 동안 없어도 바로 끊지 않고 `확인 중(checking)`으로 전환해 `cli-*.log`의 진행 중인 모델 요청(`생각 중`)과 도구 자식 프로세스(MCP node 서버 제외)의 최근 60초 CPU 활동(`명령 실행 중`)을 60초마다 확인한다(활성 신호가 있으면 2시간 절대 상한까지 계속 대기). 활성 신호 없이 유예 시간 `AGY_STALL_GRACE_SECONDS`(기본 300초)가 더 지나면 실행을 중단한 뒤 같은 대화(`agy --conversation <대화 ID>`)에 진행 상황을 이어서 묻는다(작업당 최대 2회). 이어서 받은 답변이 정상이면 최종 답변으로 채택되고, 첫 줄이 `[진행 불가]`이면 실패로 기록하되 답변을 보존하며, 2회 질문 뒤에도 유예 시간을 넘기면 기존과 같이 멈춤 실패로 끝낸다. `submit-task.ps1 -Poll -CancelOnTimeout` 도 실행 표시의 `probe_state`가 `checking` · `thinking` · `tool running` · `asked`인 동안은 진행 중으로 보아 취소하지 않는다(2시간 절대 한도는 유지).
+- **멈춤 확인 · 이어서 묻기 (`AGY_STALL_SECONDS` / `AGY_STALL_GRACE_SECONDS`):** 새 단계가 `AGY_STALL_SECONDS`(기본 300초) 동안 없어도 바로 끊지 않고 `확인 중(checking)`으로 전환해 `cli-*.log`의 진행 중인 모델 요청(`생각 중`)과 도구 자식 프로세스(MCP node 서버 제외)의 최근 60초 CPU 활동(`명령 실행 중`)을 60초마다 확인한다(생각 중은 `AGY_THINK_MAX_SECONDS` 기본 1200초=20분, 명령 실행 중은 `AGY_TOOL_MAX_SECONDS` 기본 1800초=30분 상한까지 계속 대기하며 전체 작업은 2시간 절대 상한을 따름). 활성 신호 없이 유예 시간 `AGY_STALL_GRACE_SECONDS`(기본 300초)가 더 지나면 실행을 중단한 뒤 같은 대화(`agy --conversation <대화 ID>`)에 진행 상황을 이어서 묻는다(작업당 최대 2회). 이어서 받은 답변이 정상이면 최종 답변으로 채택되고, 첫 줄이 `[진행 불가]`이면 실패로 기록하되 답변을 보존하며, 2회 질문 뒤에도 유예 시간을 넘기면 기존과 같이 멈춤 실패로 끝낸다. `submit-task.ps1 -Poll -CancelOnTimeout` 도 실행 표시의 `probe_state`가 `checking` · `thinking` · `tool running` · `asked`인 동안은 진행 중으로 보아 취소하지 않는다(2시간 절대 한도는 유지).
 - **"멈춤 판정" 오류가 나도 결과가 남아 있을 수 있다.** agy 가 최종 응답을 대화 기록에 남겼는데 프로세스만 끝나지 않으면, 워처는 끊기 직전에
   그 응답을 **자동으로 회수해 성공(OK)으로 기록한다**(`data/tasks/outbox/<id>.error.log` 에 회수했다는 안내가 남는다). 그래도 "멈춤 판정" 오류로 끝났다면
   최종 응답이 없던 것이니, 직접 처리로 넘기기 전에 `logs/watcher.log` 의 마지막 단계 줄과 `~/.gemini/antigravity-cli/brain/<대화 ID>/.system_generated/logs/transcript_full.jsonl`
@@ -481,7 +510,20 @@ $S -Poll <ID1>,<ID2>
 
 ## agy 모델과 로그
 
-`watch-agy.ps1`이 `--model`을 직접 지정해 호출한다. 단계면 설정의 순서대로(한도 · 과부하 오류일 때만 다음 모델), 모델 이름이면 그 모델 하나만 쓴다. 결과는 `~/.samjil/delegate-agy/data/delegate.db`(SQLite, 작업별 사용량·질문·답·과정)에 자동 기록된다(모델 칸에는 실제로 쓴 모델, 시도한 모델 칸에는 시도한 순서가 들어간다). CSV 가 필요하면 `tools\export-usage-csv.ps1` 로 만든다. 이 위임 기록과 Handoff 인수인계 내역은 통합 대시보드(`~/.samjil/viewer/serve-viewer.ps1` / http://127.0.0.1:8787)에서 브라우저 탭으로 실시간 확인할 수 있다.
+`watch-agy.ps1`이 `--model`을 직접 지정해 호출한다. 단계면 설정의 순서대로(한도 · 과부하 오류일 때만 다음 모델), 모델 이름이면 그 모델 하나만 쓴다. 결과는 `~/.samjil/delegate-agy/data/delegate.db`(SQLite, 작업별 사용량·질문·답·과정)에 자동 기록된다(모델 칸에는 실제로 쓴 모델, 시도한 모델 칸에는 시도한 순서가 들어간다). CSV 가 필요하면 `tools\export-usage-csv.ps1` 로 만든다. 이 위임 기록은 통합 대시보드(`~/.samjil/viewer/serve-viewer.ps1` / http://127.0.0.1:8787)에서 브라우저 탭으로 실시간 확인할 수 있다.
+
+## 멀티 계정 부계정 풀 (`sub_accounts`, 선택 사항)
+
+- `models.local.json` 에 `sub_accounts.enabled = true` 를 넣지 않으면(또는 `false` 이면) **기존 단일 계정 동작과 100% 동일**하게 본계정 하나만 사용한다.
+- **초기 구성 (관리자 PowerShell 최초 1회):** `setup-sub-accounts.ps1 -Slots sub1,sub2` 로 로컬 Windows 부계정(`agy-sub1`, `agy-sub2`), 비비밀 `settings.json`(`mcp_config.json` 은 복사하지 않음), 스킬 읽기 전용 정션(`.agents\skills` · `.gemini\config\rules`), `C:\ProgramData\samjil\sub-bridge` 브리지 및 `C:\ProgramData\samjil\delegate-agy` 공용 스크립트, `LogonType=Password` 스케줄 작업(`samjil-agy-sub-*` -> `sub-supervisor.ps1`)을 구성한다. 구성 뒤 각 슬롯에서 `switch-sub-agy.ps1 -Slot <slot>` 으로 최초 `agy` Google 로그인을 마친다.
+- **자동 라우팅 및 폴백:**
+  - `model_pattern` (기본 `^gemini-4-hydrogen-`) 과 일치하는 작업(예: `quick` / `build` / `gemini-4-hydrogen-*`)만 부계정 슬롯(`running` 가장 적고 쿨다운이 없는 슬롯)으로 전달한다. `@cmd: browser` 및 MCP가 필요한 작업(`primary_only_cmds`)은 항상 본계정이 맡는다.
+  - 한도 초과(`quota_exceeded`) 또는 ACK 타임아웃이 나면 해당 슬롯을 `cooldown_sec`(기본 60초, `models.local.json` 으로 조정 가능) 동안 쿨다운하고 **남은 건강한 부계정 -> 모두 소진되면 본계정** 순으로 자동 폴백한다. 폴백이 일어나면 결과 stderr 에 `[계정 폴백 경고]` 를 출력한다.
+- **한도 · 뷰어 격리:** 부계정 작업의 사후 `/usage` 는 `sub_quota` 와 `usage-history.jsonl` (`src = "agy-sub:<slot>"`) 에 별도로 쌓이며 본계정 Gemini 한도 추정과 `limits_at.gemini` 를 오염시키지 않는다.
+- **수명주기 및 계정 전환:**
+  - `stop-agy.ps1` / `start-agy.ps1` 는 각 슬롯의 `pause.flag` 를 세우고 지워 관리자 권한 없이도 `sub-supervisor.ps1` 이 부계정 워처를 일시 정지·재개한다.
+  - `sync-installed.ps1` 은 `sub_accounts.enabled = true` 일 때만 공용 스크립트 폴더(`shared_delegate_dir`)도 함께 동기화하고 `-RestartWatcher` 시 `restart.signal` 을 기록한다.
+  - 한도가 소진된 부계정을 다른 Google 계정으로 바꿀 때는 `switch-sub-agy.ps1 [-Slot sub1]` 로 다시 로그인한 뒤 확인 Enter 를 누른다(완료 시 `refresh.signal` 생성 및 쿨다운 즉시 해제).
 
 ## 구현 상세 (시행착오 기록 - 재발견 방지용)
 

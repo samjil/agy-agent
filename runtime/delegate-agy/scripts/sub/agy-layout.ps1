@@ -35,6 +35,8 @@ function Test-WatcherCommandLineForRuntime(
     [string]$RuntimeDir,
     [string]$DefaultRuntimeDir = ""
 ) {
+    if ($CommandLine -match '(?i)(?:^|\s)-SubSlot(?:\s+|[:=])') { return $false }
+
     if (-not $DefaultRuntimeDir) {
         $DefaultRuntimeDir = Join-Path $env:USERPROFILE ".samjil\delegate-agy\runtime"
     }

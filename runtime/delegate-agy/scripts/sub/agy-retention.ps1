@@ -4,10 +4,39 @@
 # 지우지 않는 것: inbox(아직 처리 전인 작업), delegate.db(위임 기록 DB - 같은 보관 기간으로 워처가 행 단위로 지웁니다), runtime\logs 의 로그 파일.
 # 폴더 배치는 agy-layout.ps1 이 정합니다. 테스트: tests\delegate-agy\agy-retention.tests.ps1
 
-function Remove-DelegationFilesOlderThan([string]$RuntimeDir, [int]$Months = 3) {
+function Remove-DelegationFilesOlderThan([string]$RuntimeDir, [int]$Months = 3, [string]$BridgeRoot = "") {
     $L = Get-AgyLayout $RuntimeDir
     $cutoff = (Get-Date).AddMonths(-$Months)
-    $dirs = @($L.ProcessedDir, $L.OutboxDir, $L.StuckDir, $L.ScreenshotsDir, $L.BackupsDir, (Join-Path $L.CacheDir "process-ko"), $L.PromptsDir, $L.RunningDir)
+    $dirs = New-Object System.Collections.ArrayList
+    foreach ($d in @($L.ProcessedDir, $L.OutboxDir, $L.StuckDir, $L.ScreenshotsDir, $L.BackupsDir, (Join-Path $L.CacheDir "process-ko"), $L.PromptsDir, $L.RunningDir)) {
+        [void]$dirs.Add($d)
+    }
+
+    $effBridge = ""
+    if (-not [string]::IsNullOrWhiteSpace($BridgeRoot)) {
+        $effBridge = $BridgeRoot.Trim()
+    } elseif (-not [string]::IsNullOrWhiteSpace([string]$env:AGY_SUB_BRIDGE_DIR)) {
+        $realRt = Join-Path ([Environment]::GetFolderPath('UserProfile')) ".samjil\delegate-agy\runtime"
+        try {
+            $rtNorm = [System.IO.Path]::GetFullPath($RuntimeDir).TrimEnd('\')
+            $realNorm = [System.IO.Path]::GetFullPath($realRt).TrimEnd('\')
+            if ([string]::Equals($rtNorm, $realNorm, [System.StringComparison]::OrdinalIgnoreCase)) {
+                $effBridge = ([string]$env:AGY_SUB_BRIDGE_DIR).Trim()
+            }
+        } catch {}
+    }
+
+    if ($effBridge) {
+        $bridgeSlots = Join-Path $effBridge "slots"
+        if (Test-Path -LiteralPath $bridgeSlots -PathType Container) {
+            foreach ($slotDir in @(Get-ChildItem -LiteralPath $bridgeSlots -Directory -ErrorAction SilentlyContinue)) {
+                foreach ($subName in @("outbox", "prompts", "transcripts", "running")) {
+                    [void]$dirs.Add((Join-Path $slotDir.FullName $subName))
+                }
+            }
+        }
+    }
+
     $removed = 0
     foreach ($dir in $dirs) {
         if (-not (Test-Path -LiteralPath $dir -PathType Container)) { continue }

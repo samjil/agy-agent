@@ -17,6 +17,49 @@ function ConvertTo-UsageHistoryUtc([string]$Text) {
     return $null
 }
 
+function ConvertTo-UsageHistorySafeUtc([datetime]$Dt) {
+    if ($Dt.Kind -eq [System.DateTimeKind]::Unspecified) {
+        return [datetime]::SpecifyKind($Dt, [System.DateTimeKind]::Utc)
+    }
+    return $Dt.ToUniversalTime()
+}
+
+function Enter-UsageHistoryLock([string]$HistPath, [int]$TimeoutMs = 1500) {
+    $lockPath = "$HistPath.lock"
+    $deadline = [datetime]::UtcNow.AddMilliseconds($TimeoutMs)
+    while ($true) {
+        try {
+            $fs = [System.IO.File]::Open($lockPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+            try {
+                $bytes = [System.Text.Encoding]::UTF8.GetBytes("$PID`n")
+                $fs.Write($bytes, 0, $bytes.Length)
+            } catch {} finally {
+                $fs.Dispose()
+            }
+            return @{ Acquired = $true; Path = $lockPath }
+        } catch {
+            try {
+                if (Test-Path -LiteralPath $lockPath -PathType Leaf) {
+                    $lfi = Get-Item -LiteralPath $lockPath -ErrorAction SilentlyContinue
+                    if ($null -ne $lfi -and ([datetime]::UtcNow - $lfi.LastWriteTimeUtc).TotalSeconds -gt 10.0) {
+                        Remove-Item -LiteralPath $lockPath -Force -ErrorAction SilentlyContinue
+                    }
+                }
+            } catch {}
+            if ([datetime]::UtcNow -ge $deadline) {
+                return @{ Acquired = $false; Path = $lockPath }
+            }
+            Start-Sleep -Milliseconds 25
+        }
+    }
+}
+
+function Exit-UsageHistoryLock($LockState) {
+    if ($LockState -and $LockState.Acquired -and $LockState.Path) {
+        Remove-Item -LiteralPath $LockState.Path -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Get-UsageHistoryStamp([string]$RuntimeDir) {
     if (-not $RuntimeDir) { return "" }
     $histPath = Join-Path $RuntimeDir "usage-history.jsonl"
@@ -40,7 +83,7 @@ function ConvertTo-UsageHistoryPctInt($Val) {
 
 function Find-LastUsageHistoryEntry([string]$HistPath, [string]$Src) {
     if (-not (Test-Path -LiteralPath $HistPath -PathType Leaf)) { return $null }
-    $fs = [System.IO.File]::Open($HistPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    $fs = [System.IO.File]::Open($HistPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
     try {
         $len = [long]$fs.Length
         if ($len -le 0) { return $null }
@@ -96,7 +139,8 @@ function Find-LastUsageHistoryEntry([string]$HistPath, [string]$Src) {
 function Add-UsageHistory([string]$RuntimeDir, [string]$Src, $FiveUsed, [string]$FiveReset, $WeekUsed, [string]$WeekReset, [datetime]$AtUtc = [datetime]::MinValue) {
     try {
         if (-not $RuntimeDir) { return $false }
-        if ($Src -notin @('claude', 'agy')) { return $false }
+        $isValidSrc = ($Src -in @('claude', 'agy')) -or ($Src -match '^agy-sub:[A-Za-z0-9_-]+$')
+        if (-not $isValidSrc) { return $false }
 
         $fiveInt = ConvertTo-UsageHistoryPctInt $FiveUsed
         $weekInt = ConvertTo-UsageHistoryPctInt $WeekUsed
@@ -108,82 +152,89 @@ function Add-UsageHistory([string]$RuntimeDir, [string]$Src, $FiveUsed, [string]
 
         $fiveResetIso = $fiveResetDt.ToString("yyyy-MM-ddTHH:mm:ssZ")
         $weekResetIso = $weekResetDt.ToString("yyyy-MM-ddTHH:mm:ssZ")
-        $at = if ($AtUtc -eq [datetime]::MinValue) { [datetime]::UtcNow } else { $AtUtc.ToUniversalTime() }
+        $at = if ($AtUtc -eq [datetime]::MinValue) { [datetime]::UtcNow } else { ConvertTo-UsageHistorySafeUtc $AtUtc }
         $atIso = $at.ToString("yyyy-MM-ddTHH:mm:ssZ")
 
         $histPath = Join-Path $RuntimeDir "usage-history.jsonl"
         $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 
-        if (Test-Path -LiteralPath $histPath -PathType Leaf) {
-            $last = Find-LastUsageHistoryEntry $histPath $Src
-            if ($null -ne $last) {
-                $lastFive = ConvertTo-UsageHistoryPctInt $last.five
-                $lastWeek = ConvertTo-UsageHistoryPctInt $last.week
-                $lastFr = ConvertTo-UsageHistoryUtc ([string]$last.five_reset)
-                $lastWr = ConvertTo-UsageHistoryUtc ([string]$last.week_reset)
-                if ($null -ne $lastFive -and $null -ne $lastWeek -and $null -ne $lastFr -and $null -ne $lastWr) {
-                    if ($lastFive -eq $fiveInt -and $lastWeek -eq $weekInt -and
-                        $lastFr.ToString("yyyy-MM-ddTHH:mm:ssZ") -eq $fiveResetIso -and
-                        $lastWr.ToString("yyyy-MM-ddTHH:mm:ssZ") -eq $weekResetIso) {
-                        return $false
-                    }
-                }
-            }
-        }
-
         if (-not (Test-Path -LiteralPath $RuntimeDir -PathType Container)) {
             New-Item -ItemType Directory -Force -Path $RuntimeDir | Out-Null
         }
 
-        $entry = [ordered]@{
-            src        = $Src
-            at         = $atIso
-            five       = $fiveInt
-            five_reset = $fiveResetIso
-            week       = $weekInt
-            week_reset = $weekResetIso
-        }
-        $line = ($entry | ConvertTo-Json -Compress)
-        [System.IO.File]::AppendAllText($histPath, ($line + "`n"), $utf8NoBom)
+        $lockState = Enter-UsageHistoryLock $histPath
+        try {
+            if (Test-Path -LiteralPath $histPath -PathType Leaf) {
+                $last = Find-LastUsageHistoryEntry $histPath $Src
+                if ($null -ne $last) {
+                    $lastFive = ConvertTo-UsageHistoryPctInt $last.five
+                    $lastWeek = ConvertTo-UsageHistoryPctInt $last.week
+                    $lastFr = ConvertTo-UsageHistoryUtc ([string]$last.five_reset)
+                    $lastWr = ConvertTo-UsageHistoryUtc ([string]$last.week_reset)
+                    if ($null -ne $lastFive -and $null -ne $lastWeek -and $null -ne $lastFr -and $null -ne $lastWr) {
+                        if ($lastFive -eq $fiveInt -and $lastWeek -eq $weekInt -and
+                            $lastFr.ToString("yyyy-MM-ddTHH:mm:ssZ") -eq $fiveResetIso -and
+                            $lastWr.ToString("yyyy-MM-ddTHH:mm:ssZ") -eq $weekResetIso) {
+                            return $false
+                        }
+                    }
+                }
+            }
 
-        $fi = Get-Item -LiteralPath $histPath -ErrorAction SilentlyContinue
-        if ($null -ne $fi -and $fi.Length -gt 1048576L) {
-            $cutoff = $at.AddDays(-60)
-            $kept = New-Object System.Collections.Generic.List[string]
-            $fs = [System.IO.File]::Open($histPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
-            try {
-                $sr = New-Object System.IO.StreamReader($fs, [System.Text.Encoding]::UTF8)
+            $entry = [ordered]@{
+                src        = $Src
+                at         = $atIso
+                five       = $fiveInt
+                five_reset = $fiveResetIso
+                week       = $weekInt
+                week_reset = $weekResetIso
+            }
+            $line = ($entry | ConvertTo-Json -Compress)
+            [System.IO.File]::AppendAllText($histPath, ($line + "`n"), $utf8NoBom)
+
+            $fi = Get-Item -LiteralPath $histPath -ErrorAction SilentlyContinue
+            if ($null -ne $fi -and $fi.Length -gt 1048576L) {
+                $cutoff = $at.AddDays(-60)
+                $kept = New-Object System.Collections.Generic.List[string]
+                $fs = [System.IO.File]::Open($histPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
                 try {
-                    while ($null -ne ($ln = $sr.ReadLine())) {
-                        if (-not $ln) { continue }
-                        try {
-                            $o = ConvertFrom-Json -InputObject $ln -ErrorAction Stop
-                            if ($null -eq $o -or -not $o.at) { continue }
-                            $oAt = ConvertTo-UsageHistoryUtc ([string]$o.at)
-                            if ($null -ne $oAt -and $oAt -ge $cutoff) {
-                                [void]$kept.Add($ln)
-                            }
-                        } catch {}
+                    $sr = New-Object System.IO.StreamReader($fs, [System.Text.Encoding]::UTF8)
+                    try {
+                        while ($null -ne ($ln = $sr.ReadLine())) {
+                            if (-not $ln) { continue }
+                            try {
+                                $o = ConvertFrom-Json -InputObject $ln -ErrorAction Stop
+                                if ($null -eq $o -or -not $o.at) { continue }
+                                $oAt = ConvertTo-UsageHistoryUtc ([string]$o.at)
+                                if ($null -ne $oAt -and $oAt -ge $cutoff) {
+                                    [void]$kept.Add($ln)
+                                }
+                            } catch {}
+                        }
+                    } finally {
+                        $sr.Dispose()
                     }
                 } finally {
-                    $sr.Dispose()
+                    $fs.Dispose()
                 }
-            } finally {
-                $fs.Dispose()
+                if ($kept.Count -gt 6000) {
+                    $kept.RemoveRange(0, $kept.Count - 6000)
+                }
+
+                $tmp = "$histPath.$([Guid]::NewGuid().ToString('N')).tmp"
+                try {
+                    $rewritten = if ($kept.Count -gt 0) { ($kept.ToArray() -join "`n") + "`n" } else { "" }
+                    [System.IO.File]::WriteAllText($tmp, $rewritten, $utf8NoBom)
+                    Move-Item -LiteralPath $tmp -Destination $histPath -Force
+                } finally {
+                    Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+                }
             }
 
-            $tmp = "$histPath.$PID.tmp"
-            try {
-                $rewritten = if ($kept.Count -gt 0) { ($kept.ToArray() -join "`n") + "`n" } else { "" }
-                [System.IO.File]::WriteAllText($tmp, $rewritten, $utf8NoBom)
-                Remove-Item -LiteralPath $histPath -Force -ErrorAction SilentlyContinue
-                [System.IO.File]::Move($tmp, $histPath)
-            } finally {
-                Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
-            }
+            return $true
+        } finally {
+            Exit-UsageHistoryLock $lockState
         }
-
-        return $true
     } catch {
         return $false
     }
@@ -196,7 +247,7 @@ function Read-UsageHistoryLines([string]$RuntimeDir) {
     if (-not (Test-Path -LiteralPath $histPath -PathType Leaf)) { return @() }
 
     $idx = 0
-    $fs = [System.IO.File]::Open($histPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    $fs = [System.IO.File]::Open($histPath, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
     try {
         $sr = New-Object System.IO.StreamReader($fs, [System.Text.Encoding]::UTF8)
         try {
@@ -206,7 +257,8 @@ function Read-UsageHistoryLines([string]$RuntimeDir) {
                 try { $o = ConvertFrom-Json -InputObject $ln -ErrorAction Stop } catch { continue }
                 if ($null -eq $o) { continue }
                 $srcVal = [string]$o.src
-                if ($srcVal -notin @('claude', 'agy')) { continue }
+                $isValidHistSrc = ($srcVal -in @('claude', 'agy')) -or ($srcVal -match '^agy-sub:[A-Za-z0-9_-]+$')
+                if (-not $isValidHistSrc) { continue }
                 $atDt = ConvertTo-UsageHistoryUtc ([string]$o.at)
                 $frDt = ConvertTo-UsageHistoryUtc ([string]$o.five_reset)
                 $wrDt = ConvertTo-UsageHistoryUtc ([string]$o.week_reset)
@@ -245,7 +297,7 @@ function Read-UsageHistory([string]$RuntimeDir, [string]$Src = "", [datetime]$Un
     $all = @(Read-UsageHistoryLines $RuntimeDir)
     if ($all.Count -eq 0) { return @() }
     $hasUntil = ($UntilUtc -ne [datetime]::MinValue)
-    $untilNorm = if ($hasUntil) { $UntilUtc.ToUniversalTime() } else { [datetime]::MaxValue }
+    $untilNorm = if ($hasUntil) { ConvertTo-UsageHistorySafeUtc $UntilUtc } else { [datetime]::MaxValue }
 
     $filtered = New-Object System.Collections.ArrayList
     foreach ($item in $all) {
@@ -264,9 +316,9 @@ function Read-UsageHistory([string]$RuntimeDir, [string]$Src = "", [datetime]$Un
 function Get-SessionsRatio($Samples, [datetime]$UntilUtc = [datetime]::MinValue, [datetime]$NowUtc = [datetime]::MinValue, [int]$MinWeekPoints = 3, [int]$MinFivePoints = 1) {
     $hasUpper = ($UntilUtc -ne [datetime]::MinValue)
     $endUtc = if ($hasUpper) {
-        $UntilUtc.ToUniversalTime()
+        ConvertTo-UsageHistorySafeUtc $UntilUtc
     } elseif ($NowUtc -ne [datetime]::MinValue) {
-        $NowUtc.ToUniversalTime()
+        ConvertTo-UsageHistorySafeUtc $NowUtc
     } else {
         [datetime]::UtcNow
     }
@@ -310,8 +362,36 @@ function Get-SessionsRatio($Samples, [datetime]$UntilUtc = [datetime]::MinValue,
         $idx++
     }
 
-    if ($list.Count -lt 3) { return $null }
+    if ($list.Count -lt 2) { return $null }
     $sorted = @($list.ToArray() | Sort-Object AtUtc, Idx)
+
+    function Measure-ChainFivePoints($Chain, [int]$StartIdx, [int]$EndIdx) {
+        if ($StartIdx -ge $EndIdx) { return 0 }
+        $pts = 0
+        $runStart = $StartIdx
+        $isFirstRun = $true
+        for ($k = $StartIdx + 1; $k -le $EndIdx; $k++) {
+            $sameRun = ([math]::Abs(($Chain[$k].FiveResetUtc - $Chain[$k - 1].FiveResetUtc).TotalSeconds) -le 120.0)
+            if (-not $sameRun) {
+                $runEnd = $k - 1
+                if ($isFirstRun) {
+                    $d = $Chain[$runEnd].Five - $Chain[$runStart].Five
+                    if ($d -gt 0) { $pts += $d }
+                    $isFirstRun = $false
+                } else {
+                    if ($Chain[$runEnd].Five -gt 0) { $pts += $Chain[$runEnd].Five }
+                }
+                $runStart = $k
+            }
+        }
+        if ($isFirstRun) {
+            $d = $Chain[$EndIdx].Five - $Chain[$runStart].Five
+            if ($d -gt 0) { $pts += $d }
+        } else {
+            if ($Chain[$EndIdx].Five -gt 0) { $pts += $Chain[$EndIdx].Five }
+        }
+        return $pts
+    }
 
     # 주간 창(week_reset 2분 이내 허용) 별로 묶는다
     $windows = New-Object System.Collections.ArrayList
@@ -354,16 +434,17 @@ function Get-SessionsRatio($Samples, [datetime]$UntilUtc = [datetime]::MinValue,
                 continue
             }
             $prev = $curChain[$curChain.Count - 1]
+            $weekDecreased = ($item.Week -lt $prev.Week)
             $frDiff = ($item.FiveResetUtc - $prev.FiveResetUtc).TotalSeconds
             $sameFive = ([math]::Abs($frDiff) -le 120.0)
             $nextFive = ($frDiff -ge 17880.0 -and $frDiff -le 18120.0)
             $canBridge = $false
-            if ($nextFive) {
+            if (-not $weekDecreased -and $nextFive) {
                 $resetBoundary = $item.FiveResetUtc.AddHours(-5)
                 $gapToResetMin = ($resetBoundary - $prev.AtUtc).TotalMinutes
                 $canBridge = ($gapToResetMin -le 15.0 -and $gapToResetMin -ge -2.0)
             }
-            if ($sameFive -or $canBridge) {
+            if (-not $weekDecreased -and ($sameFive -or $canBridge)) {
                 [void]$curChain.Add($item)
             } else {
                 $curChain = New-Object System.Collections.ArrayList
@@ -376,21 +457,13 @@ function Get-SessionsRatio($Samples, [datetime]$UntilUtc = [datetime]::MinValue,
             if ($ch.Count -ge 2) {
                 $fbW = $ch[$ch.Count - 1].Week - $ch[0].Week
                 if ($fbW -gt 0) {
-                    $fbF = 0
-                    for ($k = 1; $k -lt $ch.Count; $k++) {
-                        $a = $ch[$k - 1]
-                        $b = $ch[$k]
-                        if ([math]::Abs(($b.FiveResetUtc - $a.FiveResetUtc).TotalSeconds) -le 120.0) {
-                            $d = $b.Five - $a.Five
-                            if ($d -gt 0) { $fbF += $d }
-                        } elseif ($b.Five -gt 0) {
-                            $fbF += $b.Five
-                        }
+                    $fbF = Measure-ChainFivePoints $ch 0 ($ch.Count - 1)
+                    if ($fbF -gt 0) {
+                        $fbWeekPoints += $fbW
+                        $fbFivePoints += $fbF
+                        if ($null -eq $fbFrom -or $ch[0].AtUtc -lt $fbFrom) { $fbFrom = $ch[0].AtUtc }
+                        if ($null -eq $fbTo -or $ch[$ch.Count - 1].AtUtc -gt $fbTo) { $fbTo = $ch[$ch.Count - 1].AtUtc }
                     }
-                    $fbWeekPoints += $fbW
-                    $fbFivePoints += $fbF
-                    if ($null -eq $fbFrom -or $ch[0].AtUtc -lt $fbFrom) { $fbFrom = $ch[0].AtUtc }
-                    if ($null -eq $fbTo -or $ch[$ch.Count - 1].AtUtc -gt $fbTo) { $fbTo = $ch[$ch.Count - 1].AtUtc }
                 }
             }
             if ($win.Count -lt 3) { continue }
@@ -408,18 +481,8 @@ function Get-SessionsRatio($Samples, [datetime]$UntilUtc = [datetime]::MinValue,
             $wPts = $ch[$lastIdx].Week - $ch[$firstIdx].Week
             if ($wPts -le 0) { continue }
 
-            $fPts = 0
-            for ($k = $firstIdx + 1; $k -le $lastIdx; $k++) {
-                $a = $ch[$k - 1]
-                $b = $ch[$k]
-                if ([math]::Abs(($b.FiveResetUtc - $a.FiveResetUtc).TotalSeconds) -le 120.0) {
-                    $delta = $b.Five - $a.Five
-                    if ($delta -gt 0) { $fPts += $delta }
-                } else {
-                    # 직전 샘플이 리셋 15분 이내 측정이고 정확히 +5h 인 안전 연결: 새 창은 0% 에서 시작하므로 b.five 를 더한다.
-                    if ($b.Five -gt 0) { $fPts += $b.Five }
-                }
-            }
+            $fPts = Measure-ChainFivePoints $ch $firstIdx $lastIdx
+            if ($fPts -le 0) { continue }
 
             $totalWeekPoints += $wPts
             $totalFivePoints += $fPts
@@ -525,13 +588,11 @@ function Get-CachedSessionsRatio([string]$RuntimeDir, [string]$Src, [datetime]$U
     $evalUntil = [datetime]::MinValue
     $evalNow = [datetime]::MinValue
     if ($hasUpper) {
-        $u = $UntilUtc.ToUniversalTime()
-        $rem = $u.Ticks % 600000000L
-        $roundedU = if ($rem -gt 0) { [datetime]::new($u.Ticks - $rem + 600000000L, [System.DateTimeKind]::Utc) } else { $u }
-        $uKey = "{0}|{1}|{2}|{3}" -f $Src, $roundedU.ToString("yyyy-MM-ddTHH:mm"), $effMinW, $effMinF
-        $evalUntil = $roundedU
+        $u = ConvertTo-UsageHistorySafeUtc $UntilUtc
+        $uKey = "{0}|{1}|{2}|{3}" -f $Src, $u.ToString("yyyy-MM-ddTHH:mm:ss"), $effMinW, $effMinF
+        $evalUntil = $u
     } else {
-        $evalNow = if ($NowUtc -ne [datetime]::MinValue) { $NowUtc.ToUniversalTime() } else { [datetime]::UtcNow }
+        $evalNow = if ($NowUtc -ne [datetime]::MinValue) { ConvertTo-UsageHistorySafeUtc $NowUtc } else { [datetime]::UtcNow }
         $uKey = "{0}|live|{1}|{2}|{3}" -f $Src, $evalNow.ToString("yyyy-MM-ddTHH:mm"), $effMinW, $effMinF
     }
 

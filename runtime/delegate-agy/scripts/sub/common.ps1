@@ -160,7 +160,7 @@ function Get-MissingCwds($Cwds) {
     return $missing
 }
 
-function Write-Session([string]$Name, [string]$ConversationId, [string[]]$Cwd, [string]$Model) {
+function Write-Session([string]$Name, [string]$ConversationId, [string[]]$Cwd, [string]$Model, [string]$Account = "") {
     $key = Get-AgySessionKey $Name
     $db = Open-AgyDb $AgyDbPath
     try {
@@ -179,7 +179,8 @@ function Write-Session([string]$Name, [string]$ConversationId, [string[]]$Cwd, [
             if ((-not $resolvedModel) -or ($resolvedModel -eq "(session)")) {
                 if ($existing -and $existing.model) { $resolvedModel = [string]$existing.model }
             }
-            Set-AgySessionRow $db $key $ConversationId @(ConvertTo-CwdList $Cwd) $resolvedModel $createdAt $now $turnCount
+            $resolvedAccount = if ($Account) { $Account } elseif ($existing -and $existing.account) { [string]$existing.account } else { "primary" }
+            Set-AgySessionRow $db $key $ConversationId @(ConvertTo-CwdList $Cwd) $resolvedModel $createdAt $now $turnCount $resolvedAccount
         }
     } finally { $db.Dispose() }
 }

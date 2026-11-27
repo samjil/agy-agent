@@ -64,6 +64,40 @@ $stopAgy = Join-Path $env:USERPROFILE ".samjil\delegate-agy\scripts\stop-agy.ps1
 if (Test-Path -LiteralPath $stopAgy) {
     try { & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $stopAgy 2>&1 | Out-Null; Write-Host "[+] agy watcher stopped" -ForegroundColor Green } catch {}
 }
+$subCfgDirUninst = Join-Path $env:USERPROFILE ".samjil\delegate-agy\config"
+$subAmUninst = Join-Path $env:USERPROFILE ".samjil\delegate-agy\scripts\sub\agy-models.ps1"
+$subAbUninst = Join-Path $env:USERPROFILE ".samjil\delegate-agy\scripts\sub\agy-sub-bridge.ps1"
+if ((Test-Path -LiteralPath (Join-Path $subCfgDirUninst "models.local.json") -PathType Leaf) -and (Test-Path -LiteralPath $subAmUninst) -and (Test-Path -LiteralPath $subAbUninst)) {
+    try {
+        . $subAmUninst
+        . $subAbUninst
+        $uninstCfg = Get-AgyModelConfig $subCfgDirUninst
+        if ($uninstCfg -and $uninstCfg.SubAccounts -and $uninstCfg.SubAccounts.Enabled) {
+            $subBridgeRoot = Get-AgySubBridgeRoot $uninstCfg.SubAccounts
+            $utf8NoBomUninst = New-Object System.Text.UTF8Encoding($false)
+            foreach ($slot in @($uninstCfg.SubAccounts.Slots)) {
+                $slLay = Get-AgySubSlotLayout -BridgeRoot $subBridgeRoot -SlotId $slot.Id
+                New-Item -ItemType Directory -Force -Path (Split-Path $slLay.PauseFlag -Parent) | Out-Null
+                [System.IO.File]::WriteAllText($slLay.PauseFlag, ("paused by uninstall at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')`r`n"), $utf8NoBomUninst)
+                $stopFlagSub = Join-Path $slLay.StatusDir "stop.flag"
+                [System.IO.File]::WriteAllText($stopFlagSub, ("stopped by uninstall at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')`r`n"), $utf8NoBomUninst)
+                $tn = "samjil-agy-sub-$($slot.Id)"
+                $null = & schtasks.exe /Query /TN $tn 2>&1
+                if ($LASTEXITCODE -eq 0) {
+                    $delOut = & schtasks.exe /Delete /TN $tn /F 2>&1 | Out-String
+                    if ($LASTEXITCODE -eq 0) {
+                        Write-Host "[+] 부계정 스케줄 작업 삭제 완료: $tn" -ForegroundColor Green
+                    } else {
+                        Write-Host "[i] 부계정 스케줄 작업($tn) 삭제는 관리자 PowerShell에서 실행해 주세요: schtasks /Delete /TN $tn /F" -ForegroundColor Yellow
+                    }
+                }
+            }
+            $sharedDelDir = if ($uninstCfg.SubAccounts.SharedDelegateDir) { [string]$uninstCfg.SubAccounts.SharedDelegateDir } else { "C:\ProgramData\samjil\delegate-agy" }
+            Write-Host "[i] 공용 부계정 스크립트($sharedDelDir) 정리가 필요하면 관리자 PowerShell에서 삭제해 주세요." -ForegroundColor Cyan
+            Write-Host "[i] 부계정 작업 이력($subBridgeRoot) 과 Windows 계정은 데이터 보존을 위해 남겼습니다." -ForegroundColor Cyan
+        }
+    } catch {}
+}
 $ensureViewer = Join-Path $env:USERPROFILE ".samjil\viewer\ensure-viewer-running.ps1"
 if (Test-Path -LiteralPath $ensureViewer) {
     try { & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $ensureViewer -Stop 2>&1 | Out-Null } catch {}
@@ -314,6 +348,11 @@ if (Test-Path -LiteralPath $samjilDir) {
     if (Test-Path -LiteralPath $noUpdateFile) {
         Remove-Item -Force -LiteralPath $noUpdateFile -ErrorAction SilentlyContinue
         Write-Host "[+] 업데이트 확인 끔 표시 삭제 완료: $noUpdateFile" -ForegroundColor Green
+    }
+    $versionFile = Join-Path $samjilDir "VERSION"
+    if (Test-Path -LiteralPath $versionFile) {
+        Remove-Item -Force -LiteralPath $versionFile -ErrorAction SilentlyContinue
+        Write-Host "[+] 버전 표시 파일 삭제 완료: $versionFile" -ForegroundColor Green
     }
 
     # 4-6. ~/.samjil 루트 디렉터리가 비어있으면 삭제

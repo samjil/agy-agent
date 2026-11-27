@@ -57,6 +57,9 @@ function Get-AgyBriefWarnings([string]$Text) {
     $ko = ($replyLang -eq "Korean")
 
     if ($hasFolder) {
+        if (@($dir["cwd"] | Where-Object { [string]$_ -match '\$[A-Za-z_{]' }).Count -gt 0) {
+            [void]$out.Add($(if ($ko) { "@cwd 경로에 PowerShell 변수 문법(`$...)이 그대로 들어 있습니다. 큰따옴표(`"`) 안에서 변수가 깨졌을 수 있으니 실제 폴더 경로 문자열 또는 작은따옴표/heredoc(`@'...'@`)을 사용하세요." } else { "An @cwd path contains an unexpanded or mangled PowerShell variable (`$...`). Pass a literal folder path or use single-quoted heredoc (`@'...'@`)." }))
+        }
         if ($compact.Length -lt $script:AgyBriefMinChars) {
             [void]$out.Add($(if ($ko) { "지시문 본문이 매우 짧습니다(공백 뺀 $($compact.Length)자). agy 는 빈 상태로 시작하니 목표 · 대상 파일 · 검증 방법을 적어야 첫 번에 맞습니다." } else { "The brief body is very short ($($compact.Length) characters without spaces). agy starts with nothing, so state the goal, the target files and how to verify to get it right the first time." }))
         }
@@ -72,7 +75,7 @@ function Get-AgyBriefWarnings([string]$Text) {
     }
 
     if ($len -gt $script:AgyBriefMaxChars) {
-        [void]$out.Add($(if ($ko) { "지시문이 깁니다($len자). 명세가 길면 파일로 써 두고 지시문에는 그 경로만 가리키세요(토큰이 직접 하는 것보다 적어야 합니다)." } else { "The brief is long ($len characters). If the spec is long, write it to a file and point to that path in the brief (delegating must cost fewer tokens than doing it yourself)." }))
+        [void]$out.Add($(if ($ko) { "지시문이 깁니다(${len}자). 명세가 길면 파일로 써 두고 지시문에는 그 경로만 가리키세요(토큰이 직접 하는 것보다 적어야 합니다)." } else { "The brief is long ($len characters). If the spec is long, write it to a file and point to that path in the brief (delegating must cost fewer tokens than doing it yourself)." }))
     }
     # 코드 블록 하나가 너무 길면 파일 본문을 붙여넣은 것
     $maxFence = 0

@@ -41,18 +41,46 @@ function extractLimit(entry) {
 function writeAtomic(targetPath, text) {
   const dir = path.dirname(targetPath);
   fs.mkdirSync(dir, { recursive: true });
-  const tmpPath = targetPath + "." + process.pid + ".tmp";
+  const tmpPath = targetPath + "." + process.pid + "." + Date.now() + "." + Math.random().toString(36).slice(2, 8) + ".tmp";
   try {
     fs.writeFileSync(tmpPath, text, "utf8");
     try {
       fs.renameSync(tmpPath, targetPath);
     } catch (renameErr) {
-      try { fs.unlinkSync(targetPath); } catch (e) {}
-      fs.renameSync(tmpPath, targetPath);
+      fs.copyFileSync(tmpPath, targetPath);
     }
   } catch (e) {
+  } finally {
     try { fs.unlinkSync(tmpPath); } catch (e2) {}
   }
+}
+
+function acquireHistoryLock(histPath) {
+  const lockPath = histPath + ".lock";
+  const deadline = Date.now() + 1500;
+  while (true) {
+    try {
+      const fd = fs.openSync(lockPath, "wx");
+      try { fs.writeSync(fd, String(process.pid) + "\n"); } catch (e) {}
+      try { fs.closeSync(fd); } catch (e2) {}
+      return lockPath;
+    } catch (err) {
+      try {
+        const st = fs.statSync(lockPath);
+        if (Date.now() - st.mtimeMs > 10000) {
+          fs.unlinkSync(lockPath);
+        }
+      } catch (e3) {}
+      if (Date.now() >= deadline) return "";
+      const waitUntil = Date.now() + 25;
+      while (Date.now() < waitUntil) {}
+    }
+  }
+}
+
+function releaseHistoryLock(lockPath) {
+  if (!lockPath) return;
+  try { fs.unlinkSync(lockPath); } catch (e) {}
 }
 
 function normalizeIsoSec(iso) {
@@ -110,39 +138,45 @@ function appendUsageHistory(runtimeDir, checkedAtIso, five, seven) {
   const atIso = normalizeIsoSec(checkedAtIso);
 
   const histPath = path.join(runtimeDir, "usage-history.jsonl");
-  const last = findLastClaudeHistory(histPath);
-  if (last) {
-    if (last.five === fiveInt && last.week === weekInt &&
-        normalizeIsoSec(last.five_reset) === fiveReset &&
-        normalizeIsoSec(last.week_reset) === weekReset) {
-      return;
-    }
-  }
-
   fs.mkdirSync(runtimeDir, { recursive: true });
-  const line = JSON.stringify({
-    src: "claude",
-    at: atIso,
-    five: fiveInt,
-    five_reset: fiveReset,
-    week: weekInt,
-    week_reset: weekReset
-  });
-  fs.appendFileSync(histPath, line + "\n", "utf8");
-
-  if (fs.statSync(histPath).size > 1048576) {
-    const cutoffMs = Date.parse(atIso) - 60 * 86400 * 1000;
-    const allLines = fs.readFileSync(histPath, "utf8").replace(/^\uFEFF/, "").split(/\r?\n/).filter(Boolean);
-    const kept = [];
-    for (let i = 0; i < allLines.length; i++) {
-      try {
-        const o = JSON.parse(allLines[i]);
-        if (!o || !o.at) continue;
-        const ms = Date.parse(o.at);
-        if (!isNaN(ms) && ms >= cutoffMs) kept.push(allLines[i]);
-      } catch (e) {}
+  const lockPath = acquireHistoryLock(histPath);
+  try {
+    const last = findLastClaudeHistory(histPath);
+    if (last) {
+      if (last.five === fiveInt && last.week === weekInt &&
+          normalizeIsoSec(last.five_reset) === fiveReset &&
+          normalizeIsoSec(last.week_reset) === weekReset) {
+        return;
+      }
     }
-    writeAtomic(histPath, kept.length > 0 ? kept.join("\n") + "\n" : "");
+
+    const line = JSON.stringify({
+      src: "claude",
+      at: atIso,
+      five: fiveInt,
+      five_reset: fiveReset,
+      week: weekInt,
+      week_reset: weekReset
+    });
+    fs.appendFileSync(histPath, line + "\n", "utf8");
+
+    if (fs.statSync(histPath).size > 1048576) {
+      const cutoffMs = Date.parse(atIso) - 60 * 86400 * 1000;
+      const allLines = fs.readFileSync(histPath, "utf8").replace(/^\uFEFF/, "").split(/\r?\n/).filter(Boolean);
+      const kept = [];
+      for (let i = 0; i < allLines.length; i++) {
+        try {
+          const o = JSON.parse(allLines[i]);
+          if (!o || !o.at) continue;
+          const ms = Date.parse(o.at);
+          if (!isNaN(ms) && ms >= cutoffMs) kept.push(allLines[i]);
+        } catch (e) {}
+      }
+      const finalKept = kept.length > 6000 ? kept.slice(-6000) : kept;
+      writeAtomic(histPath, finalKept.length > 0 ? finalKept.join("\n") + "\n" : "");
+    }
+  } finally {
+    releaseHistoryLock(lockPath);
   }
 }
 

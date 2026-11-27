@@ -743,3 +743,250 @@ function Read-ClaudeLinkIndex([string]$IndexFile) {
         return @{ Tasks = @{}; Msgs = @{}; Updated = '' }
     }
 }
+
+function Get-AntigravityAppDir {
+    if (-not [string]::IsNullOrEmpty($env:AGY_APP_DATA_DIR)) {
+        return $env:AGY_APP_DATA_DIR
+    }
+    return (Join-Path $env:USERPROFILE '.gemini\antigravity')
+}
+
+function ConvertFrom-AgyWorkspaceUri([string]$Uri) {
+    if ([string]::IsNullOrWhiteSpace($Uri)) { return $null }
+    $unescaped = ''
+    try {
+        $unescaped = [System.Uri]::UnescapeDataString($Uri.Trim())
+    }
+    catch {
+        return $null
+    }
+    if ($unescaped -notmatch '^file:///(.+)$') { return $null }
+    $winPath = ($Matches[1] -replace '/', '\')
+    $trimmed = $winPath.TrimEnd('\')
+    if ([string]::IsNullOrEmpty($trimmed)) { return $null }
+
+    $parts = @($trimmed -split '\\' | Where-Object { -not [string]::IsNullOrEmpty($_) })
+    if ($parts.Count -eq 0) { return $null }
+
+    if ($parts.Count -ge 3) {
+        $friendlyName = "$($parts[$parts.Count - 2])/$($parts[$parts.Count - 1])"
+    }
+    elseif ($parts.Count -eq 2) {
+        if ($parts[0] -match '^[A-Za-z]:$') {
+            $friendlyName = $parts[1]
+        }
+        else {
+            $friendlyName = "$($parts[0])/$($parts[1])"
+        }
+    }
+    else {
+        $friendlyName = $parts[0]
+    }
+
+    return @{
+        Path  = $winPath
+        Key   = $trimmed.ToLowerInvariant()
+        Label = $friendlyName
+    }
+}
+
+function ConvertTo-AgyLocalTimeStr($Val) {
+    if ($null -eq $Val -or $Val -is [DBNull]) { return '' }
+    $raw = [string]$Val
+    if ([string]::IsNullOrWhiteSpace($raw)) { return '' }
+    $num = [long]0
+    if ([long]::TryParse($raw.Trim(), [ref]$num)) {
+        if ($num -le 0) { return '' }
+        try {
+            if ($num -gt 100000000000) {
+                return [DateTimeOffset]::FromUnixTimeMilliseconds($num).LocalDateTime.ToString('yyyy-MM-dd HH:mm:ss')
+            }
+            return [DateTimeOffset]::FromUnixTimeSeconds($num).LocalDateTime.ToString('yyyy-MM-dd HH:mm:ss')
+        }
+        catch {
+            return ''
+        }
+    }
+    $dto = [DateTimeOffset]::MinValue
+    if ([DateTimeOffset]::TryParse($raw.Trim(), [System.Globalization.CultureInfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal, [ref]$dto)) {
+        return $dto.LocalDateTime.ToString('yyyy-MM-dd HH:mm:ss')
+    }
+    return ''
+}
+
+function Get-AntigravitySessionTree([string]$AppDir = '') {
+    $empty = @{
+        Available = $false
+        Projects  = @()
+        Ungrouped = @()
+        ParentMap = @{}
+    }
+    if ([string]::IsNullOrWhiteSpace($AppDir)) {
+        $AppDir = Get-AntigravityAppDir
+    }
+    if ([string]::IsNullOrWhiteSpace($AppDir)) { return $empty }
+
+    $dbPath = Join-Path $AppDir 'conversation_summaries.db'
+    if (-not (Test-Path -LiteralPath $dbPath -PathType Leaf)) { return $empty }
+
+    if (-not (Get-Command Open-AgyDbReadOnly -ErrorAction SilentlyContinue) -and -not (Get-Command Open-AgyDb -ErrorAction SilentlyContinue)) {
+        $cands = @(
+            (Join-Path (Split-Path $PSScriptRoot -Parent) 'delegate-agy\scripts\sub\agy-db.ps1'),
+            (Join-Path $env:USERPROFILE '.samjil\delegate-agy\scripts\sub\agy-db.ps1')
+        )
+        foreach ($c in $cands) {
+            if ($c -and (Test-Path -LiteralPath $c -PathType Leaf)) {
+                try { . $c; break } catch {}
+            }
+        }
+    }
+
+    $db = $null
+    $tmpDb = $null
+    $rows = @()
+    try {
+        if (Get-Command Open-AgyDbReadOnly -ErrorAction SilentlyContinue) {
+            $db = Open-AgyDbReadOnly $dbPath
+        }
+        elseif (Get-Command Open-AgyDb -ErrorAction SilentlyContinue) {
+            # Open-AgyDb 는 스키마 초기화 쓰기를 수행할 수 있으므로 원본 DB 를 건드리지 않도록 임시 복사본을 연다.
+            $tmpDb = Join-Path ([System.IO.Path]::GetTempPath()) ('agy-cs-' + [Guid]::NewGuid().ToString('N') + '.db')
+            [System.IO.File]::Copy($dbPath, $tmpDb, $true)
+            foreach ($suffix in @('-wal', '-shm')) {
+                $sideSrc = $dbPath + $suffix
+                if (Test-Path -LiteralPath $sideSrc -PathType Leaf) {
+                    [System.IO.File]::Copy($sideSrc, $tmpDb + $suffix, $true)
+                }
+            }
+            $db = Open-AgyDb $tmpDb
+        }
+        else {
+            return $empty
+        }
+
+        $sql = 'SELECT conversation_id, title, preview, last_modified_time, workspace_uris, parent_conversation_id, nesting_depth FROM conversation_summaries ORDER BY last_modified_time DESC'
+        $rows = @($db.Query($sql, $null))
+    }
+    catch {
+        return $empty
+    }
+    finally {
+        if ($null -ne $db) {
+            try { $db.Dispose() } catch {}
+        }
+        if ($tmpDb) {
+            foreach ($f in @($tmpDb, ($tmpDb + '-wal'), ($tmpDb + '-shm'))) {
+                if (Test-Path -LiteralPath $f) {
+                    Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue
+                }
+            }
+        }
+    }
+
+    $rawParentMap = @{}
+    foreach ($r in $rows) {
+        $cid = if ($null -ne $r['conversation_id'] -and $r['conversation_id'] -isnot [DBNull]) { ([string]$r['conversation_id']).Trim() } else { '' }
+        $pidVal = if ($null -ne $r['parent_conversation_id'] -and $r['parent_conversation_id'] -isnot [DBNull]) { ([string]$r['parent_conversation_id']).Trim() } else { '' }
+        if ($cid -and $pidVal) {
+            $rawParentMap[$cid] = $pidVal
+        }
+    }
+
+    $parentMap = @{}
+    foreach ($cid in $rawParentMap.Keys) {
+        $cur = $rawParentMap[$cid]
+        $seen = @{ $cid = $true }
+        for ($hop = 0; $hop -lt 16; $hop++) {
+            if (-not $rawParentMap.ContainsKey($cur)) { break }
+            if ($seen.ContainsKey($cur)) { break }
+            $seen[$cur] = $true
+            $cur = $rawParentMap[$cur]
+        }
+        $parentMap[$cid] = $cur
+    }
+
+    $projectsMap = @{}
+    $projectsOrder = [System.Collections.Generic.List[string]]::new()
+    $ungroupedList = [System.Collections.Generic.List[hashtable]]::new()
+
+    foreach ($r in $rows) {
+        $cid = if ($null -ne $r['conversation_id'] -and $r['conversation_id'] -isnot [DBNull]) { ([string]$r['conversation_id']).Trim() } else { '' }
+        if (-not $cid) { continue }
+
+        $depth = 0
+        if ($null -ne $r['nesting_depth'] -and $r['nesting_depth'] -isnot [DBNull]) {
+            [void][int]::TryParse([string]$r['nesting_depth'], [ref]$depth)
+        }
+        $parentId = if ($null -ne $r['parent_conversation_id'] -and $r['parent_conversation_id'] -isnot [DBNull]) { ([string]$r['parent_conversation_id']).Trim() } else { '' }
+        if ($depth -gt 0 -or -not [string]::IsNullOrEmpty($parentId)) { continue }
+
+        $title = if ($null -ne $r['title'] -and $r['title'] -isnot [DBNull]) { ([string]$r['title']).Trim() } else { '' }
+        if (-not $title -and $null -ne $r['preview'] -and $r['preview'] -isnot [DBNull]) {
+            $title = ([string]$r['preview']).Trim()
+        }
+        if (-not $title) {
+            $title = if ($cid.Length -ge 8) { $cid.Substring(0, 8) } else { $cid }
+        }
+
+        $lastActStr = ConvertTo-AgyLocalTimeStr $r['last_modified_time']
+
+        $wk = $null
+        $wkRaw = if ($null -ne $r['workspace_uris'] -and $r['workspace_uris'] -isnot [DBNull]) { ([string]$r['workspace_uris']).Trim() } else { '' }
+        if ($wkRaw) {
+            try {
+                $wkArr = @(ConvertFrom-Json -InputObject $wkRaw)
+                if ($wkArr.Count -gt 0 -and -not [string]::IsNullOrWhiteSpace([string]$wkArr[0])) {
+                    $wk = ConvertFrom-AgyWorkspaceUri ([string]$wkArr[0])
+                }
+            }
+            catch {}
+        }
+
+        $wkPath = if ($null -ne $wk) { [string]$wk.Path } else { '' }
+        $sessObj = @{
+            id           = $cid
+            title        = $title
+            cwd          = $wkPath
+            lastActivity = $lastActStr
+            archived     = $false
+            source       = 'agy'
+        }
+
+        if ($null -ne $wk) {
+            $projId = 'agy-p:' + $wk.Key
+            if (-not $projectsMap.ContainsKey($projId)) {
+                $projectsMap[$projId] = @{
+                    id       = $projId
+                    name     = [string]$wk.Label
+                    cwd      = [string]$wk.Path
+                    source   = 'agy'
+                    sessions = [System.Collections.Generic.List[hashtable]]::new()
+                }
+                $projectsOrder.Add($projId)
+            }
+            $projectsMap[$projId].sessions.Add($sessObj)
+        }
+        else {
+            $ungroupedList.Add($sessObj)
+        }
+    }
+
+    $projectsList = [System.Collections.Generic.List[hashtable]]::new()
+    foreach ($pidKey in $projectsOrder) {
+        $p = $projectsMap[$pidKey]
+        $projectsList.Add(@{
+            id       = $p.id
+            name     = $p.name
+            cwd      = $p.cwd
+            source   = $p.source
+            sessions = @($p.sessions.ToArray())
+        })
+    }
+
+    return @{
+        Available = $true
+        Projects  = @($projectsList.ToArray())
+        Ungrouped = @($ungroupedList.ToArray())
+        ParentMap = $parentMap
+    }
+}

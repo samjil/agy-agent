@@ -28,10 +28,20 @@ param(
 
 $ViewerScript = Join-Path $PSScriptRoot "serve-viewer.ps1"
 
+# 테스트용 폴링 간격(ms) 환경변수 SAMJIL_TEST_VIEWER_POLL_MS 를 읽는다. 미설정이면 0.
+function Get-EnsureViewerTestMs {
+    $raw = [Environment]::GetEnvironmentVariable("SAMJIL_TEST_VIEWER_POLL_MS")
+    if ($raw -match '^\d+$') {
+        $v = [int]$raw
+        if ($v -gt 0) { return $v }
+    }
+    return 0
+}
+
 # 이 주소가 우리 뷰어인지 확인한다: /api/status 가 JSON 으로 응답하고 watcherAlive 항목이 있어야 한다(다른 프로그램이 같은 포트를 쓰는 경우를 거른다).
 function Test-ViewerAlive([int]$Port) {
     try {
-        $r = Invoke-WebRequest -UseBasicParsing -Uri ("http://127.0.0.1:{0}/api/status" -f $Port) -TimeoutSec 2 -ErrorAction Stop
+        $r = Invoke-WebRequest -UseBasicParsing -Uri ("http://127.0.0.1:{0}/api/status" -f $Port) -TimeoutSec 3 -ErrorAction Stop
         if ($r.StatusCode -ne 200) { return $false }
         $j = $r.Content | ConvertFrom-Json -ErrorAction Stop
         return ($null -ne $j.PSObject.Properties["watcherAlive"])
@@ -84,7 +94,8 @@ if ($MyInvocation.InvocationName -ne '.') {
         $procs = @(Get-ViewerProcesses $Port)   # 뷰어가 하나뿐이면 함수가 배열을 풀어 돌려주므로 배열로 받는다
         if ($procs.Count -eq 0) { Write-Output "NONE"; exit 0 }
         foreach ($p in $procs) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }
-        Start-Sleep -Seconds 1
+        $tMs = Get-EnsureViewerTestMs
+        if ($tMs -gt 0) { Start-Sleep -Milliseconds $tMs } else { Start-Sleep -Seconds 1 }
         Write-Output "STOPPED"
         exit 0
     }
@@ -102,8 +113,11 @@ if ($MyInvocation.InvocationName -ne '.') {
         [Console]::Error.WriteLine("뷰어를 숨김 실행하지 못했습니다.")
         exit 1
     }
-    for ($i = 0; $i -lt ($WaitSeconds * 2); $i++) {
-        Start-Sleep -Milliseconds 500
+    $tMs = Get-EnsureViewerTestMs
+    $pollMs = if ($tMs -gt 0) { $tMs } else { 500 }
+    $maxTries = [Math]::Max(1, [int][Math]::Ceiling(($WaitSeconds * 1000) / [double]$pollMs))
+    for ($i = 0; $i -lt $maxTries; $i++) {
+        Start-Sleep -Milliseconds $pollMs
         if (Test-ViewerAlive $Port) { Write-Output "STARTED"; exit 0 }
     }
     Write-Output "FAILED"

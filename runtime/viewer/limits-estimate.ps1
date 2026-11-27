@@ -34,10 +34,28 @@ function Get-PathHashKey([string]$FullPath) {
     }
 }
 
+function Write-AtomicViewerJsonFile([string]$TargetPath, [string]$JsonContent) {
+    if (-not $TargetPath) { return }
+    $lockKey = [string]::Intern("samjil-viewer-file:" + $TargetPath.ToLowerInvariant())
+    [System.Threading.Monitor]::Enter($lockKey)
+    $tmp = "$TargetPath.$([Guid]::NewGuid().ToString('N')).tmp"
+    try {
+        $dir = Split-Path -Path $TargetPath -Parent
+        if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
+        [System.IO.File]::WriteAllText($tmp, $JsonContent, (New-Object System.Text.UTF8Encoding($false)))
+        Move-Item -LiteralPath $tmp -Destination $TargetPath -Force
+    } catch {
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+    } finally {
+        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+        [System.Threading.Monitor]::Exit($lockKey)
+    }
+}
+
 function Read-ClaudeLimitsFile([string]$LimitsFile) {
     if (-not $LimitsFile -or -not (Test-Path -LiteralPath $LimitsFile -PathType Leaf)) { return $null }
     try {
-        $fs = [System.IO.File]::Open($LimitsFile, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $fs = [System.IO.File]::Open($LimitsFile, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
         $sr = New-Object System.IO.StreamReader($fs, [System.Text.Encoding]::UTF8)
         try {
             $raw = $sr.ReadToEnd().TrimStart([char]0xFEFF)
@@ -94,7 +112,9 @@ function Get-ClaudeTranscriptMessages([string]$ProjectsDir, [string]$CacheFile, 
     $dirty = $false
     if ($CacheFile -and (Test-Path -LiteralPath $CacheFile -PathType Leaf)) {
         try {
-            $cRaw = [System.IO.File]::ReadAllText($CacheFile, [System.Text.Encoding]::UTF8).TrimStart([char]0xFEFF)
+            $fsC = [System.IO.File]::Open($CacheFile, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
+            $srC = New-Object System.IO.StreamReader($fsC, [System.Text.Encoding]::UTF8)
+            try { $cRaw = $srC.ReadToEnd().TrimStart([char]0xFEFF) } finally { $srC.Dispose() }
             if ($cRaw.Trim()) {
                 $cObj = $js.DeserializeObject($cRaw)
                 if (($cObj -is [System.Collections.IDictionary]) -and ([int]$cObj["version"] -eq 2) -and ($cObj["files"] -is [System.Collections.IDictionary])) {
@@ -143,10 +163,12 @@ function Get-ClaudeTranscriptMessages([string]$ProjectsDir, [string]$CacheFile, 
     }
     $styles = [System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal
 
+    $seenKeys = @{}
     $jsonlFiles = @(Get-ChildItem -LiteralPath $ProjectsDir -Filter "*.jsonl" -Recurse -File -ErrorAction SilentlyContinue)
     foreach ($f in $jsonlFiles) {
         if ($f.LastWriteTimeUtc -lt $oldestDt) { continue }
         $key = Get-PathHashKey $f.FullName
+        $seenKeys[$key] = $true
         $fSize = [long]$f.Length
         $fMtime = [long]$f.LastWriteTimeUtc.Ticks
 
@@ -162,7 +184,7 @@ function Get-ClaudeTranscriptMessages([string]$ProjectsDir, [string]$CacheFile, 
 
         $fs = $null
         try {
-            $fs = [System.IO.File]::Open($f.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+            $fs = [System.IO.File]::Open($f.FullName, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
             $actualLen = [long]$fs.Length
             if ($actualLen -lt $entry.offset) {
                 $entry.offset = 0L
@@ -250,23 +272,14 @@ function Get-ClaudeTranscriptMessages([string]$ProjectsDir, [string]$CacheFile, 
             if ($msgs[$mk].ts -lt $pruneCutoffEpoch) { $oldMids += $mk }
         }
         foreach ($om in $oldMids) { $msgs.Remove($om); $dirty = $true }
-        if ($msgs.Count -eq 0) { $deadKeys += $fk }
+        if ($msgs.Count -eq 0 -and (-not $seenKeys.ContainsKey($fk))) { $deadKeys += $fk }
     }
     foreach ($dk in $deadKeys) { $cacheFiles.Remove($dk); $dirty = $true }
 
     if ($dirty -and $CacheFile) {
-        $tmp = "$CacheFile.$PID.tmp"
-        try {
-            $dir = Split-Path -Path $CacheFile -Parent
-            if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
-            $payload = @{ version = 2; files = $cacheFiles }
-            $json = $js.Serialize($payload)
-            [System.IO.File]::WriteAllText($tmp, $json, (New-Object System.Text.UTF8Encoding($false)))
-            Remove-Item -LiteralPath $CacheFile -Force -ErrorAction SilentlyContinue
-            [System.IO.File]::Move($tmp, $CacheFile)
-        } catch {
-            Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
-        }
+        $payload = @{ version = 2; files = $cacheFiles }
+        $json = $js.Serialize($payload)
+        Write-AtomicViewerJsonFile $CacheFile $json
     }
 
     # 모든 파일에서 message.id 별로 중복을 없앤 뒤 시간순 목록을 돌려준다
@@ -647,7 +660,7 @@ function Get-AgyTaskQuotaStamp([string]$DbPath) {
     }
 }
 
-function Get-AgyTaskEstimatesInternal([string]$DbPath, [string]$RuntimeDir = "") {
+function Get-AgyTaskEstimatesInternal([string]$DbPath, [string]$RuntimeDir = "", [datetime]$NowUtc = [datetime]::MinValue) {
     $emptyRes = @{ Estimates = @{}; Latest = [ordered]@{}; Stamp = "" }
     if (-not $DbPath -or -not (Test-Path -LiteralPath $DbPath -PathType Leaf)) { return $emptyRes }
     if (-not (Get-Command Open-AgyDb -ErrorAction SilentlyContinue)) { return $emptyRes }
@@ -696,6 +709,14 @@ function Get-AgyTaskEstimatesInternal([string]$DbPath, [string]$RuntimeDir = "")
         return $fallbackUtc
     }
 
+    $nowUtcVal = $null
+    if ($NowUtc -ne [datetime]::MinValue) {
+        $nowUtcVal = if ($NowUtc.Kind -eq [System.DateTimeKind]::Unspecified) {
+            [datetime]::SpecifyKind($NowUtc, [System.DateTimeKind]::Utc)
+        } else {
+            $NowUtc.ToUniversalTime()
+        }
+    }
     $costCfg = (Get-AgyQuotaCostConfig)
     $histStamp = if ($RuntimeDir -and (Get-Command Get-UsageHistoryStamp -ErrorAction SilentlyContinue)) { Get-UsageHistoryStamp $RuntimeDir } else { "" }
     $dirKey = if ($RuntimeDir) { try { [System.IO.Path]::GetFullPath($RuntimeDir).ToLowerInvariant() } catch { $RuntimeDir.ToLowerInvariant() } } else { "" }
@@ -716,7 +737,8 @@ function Get-AgyTaskEstimatesInternal([string]$DbPath, [string]$RuntimeDir = "")
         $tCnt = if ($sRows.Count -gt 0) { [int64]$sRows[0]["tn"] } else { 0L }
         $tMaxTs = if ($sRows.Count -gt 0 -and $null -ne $sRows[0]["tm"]) { [string]$sRows[0]["tm"] } else { "" }
         $mCnt = if ($sRows.Count -gt 0) { [int64]$sRows[0]["mn"] } else { 0L }
-        $stamp = "{0}|{1}|{2}|{3}|{4}|{5}|{6}" -f $cnt, $maxAt, $tCnt, $tMaxTs, $mCnt, $histStamp, $costCfg.Stamp
+        $nowKey = if ($null -ne $nowUtcVal) { $nowUtcVal.ToString("yyyy-MM-ddTHH:mm") } else { "" }
+        $stamp = "{0}|{1}|{2}|{3}|{4}|{5}|{6}|{7}" -f $cnt, $maxAt, $tCnt, $tMaxTs, $mCnt, $histStamp, $costCfg.Stamp, $nowKey
 
         if ($script:AgyTaskEstimatesCache.ContainsKey($cacheKey)) {
             $cached = $script:AgyTaskEstimatesCache.Item($cacheKey)
@@ -756,12 +778,12 @@ function Get-AgyTaskEstimatesInternal([string]$DbPath, [string]$RuntimeDir = "")
         if ($null -ne $earliestUtc) {
             $lowerBoundLocal = $earliestUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")
             $taskRows = @($db.Query(
-                "SELECT task_id, timestamp, model, input_tokens, output_tokens, total_tokens, elapsed_sec, status, usage_basis FROM tasks WHERE timestamp IS NOT NULL AND timestamp <> '' AND timestamp >= ?",
+                "SELECT task_id, timestamp, model, input_tokens, output_tokens, total_tokens, elapsed_sec, status, usage_basis, account FROM tasks WHERE timestamp IS NOT NULL AND timestamp <> '' AND timestamp >= ?",
                 [object[]]@($lowerBoundLocal)
             ))
         } else {
             $taskRows = @($db.Query(
-                "SELECT task_id, timestamp, model, input_tokens, output_tokens, total_tokens, elapsed_sec, status, usage_basis FROM tasks WHERE timestamp IS NOT NULL AND timestamp <> ''",
+                "SELECT task_id, timestamp, model, input_tokens, output_tokens, total_tokens, elapsed_sec, status, usage_basis, account FROM tasks WHERE timestamp IS NOT NULL AND timestamp <> ''",
                 $null
             ))
         }
@@ -801,6 +823,8 @@ function Get-AgyTaskEstimatesInternal([string]$DbPath, [string]$RuntimeDir = "")
     foreach ($tr in $taskRows) {
         $tid = [string]$tr["task_id"]
         if (-not $tid) { continue }
+        $trAcct = if ($null -ne $tr["account"] -and [string]$tr["account"] -ne "") { ([string]$tr["account"]).Trim().ToLowerInvariant() } else { "primary" }
+        if ($trAcct -ne "primary") { continue }
         $mdl = if ($null -ne $tr["model"]) { [string]$tr["model"] } else { "" }
         $status = if ($null -ne $tr["status"]) { ([string]$tr["status"]).Trim() } else { "" }
         if ($mdl -match '(?i)claude') { continue }
@@ -901,34 +925,51 @@ function Get-AgyTaskEstimatesInternal([string]$DbPath, [string]$RuntimeDir = "")
         return $res0
     }
 
-    # usage-history.jsonl 이 있으면 우선 사용하고, 없으면 task_quota 행으로 동일 포맷 샘플을 합성한다.
-    $histSamples = @()
-    if ($RuntimeDir -and (Get-Command Read-UsageHistory -ErrorAction SilentlyContinue)) {
-        $histSamples = @(Read-UsageHistory -RuntimeDir $RuntimeDir -Src "agy")
+    # task_quota 행과 usage-history.jsonl 의 agy 이력을 병합(시간순 정렬 · 중복 서명 제거)하여 모든 기존 체크포인트가 유지되게 한다.
+    $rawHistEntries = New-Object System.Collections.ArrayList
+    foreach ($q in $quotaList) {
+        if ($null -eq $q.FiveUsed -or $null -eq $q.FiveResetUtc -or $null -eq $q.WeekUsed -or $null -eq $q.WeekResetUtc) { continue }
+        [void]$rawHistEntries.Add([pscustomobject]@{
+            AtUtc  = $q.MatUtc
+            AtIso  = $q.MatIso
+            Five   = [int][math]::Round($q.FiveUsed, [System.MidpointRounding]::AwayFromZero)
+            FrIso  = $q.FiveResetUtc.ToString("yyyy-MM-ddTHH:mm:ssZ")
+            Week   = [int][math]::Round($q.WeekUsed, [System.MidpointRounding]::AwayFromZero)
+            WrIso  = $q.WeekResetUtc.ToString("yyyy-MM-ddTHH:mm:ssZ")
+        })
     }
-    if ($histSamples.Count -eq 0) {
-        $synList = New-Object System.Collections.ArrayList
-        $prevSig = ""
-        foreach ($q in $quotaList) {
-            if ($null -eq $q.FiveUsed -or $null -eq $q.FiveResetUtc -or $null -eq $q.WeekUsed -or $null -eq $q.WeekResetUtc) { continue }
-            $frIso = $q.FiveResetUtc.ToString("yyyy-MM-ddTHH:mm:ssZ")
-            $wrIso = $q.WeekResetUtc.ToString("yyyy-MM-ddTHH:mm:ssZ")
-            $fInt = [int][math]::Round($q.FiveUsed, [System.MidpointRounding]::AwayFromZero)
-            $wInt = [int][math]::Round($q.WeekUsed, [System.MidpointRounding]::AwayFromZero)
-            $sig = "{0}|{1}|{2}|{3}" -f $fInt, $frIso, $wInt, $wrIso
-            if ($sig -eq $prevSig) { continue }
-            $prevSig = $sig
-            [void]$synList.Add([ordered]@{
-                src        = "agy"
-                at         = $q.MatIso
-                five       = $fInt
-                five_reset = $frIso
-                week       = $wInt
-                week_reset = $wrIso
+    if ($RuntimeDir -and (Get-Command Read-UsageHistory -ErrorAction SilentlyContinue)) {
+        foreach ($h in @(Read-UsageHistory -RuntimeDir $RuntimeDir -Src "agy")) {
+            $hAt = & $parseUtcIso ([string]$h.at)
+            $hFr = & $parseUtcIso ([string]$h.five_reset)
+            $hWr = & $parseUtcIso ([string]$h.week_reset)
+            if ($null -eq $hAt -or $null -eq $hFr -or $null -eq $hWr) { continue }
+            [void]$rawHistEntries.Add([pscustomobject]@{
+                AtUtc = $hAt
+                AtIso = $hAt.ToString("yyyy-MM-ddTHH:mm:ssZ")
+                Five  = [int]$h.five
+                FrIso = $hFr.ToString("yyyy-MM-ddTHH:mm:ssZ")
+                Week  = [int]$h.week
+                WrIso = $hWr.ToString("yyyy-MM-ddTHH:mm:ssZ")
             })
         }
-        $histSamples = @($synList.ToArray())
     }
+    $mergedHistList = New-Object System.Collections.ArrayList
+    $prevSig = ""
+    foreach ($item in @($rawHistEntries.ToArray() | Sort-Object AtUtc)) {
+        $sig = "{0}|{1}|{2}|{3}" -f $item.Five, $item.FrIso, $item.Week, $item.WrIso
+        if ($sig -eq $prevSig) { continue }
+        $prevSig = $sig
+        [void]$mergedHistList.Add([ordered]@{
+            src        = "agy"
+            at         = $item.AtIso
+            five       = $item.Five
+            five_reset = $item.FrIso
+            week       = $item.Week
+            week_reset = $item.WrIso
+        })
+    }
+    $histSamples = @($mergedHistList.ToArray())
 
     # 1.2.1 정지 체크포인트 선별: concurrent==0 이고 다른 agy 작업(실패·취소 포함)의 [start-5s, fin+5s]가 [fin, mat] 와 겹치지 않아야 함
     $quiescent = New-Object System.Collections.ArrayList
@@ -1085,16 +1126,14 @@ function Get-AgyTaskEstimatesInternal([string]$DbPath, [string]$RuntimeDir = "")
     }
 
     # 1.3 ~ 1.4, 4.1 ~ 4.3 각 작업 시점(measured_at)까지의 데이터만 사용해 결정적 추정치를 계산한다
-    $rowResults = New-Object System.Collections.ArrayList
-    foreach ($q in $quotaList) {
-        $k = $q.Idx
-        $cutoff = $q.MatUtc
-        $winStart14 = $cutoff.AddDays(-14)
+    $evalAgyAtCutoff = {
+        param([int]$MaxIdx, [datetime]$CutoffUtc)
+        $winStart14 = $CutoffUtc.AddDays(-14)
 
         $cand5 = New-Object System.Collections.ArrayList
         $l0Samples = New-Object System.Collections.ArrayList
         foreach ($s in $candidateSegs) {
-            if ($s.EndQuotaIdx -gt $k) { break }
+            if ($MaxIdx -ge 0 -and $s.EndQuotaIdx -gt $MaxIdx) { break }
             if ($s.EndMatUtc -lt $winStart14 -or -not $s.HasFive) { continue }
             [void]$cand5.Add($s)
             if ($s.Delta5 -ge 2.0) {
@@ -1102,8 +1141,8 @@ function Get-AgyTaskEstimatesInternal([string]$DbPath, [string]$RuntimeDir = "")
             }
         }
 
-        # 1.2.5 예비 단가 L0 및 외부 미기록 사용 이상치 게이트
-        $l0 = 12000000.0
+        # 1.2.5 예비 단가 L0 및 외부 미기록 사용 이상치 게이트 (표본 3개 미만일 때는 소형 플랜도 받아들이되 명백한 외부 급등만 거름)
+        $l0 = 2000000.0
         if ($l0Samples.Count -ge 3) {
             $sortedL0 = @($l0Samples.ToArray() | Sort-Object)
             $mid = [int][math]::Floor($sortedL0.Count / 2)
@@ -1112,7 +1151,17 @@ function Get-AgyTaskEstimatesInternal([string]$DbPath, [string]$RuntimeDir = "")
             } else {
                 $l0 = ([double]$sortedL0[$mid - 1] + [double]$sortedL0[$mid]) / 2.0
             }
-            if ($l0 -le 0.0) { $l0 = 12000000.0 }
+            if ($l0 -le 0.0) { $l0 = 2000000.0 }
+        } elseif ($l0Samples.Count -gt 0) {
+            $plausibleL0 = @($l0Samples.ToArray() | Where-Object { [double]$_ -ge 500000.0 } | Sort-Object)
+            if ($plausibleL0.Count -gt 0) {
+                $mid = [int][math]::Floor($plausibleL0.Count / 2)
+                if (($plausibleL0.Count % 2) -eq 1) {
+                    $l0 = [double]$plausibleL0[$mid]
+                } else {
+                    $l0 = ([double]$plausibleL0[$mid - 1] + [double]$plausibleL0[$mid]) / 2.0
+                }
+            }
         }
 
         $clean5 = New-Object System.Collections.ArrayList
@@ -1138,7 +1187,7 @@ function Get-AgyTaskEstimatesInternal([string]$DbPath, [string]$RuntimeDir = "")
             $sumWN = 0.0
             $sumWD5 = 0.0
             foreach ($s in $clean5) {
-                $ageDays = [math]::Max(0.0, ($cutoff - $s.EndMatUtc).TotalDays)
+                $ageDays = [math]::Max(0.0, ($CutoffUtc - $s.EndMatUtc).TotalDays)
                 $g = [math]::Pow(2.0, -($ageDays / 7.0))
                 $sumWC += ($g * $s.SegC)
                 $sumWN += ($g * $s.SegN)
@@ -1153,7 +1202,7 @@ function Get-AgyTaskEstimatesInternal([string]$DbPath, [string]$RuntimeDir = "")
 
         $sess = $null
         if ($hasSessCmd) {
-            $sess = (Get-SessionsRatio -Samples $histSamples -UntilUtc $cutoff -MinWeekPoints 5 -MinFivePoints 20)
+            $sess = (Get-SessionsRatio -Samples $histSamples -UntilUtc $CutoffUtc -MinWeekPoints 5 -MinFivePoints 20)
         }
 
         $lwc = 0.0
@@ -1165,6 +1214,31 @@ function Get-AgyTaskEstimatesInternal([string]$DbPath, [string]$RuntimeDir = "")
                 $lwraw = $rExact * $l5raw
             }
         }
+
+        return @{
+            L5C            = $l5c
+            L5Raw          = $l5raw
+            FivePoints     = $fivePtsInt
+            FiveInitial    = $fiveInitial
+            LWC            = $lwc
+            LWRaw          = $lwraw
+            Sessions       = $sess
+            RejectedEndIdx = $rejectedEndIdx
+        }
+    }
+
+    $rowResults = New-Object System.Collections.ArrayList
+    foreach ($q in $quotaList) {
+        $k = $q.Idx
+        $ev = & $evalAgyAtCutoff $k $q.MatUtc
+        $rejectedEndIdx = $ev.RejectedEndIdx
+        $l5c = $ev.L5C
+        $l5raw = $ev.L5Raw
+        $fivePtsInt = $ev.FivePoints
+        $fiveInitial = $ev.FiveInitial
+        $lwc = $ev.LWC
+        $lwraw = $ev.LWRaw
+        $sess = $ev.Sessions
 
         $measured = $null
         if ($segByEndIdx.ContainsKey($k)) {
@@ -1294,41 +1368,45 @@ function Get-AgyTaskEstimatesInternal([string]$DbPath, [string]$RuntimeDir = "")
         }
     }
 
-    # 실시간 최신 한도 추정치는 마지막 행의 비-백필(현재 시점 임계치 충족) 값만 사용한다
+    # 실시간 최신 한도 추정치는 마지막 행의 비-백필(현재 시점 임계치 충족) 값만 사용한다 ($NowUtc 전달 시 14일 만료·리셋 시각을 함께 적용)
     $latest = [ordered]@{}
     $latestBasis = @{ five_points = 0; week_points = 0; sessions_five_points = 0 }
     if ($rowResults.Count -gt 0) {
         $lastRr = $rowResults[$rowResults.Count - 1]
         $lq = $lastRr.Quota
-        $latestBasis.five_points = [int]$lastRr.FivePoints
-        if ($lastRr.Sessions) {
-            $latestBasis.week_points = [int]$lastRr.Sessions.week_points
-            $latestBasis.sessions_five_points = [int]$lastRr.Sessions.five_points
+        $liveCutoff = if ($null -ne $nowUtcVal -and $nowUtcVal -ge $lq.MatUtc) { $nowUtcVal } else { $lq.MatUtc }
+        $liveView = if ($null -ne $nowUtcVal) { & $evalAgyAtCutoff -1 $liveCutoff } else { $lastRr }
+        $latestBasis.five_points = [int]$liveView.FivePoints
+        if ($liveView.Sessions) {
+            $latestBasis.week_points = [int]$liveView.Sessions.week_points
+            $latestBasis.sessions_five_points = [int]$liveView.Sessions.five_points
         } elseif ($hasSessCmd) {
-            $unSess = (Get-SessionsRatio -Samples $histSamples -UntilUtc $lq.MatUtc -MinWeekPoints 1 -MinFivePoints 1)
+            $unSess = (Get-SessionsRatio -Samples $histSamples -UntilUtc $liveCutoff -MinWeekPoints 1 -MinFivePoints 1)
             if ($null -ne $unSess) {
                 $latestBasis.week_points = [int]$unSess.week_points
                 $latestBasis.sessions_five_points = [int]$unSess.five_points
             }
         }
-        if ($lastRr.L5C -gt 0.0) {
+        $fiveNotExpired = ($null -eq $nowUtcVal) -or ($null -ne $lq.FiveResetUtc -and $lq.FiveResetUtc -gt $nowUtcVal)
+        $weekNotExpired = ($null -eq $nowUtcVal) -or ($null -ne $lq.WeekResetUtc -and $lq.WeekResetUtc -gt $nowUtcVal)
+        if ($liveView.L5C -gt 0.0) {
             $lfh = [ordered]@{
-                est         = (Round-LimitEstimate $lastRr.L5Raw 3)
-                est_cost    = [long][math]::Round($lastRr.L5C, [System.MidpointRounding]::AwayFromZero)
-                five_points = [int]$lastRr.FivePoints
+                est         = (Round-LimitEstimate $liveView.L5Raw 3)
+                est_cost    = [long][math]::Round($liveView.L5C, [System.MidpointRounding]::AwayFromZero)
+                five_points = [int]$liveView.FivePoints
             }
-            if ($null -ne $lq.FiveUsed) { $lfh["used_pct"] = [math]::Round($lq.FiveUsed, 1) }
-            if ($lastRr.FiveInitial) { $lfh["initial"] = $true }
+            if ($null -ne $lq.FiveUsed -and $fiveNotExpired) { $lfh["used_pct"] = [math]::Round($lq.FiveUsed, 1) }
+            if ($liveView.FiveInitial) { $lfh["initial"] = $true }
             $latest["five_hour"] = $lfh
         }
-        if ($lastRr.LWC -gt 0.0) {
+        if ($liveView.LWC -gt 0.0) {
             $lwk = [ordered]@{
-                est      = (Round-LimitEstimate $lastRr.LWRaw 3)
-                est_cost = [long][math]::Round($lastRr.LWC, [System.MidpointRounding]::AwayFromZero)
+                est      = (Round-LimitEstimate $liveView.LWRaw 3)
+                est_cost = [long][math]::Round($liveView.LWC, [System.MidpointRounding]::AwayFromZero)
             }
-            if ($null -ne $lq.WeekUsed) { $lwk["used_pct"] = [math]::Round($lq.WeekUsed, 1) }
+            if ($null -ne $lq.WeekUsed -and $weekNotExpired) { $lwk["used_pct"] = [math]::Round($lq.WeekUsed, 1) }
             $latest["weekly"] = $lwk
-            if ($null -ne $lastRr.Sessions) { $latest["sessions"] = $lastRr.Sessions }
+            if ($null -ne $liveView.Sessions) { $latest["sessions"] = $liveView.Sessions }
         }
     }
 
@@ -1728,7 +1806,7 @@ function Get-ClaudeLimitsEstimatesInternal([string]$RuntimeDir, [string]$Project
             }
         }
 
-        $l0 = 12000000.0
+        $l0 = 2000000.0
         if ($l0Samples.Count -ge 3) {
             $sortedL0 = @($l0Samples.ToArray() | Sort-Object)
             $mid = [int][math]::Floor($sortedL0.Count / 2)
@@ -1737,7 +1815,17 @@ function Get-ClaudeLimitsEstimatesInternal([string]$RuntimeDir, [string]$Project
             } else {
                 $l0 = ([double]$sortedL0[$mid - 1] + [double]$sortedL0[$mid]) / 2.0
             }
-            if ($l0 -le 0.0) { $l0 = 12000000.0 }
+            if ($l0 -le 0.0) { $l0 = 2000000.0 }
+        } elseif ($l0Samples.Count -gt 0) {
+            $plausibleL0 = @($l0Samples.ToArray() | Where-Object { [double]$_ -ge 500000.0 } | Sort-Object)
+            if ($plausibleL0.Count -gt 0) {
+                $mid = [int][math]::Floor($plausibleL0.Count / 2)
+                if (($plausibleL0.Count % 2) -eq 1) {
+                    $l0 = [double]$plausibleL0[$mid]
+                } else {
+                    $l0 = ([double]$plausibleL0[$mid - 1] + [double]$plausibleL0[$mid]) / 2.0
+                }
+            }
         }
 
         $clean5 = New-Object System.Collections.ArrayList
@@ -1891,13 +1979,13 @@ function Get-LatestClaudeLimitsEstimate([string]$RuntimeDir, [string]$ProjectsDi
     return $res.Latest
 }
 
-function Get-AgyTaskEstimates([string]$DbPath, [string]$RuntimeDir = "") {
-    $res = (Get-AgyTaskEstimatesInternal $DbPath $RuntimeDir)
+function Get-AgyTaskEstimates([string]$DbPath, [string]$RuntimeDir = "", [datetime]$NowUtc = [datetime]::MinValue) {
+    $res = (Get-AgyTaskEstimatesInternal $DbPath $RuntimeDir $NowUtc)
     return $res.Estimates
 }
 
-function Get-LatestAgyLimitsEstimate([string]$DbPath, [string]$RuntimeDir = "") {
-    $res = (Get-AgyTaskEstimatesInternal $DbPath $RuntimeDir)
+function Get-LatestAgyLimitsEstimate([string]$DbPath, [string]$RuntimeDir = "", [datetime]$NowUtc = [datetime]::MinValue) {
+    $res = (Get-AgyTaskEstimatesInternal $DbPath $RuntimeDir $NowUtc)
     return $res.Latest
 }
 
@@ -1906,7 +1994,7 @@ function Read-LimitsLastFile([string]$LastFile) {
     $res = [ordered]@{}
     if (-not $LastFile -or -not (Test-Path -LiteralPath $LastFile -PathType Leaf)) { return $res }
     try {
-        $fs = [System.IO.File]::Open($LastFile, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $fs = [System.IO.File]::Open($LastFile, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
         $sr = New-Object System.IO.StreamReader($fs, [System.Text.Encoding]::UTF8)
         try {
             $raw = $sr.ReadToEnd().TrimStart([char]0xFEFF)
@@ -1979,17 +2067,8 @@ function Write-LimitsLastFile([string]$LastFile, $Data) {
     }
     if ($clean.Count -eq 0) { return }
 
-    $tmp = "$LastFile.$PID.tmp"
-    try {
-        $dir = Split-Path -Path $LastFile -Parent
-        if ($dir -and -not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
-        $json = ConvertTo-Json -InputObject $clean -Depth 4 -Compress
-        [System.IO.File]::WriteAllText($tmp, $json, (New-Object System.Text.UTF8Encoding($false)))
-        Remove-Item -LiteralPath $LastFile -Force -ErrorAction SilentlyContinue
-        [System.IO.File]::Move($tmp, $LastFile)
-    } catch {
-        Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
-    }
+    $json = ConvertTo-Json -InputObject $clean -Depth 4 -Compress
+    Write-AtomicViewerJsonFile $LastFile $json
 }
 
 # 한도 추정 스냅샷을 계산한다.
@@ -2040,7 +2119,7 @@ function Get-LimitsEstimateSnapshot([string]$RuntimeDir, [string]$DbPath, [strin
     }
 
     # 3. agy (task_quota + tasks + task_models 비용 가중 클린 세그먼트 기반 추정치)
-    $agyLatest = (Get-LatestAgyLimitsEstimate $DbPath $RuntimeDir)
+    $agyLatest = (Get-LatestAgyLimitsEstimate $DbPath $RuntimeDir $now)
     if ($agyLatest -and @($agyLatest.Keys).Count -gt 0) {
         $out["gemini"] = $agyLatest
     }

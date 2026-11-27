@@ -30,7 +30,7 @@
   document.getElementById("hljs-light").disabled = (theme !== "light");
 })();
 </script>
-<link rel="stylesheet" href="style.css?v=104">
+<link rel="stylesheet" href="style.css?v=108">
 </head>
 <body>
   <!-- 단색 선 아이콘 모음. 이모지 대신 써서 OS마다 모양이 달라지지 않게 한다. -->
@@ -54,6 +54,7 @@
   </svg>
 
   <div class="app-container" id="app-container">
+    <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
     <!-- 좌측 사이드바 -->
     <aside class="app-sidebar" id="app-sidebar">
       <div class="sidebar-header">
@@ -61,7 +62,7 @@
           <span class="brand-mark" aria-hidden="true"><img class="brand-logo" src="logo.png?v=9" alt="Agy Agent 로고" width="32" height="32"></span>
           <div class="brand-info">
             <span class="brand-title">Agy Agent</span>
-            <span class="brand-sub">위임과 협의 기록</span>
+            <span class="brand-sub">위임과 실측 통계</span>
           </div>
         </a>
         <button id="sidebar-collapse-btn" class="icon-btn sidebar-toggle-btn" title="사이드바 접기/펼치기" aria-label="사이드바 접기">
@@ -78,10 +79,6 @@
         <button class="nav-item" data-nav="qa" id="nav-btn-qa" role="tab" aria-selected="false" title="에이전트 위임">
           <svg class="icon nav-icon"><use href="#i-delegate"/></svg>
           <span class="nav-label">에이전트 위임</span>
-        </button>
-        <button class="nav-item" data-nav="handoff" id="nav-btn-handoff" role="tab" aria-selected="false" title="에이전트 협의">
-          <svg class="icon nav-icon"><use href="#i-handoff"/></svg>
-          <span class="nav-label">에이전트 협의</span>
         </button>
         <button class="nav-item" data-nav="stats" id="nav-btn-stats" role="tab" aria-selected="false" title="실측 통계">
           <svg class="icon nav-icon"><use href="#i-chart"/></svg>
@@ -108,6 +105,12 @@
             <span class="sub-panel-count" id="qa-session-count">0</span>
           </div>
 
+          <div class="qa-source-tabs" id="qa-source-tabs" role="tablist" aria-label="위임 출처">
+            <button type="button" class="qa-source-tab active" data-qa-source="all" role="tab" aria-selected="true">전체</button>
+            <button type="button" class="qa-source-tab" data-qa-source="claude" role="tab" aria-selected="false">Claude</button>
+            <button type="button" class="qa-source-tab" data-qa-source="agy" role="tab" aria-selected="false">Antigravity</button>
+          </div>
+
           <div class="sub-search-wrap">
             <input type="search" id="qa-session-search" placeholder="프로젝트 이름으로 찾기" autocomplete="off" aria-label="프로젝트 검색">
           </div>
@@ -120,6 +123,8 @@
               <option value="">모든 상태</option>
               <option value="OK">성공만</option>
               <option value="ERROR">실패만</option>
+              <option value="CANCELLED">취소만</option>
+              <option value="BLOCKED">차단만</option>
             </select>
           </div>
           <div class="sub-sort-row"><label for="qa-tree-sort">정렬</label><select id="qa-tree-sort" aria-label="프로젝트 정렬"></select></div>
@@ -127,51 +132,25 @@
 
           <div class="project-list-wrap" id="qa-session-list" role="list"></div>
         </div>
-
-        <!-- 3) 에이전트 협의: 프로젝트 목록 -->
-        <div class="sub-panel" id="sidebar-sub-handoff" style="display: none;">
-          <div class="sub-panel-header">
-            <span class="sub-panel-title">프로젝트</span>
-            <span class="sub-panel-count" id="handoff-project-count">0</span>
-          </div>
-
-          <div class="sub-search-wrap">
-            <input type="search" id="handoff-project-search" placeholder="프로젝트·세션 이름으로 찾기" autocomplete="off" aria-label="프로젝트 검색">
-          </div>
-
-          <div class="sub-filters-row">
-            <select id="handoff-dir-filter" title="방향 필터" aria-label="방향 필터">
-              <option value="">모든 방향</option>
-              <option value="c2a">Claude → agy</option>
-              <option value="a2c">agy → Claude</option>
-            </select>
-            <select id="handoff-status-filter" title="상태 필터" aria-label="상태 필터">
-              <option value="">모든 상태</option>
-              <option value="보냄">보냄</option>
-              <option value="읽음">읽음</option>
-              <option value="처리됨">처리됨</option>
-              <option value="확인함">확인함</option>
-              <option value="보류">보류</option>
-            </select>
-          </div>
-          <div class="sub-sort-row"><label for="handoff-tree-sort">정렬</label><select id="handoff-tree-sort" aria-label="프로젝트 정렬"></select></div>
-          <div class="tree-time-legend" aria-label="시각 표시: 앞은 세션, 뒤는 협의"><span><i class="tt-dot tt-session"></i>세션 시각</span><span><i class="tt-dot tt-agy"></i>협의 시각</span></div>
-
-          <div class="project-list-wrap" id="handoff-project-list" role="list">
-            <p class="empty-hint">프로젝트 불러오는 중</p>
-          </div>
-        </div>
       </div>
 
       <!-- 사이드바 하단: 워처 상태와 갱신 -->
       <div class="sidebar-footer">
+        <div class="sidebar-quotas" id="sidebar-quotas" aria-label="계정별 남은 한도" hidden></div>
         <div class="watcher-status-card" id="watcher-status-card" title="agy 워처 상태">
           <span class="status-pulse-dot" id="watcher-pulse-dot"></span>
           <span class="status-text" id="watcher-status-text">워처 확인 중</span>
           <button type="button" id="watcher-start" class="watcher-start-btn" title="워처를 지금 켭니다 (창 없이 실행)" hidden>켜기</button>
         </div>
         <p class="watcher-start-msg" id="watcher-start-msg" role="status" aria-live="polite" hidden></p>
-        <a class="update-notice" id="update-notice" href="https://github.com/samjil/agy-agent#설치" target="_blank" rel="noopener" hidden></a>
+        <div class="update-notice" id="update-notice" hidden>
+          <div class="update-notice-row">
+            <span class="update-notice-text" id="update-notice-text"></span>
+            <button type="button" id="update-run-btn" class="update-run-btn" title="새 버전으로 업데이트합니다">업데이트</button>
+          </div>
+          <a class="update-guide-link" id="update-guide-link" href="https://github.com/samjil/agy-agent#설치" target="_blank" rel="noopener">설치 안내</a>
+        </div>
+        <p class="update-run-msg" id="update-run-msg" role="status" aria-live="polite" hidden></p>
         <div class="theme-switch" id="theme-switch" role="group" aria-label="화면 테마">
           <button type="button" data-theme-pref="system" aria-pressed="true" title="기기의 라이트/다크 설정을 따라갑니다(기본)"><svg class="icon"><use href="#i-theme-system"/></svg><span>시스템</span></button>
           <button type="button" data-theme-pref="light" aria-pressed="false" title="항상 라이트 모드"><svg class="icon"><use href="#i-theme-light"/></svg><span>라이트</span></button>
@@ -226,6 +205,15 @@
               <div class="outcome-strip" id="outcome-strip" aria-label="최근 위임 결과"></div>
             </section>
 
+            <section class="dash-block account-quotas-block" id="dash-quotas-block">
+              <header class="dash-block-head">
+                <h2>계정별 남은 한도</h2>
+                <span class="quotas-meta" id="dash-quotas-meta"></span>
+                <button type="button" class="quota-refresh-btn" id="dash-quotas-refresh" title="Claude · 주 계정 · 부계정의 현재 남은 한도를 즉시 조회합니다">한도 새로고침</button>
+              </header>
+              <div class="quota-cards-grid" id="dash-quotas-grid"></div>
+            </section>
+
             <section class="dash-block">
               <header class="dash-block-head">
                 <h2>확인 필요</h2>
@@ -239,7 +227,6 @@
                 <h2>최근 활동</h2>
                 <div class="dash-links">
                   <button class="text-btn" id="btn-view-all-qa">위임 기록 전체</button>
-                  <button class="text-btn" id="btn-view-all-handoff">협의 전체</button>
                 </div>
               </header>
               <ol class="row-list" id="dash-timeline"></ol>
@@ -274,6 +261,7 @@
               <span class="meta-chip" id="chip-qa-models">모델: 전체</span>
               <span class="meta-chip" id="chip-qa-status">상태: 전체</span>
               <span class="meta-chip" id="chip-qa-time">최근 작업: -</span>
+              <span class="meta-chip qa-diag-chip" id="qa-diag-chip" hidden></span>
             </div>
             <div class="qa-session-chips" id="qa-session-chips" role="group" aria-label="agy 세션 고르기" hidden></div>
           </div>
@@ -287,45 +275,7 @@
         </section>
 
         <!-- =============================================================== -->
-        <!-- 3. 에이전트 협의                                             -->
-        <!-- =============================================================== -->
-        <section id="view-handoff" class="view-panel" style="display: none;">
-          <div class="detail-session-header" id="handoff-detail-header">
-            <div class="session-header-top">
-              <div class="session-title-wrap">
-                <h2 class="session-main-title" id="handoff-current-project-title">프로젝트를 선택하세요</h2>
-                <span class="session-count-tag" id="handoff-current-project-count">0개</span>
-              </div>
-              <label class="session-search-box">
-                <svg class="icon inner-search-icon" aria-hidden="true"><use href="#i-search"/></svg>
-                <input type="search" id="handoff-search" placeholder="번호, 제목, 상태에서 찾기" autocomplete="off" aria-label="메시지 검색">
-              </label>
-            </div>
-            <div class="session-meta-chips" id="handoff-session-meta-chips">
-              <span class="party-legend"><i class="party-claude"></i><span id="handoff-legend-claude">Claude 보냄</span></span>
-              <span class="party-legend"><i class="party-agy"></i><span id="handoff-legend-agy">agy 보냄</span></span>
-            </div>
-          </div>
-
-          <div id="handoff-auto-bar" class="auto-bars" style="display: none;" role="status" aria-live="polite"></div>
-
-          <div class="handoff-content-wrap">
-            <details id="handoff-brief-card" class="brief-card" style="display: none;">
-              <summary>
-                <span class="brief-title">프로젝트 맥락 <code><span id="brief-project-name"></span>/BRIEF.md</code></span>
-                <span class="brief-toggle-tip">펼치기</span>
-              </summary>
-              <div id="handoff-brief-content" class="brief-content md"></div>
-            </details>
-
-            <div id="handoff-cards" class="handoff-chat-stream">
-              <p class="empty">프로젝트를 선택해 주세요.</p>
-            </div>
-          </div>
-        </section>
-
-        <!-- =============================================================== -->
-        <!-- 5. 실측 통계: 질문마다 직접/위임 · 모델 · 시간 · 토큰 · 사유(측정값만) -->
+        <!-- 4. 실측 통계: 질문마다 직접/위임 · 모델 · 시간 · 토큰 · 사유(측정값만) -->
         <!-- =============================================================== -->
         <section id="view-stats" class="view-panel" style="display: none;">
           <div class="dash usage">
@@ -333,6 +283,14 @@
               <p class="usage-note">측정된 값만 보입니다. 예상치는 없습니다.</p>
               <div class="usage-controls">
                 <span class="usage-updated" id="usage-updated" aria-live="polite"></span>
+                <select id="usage-client-filter" class="usage-client-filter" aria-label="클라이언트 필터">
+                  <option value="">전체 클라이언트</option>
+                  <option value="claude">Claude (직접+위임)</option>
+                  <option value="agy">Antigravity (직접+위임)</option>
+                  <option value="claude_direct">Claude 직접</option>
+                  <option value="agy_direct">agy 직접</option>
+                  <option value="agy_delegate">agy 위임</option>
+                </select>
                 <div class="usage-days" role="group" aria-label="기간">
                   <button type="button" class="usage-day-btn" data-days="7" aria-pressed="true">7일</button>
                   <button type="button" class="usage-day-btn" data-days="30" aria-pressed="false">30일</button>
@@ -344,6 +302,15 @@
 
             <p class="usage-message" id="usage-message" hidden></p>
 
+            <section class="dash-block account-quotas-block" id="stats-quotas-block">
+              <header class="dash-block-head">
+                <h2>계정별 남은 한도</h2>
+                <span class="quotas-meta" id="stats-quotas-meta"></span>
+                <button type="button" class="quota-refresh-btn" id="stats-quotas-refresh" title="Claude · 주 계정 · 부계정의 현재 남은 한도를 즉시 조회합니다">한도 새로고침</button>
+              </header>
+              <div class="quota-cards-grid" id="stats-quotas-grid"></div>
+            </section>
+
             <section class="dash-block">
               <header class="dash-block-head">
                 <h2>요약</h2>
@@ -351,6 +318,22 @@
               </header>
               <dl class="stat-line" id="usage-summary"></dl>
               <div class="usage-table-wrap"><table class="usage-table" id="usage-modes"></table></div>
+            </section>
+
+            <section class="dash-block" id="usage-diagnostics-section" hidden>
+              <header class="dash-block-head">
+                <h2>실패 · 취소 진단</h2>
+                <div class="usage-diag-actions">
+                  <span class="dash-count" id="usage-diag-summary"></span>
+                  <span class="usage-diag-unacked" id="usage-diag-unacked" hidden></span>
+                  <button type="button" class="text-btn" id="usage-diag-brief-toggle">지시문 보기</button>
+                  <button type="button" class="usage-diag-copy-btn" id="usage-diag-copy">개선 지시문 복사</button>
+                </div>
+              </header>
+              <div class="usage-diag-counts" id="usage-diag-counts"></div>
+              <pre class="usage-diag-brief" id="usage-diag-brief" hidden></pre>
+              <div class="usage-diag-groups" id="usage-diag-groups"></div>
+              <div class="usage-diag-handled" id="usage-diag-handled" hidden></div>
             </section>
 
             <section class="dash-block">
@@ -379,6 +362,11 @@
               </header>
               <p class="usage-limits-banner" id="usage-limits-banner" hidden></p>
               <div class="usage-list" id="usage-rows" role="list" aria-label="질문 기록"></div>
+              <div class="usage-loadmore" id="usage-loadmore" hidden>
+                <button type="button" class="usage-loadmore-btn" id="usage-loadmore-50">50건 더 보기</button>
+                <button type="button" class="usage-loadmore-btn" id="usage-loadmore-all">전체 보기</button>
+                <span class="usage-loadmore-info" id="usage-loadmore-info"></span>
+              </div>
             </section>
           </div>
         </section>
@@ -391,6 +379,6 @@
   <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/marked@12/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
-  <script src="app.js?v=130"></script>
+  <script src="app.js?v=136"></script>
 </body>
 </html>

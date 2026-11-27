@@ -65,13 +65,51 @@ try {
     $targetFile = Join-Path $RuntimeDir "claude-limits.json"
     $nowUtc = [DateTime]::UtcNow
 
+    # Claude CLI 가 정상 동작 중(24시간 이내 claude-cli 기록 존재 + 미지원 마커 없음)이면 데스크톱 기록으로 덮어쓰지 않는다
+    if (Test-Path -LiteralPath $targetFile -PathType Leaf) {
+        try {
+            $fsChk = [System.IO.File]::Open($targetFile, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
+            $srChk = New-Object System.IO.StreamReader($fsChk, $utf8NoBom)
+            try { $chkRaw = $srChk.ReadToEnd().TrimStart([char]0xFEFF) } finally { $srChk.Dispose() }
+            if ($chkRaw.Trim()) {
+                $chkObj = ConvertFrom-Json -InputObject $chkRaw -ErrorAction Stop
+                $chkSrc = if ($null -ne $chkObj -and $chkObj.PSObject.Properties["source"]) { ([string]$chkObj.source).Trim() } else { "" }
+                $chkAtRaw = if ($null -ne $chkObj -and $chkObj.PSObject.Properties["checked_at"]) { ([string]$chkObj.checked_at).Trim() } else { "" }
+                if ($chkSrc -ieq "claude-cli" -and $chkAtRaw) {
+                    $chkDt = [datetime]::MinValue
+                    if ([datetime]::TryParse($chkAtRaw, $inv, $styles, [ref]$chkDt)) {
+                        if (($nowUtc - $chkDt.ToUniversalTime()).TotalHours -lt 24) {
+                            $cliUnsupported = $false
+                            try {
+                                if (-not (Get-Command Test-ClaudeCliUsageUnsupported -ErrorAction SilentlyContinue)) {
+                                    $quotaLib = Join-Path $PSScriptRoot "sub\agy-quota.ps1"
+                                    if (Test-Path -LiteralPath $quotaLib -PathType Leaf) { . $quotaLib }
+                                }
+                                if (Get-Command Test-ClaudeCliUsageUnsupported -ErrorAction SilentlyContinue) {
+                                    $cliUnsupported = [bool](Test-ClaudeCliUsageUnsupported $RuntimeDir $nowUtc)
+                                }
+                            } catch {
+                                $cliUnsupported = $false
+                            }
+                            if (-not $cliUnsupported) {
+                                exit 0
+                            }
+                        }
+                    }
+                }
+            }
+        } catch {}
+    }
+
     $fiveEntry = $fiveRes.Entry
     $weekEntry = $weekRes.Entry
 
     # 한쪽 구간만 유효할 때 기존 파일에 다른 구간의 미래 리셋 시각이 남아 있으면 유지한다
     if ((-not $fiveEntry -or -not $weekEntry) -and (Test-Path -LiteralPath $targetFile -PathType Leaf)) {
         try {
-            $oldRaw = [System.IO.File]::ReadAllText($targetFile, $utf8NoBom).TrimStart([char]0xFEFF)
+            $fsOld = [System.IO.File]::Open($targetFile, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
+            $srOld = New-Object System.IO.StreamReader($fsOld, $utf8NoBom)
+            try { $oldRaw = $srOld.ReadToEnd().TrimStart([char]0xFEFF) } finally { $srOld.Dispose() }
             if ($oldRaw.Trim()) {
                 $oldObj = ConvertFrom-Json -InputObject $oldRaw -ErrorAction Stop
                 if ($null -ne $oldObj) {
@@ -112,16 +150,15 @@ try {
     if ($dir -and -not (Test-Path -LiteralPath $dir)) {
         New-Item -ItemType Directory -Force -Path $dir | Out-Null
     }
-    $tmp = "$targetFile.$PID.tmp"
+    $tmp = "$targetFile.$([Guid]::NewGuid().ToString('N')).tmp"
     try {
         [System.IO.File]::WriteAllText($tmp, $json, $utf8NoBom)
-        Remove-Item -LiteralPath $targetFile -Force -ErrorAction SilentlyContinue
-        [System.IO.File]::Move($tmp, $targetFile)
+        Move-Item -LiteralPath $tmp -Destination $targetFile -Force
     } finally {
         Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
     }
 
-    if ($fiveEntry -and $weekEntry) {
+    if ($fiveRes.Valid -and $weekRes.Valid) {
         try {
             $histLib = Join-Path $PSScriptRoot "sub\usage-history.ps1"
             if (Test-Path -LiteralPath $histLib -PathType Leaf) {

@@ -23,12 +23,12 @@ if ($MyInvocation.MyCommand.Path -and (-not $env:SAMJIL_UTF8_ACTIVE)) {
 # [사용법 1: 로컬 실행]
 #   저장소를 clone한 폴더에서:
 #   .\install.ps1
-#   (옵션: -AlwaysOff, -NoUpdateCheck, -NoStart, -SkipChecks, -ReplyLanguage <언어>, -HandoffAutoHook, -Full, -Uninstall)
+#   (옵션: -AlwaysOff, -NoUpdateCheck, -NoStart, -SkipChecks, -ReplyLanguage <언어>, -Full, -Uninstall)
 #
 # [사용법 2: 원격 웹 원라이너 (새 PC 등)]
 #   저장소를 clone하지 않고 PowerShell에서 바로 실행:
 #   irm https://raw.githubusercontent.com/samjil/agy-agent/main/install.ps1 | iex
-#   (환경변수: SAMJIL_ALWAYS_OFF=1, SAMJIL_NO_UPDATE_CHECK=1, SAMJIL_HANDOFF_AUTO_HOOK=1, SAMJIL_FULL=1)
+#   (환경변수: SAMJIL_ALWAYS_OFF=1, SAMJIL_NO_UPDATE_CHECK=1, SAMJIL_FULL=1)
 
 $OutputEncoding = [System.Text.Encoding]::UTF8
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
@@ -37,9 +37,6 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 $ScriptDir = if ($env:SAMJIL_SCRIPT_DIR) { $env:SAMJIL_SCRIPT_DIR } elseif ($PSScriptRoot) { $PSScriptRoot } else { "" }
 $TargetDir = ""
 $Uninstall = $false
-# 핸드오프 자동 이어가기 Stop 훅을 ~/.claude/settings.json 에 등록할지(옵트인). irm | iex 로 받을 때는 인자를 줄 수 없어
-# 환경변수 SAMJIL_HANDOFF_AUTO_HOOK=1 로도 켠다.
-$HandoffAutoHook = ($env:SAMJIL_HANDOFF_AUTO_HOOK -eq "1")
 # -Full: the author's complete setup (~/.claude/skills and ~/.gemini/config/skills become junctions to ~/.agents/skills, Antigravity skills.json,
 #        legacy cleanup, session hook always on). Default (simple): copy the skills into ~/.claude/skills and the runtime
 #        into ~/.samjil, plus one SessionStart hook entry in ~/.claude/settings.json (backed up first). Env: SAMJIL_FULL=1 for `irm | iex`.
@@ -72,8 +69,6 @@ if ($args) {
             $ReplyLanguage = [string]$args[++$i]
         } elseif ($args[$i] -eq "-Uninstall") {
             $Uninstall = $true
-        } elseif ($args[$i] -eq "-HandoffAutoHook") {
-            $HandoffAutoHook = $true
         }
     }
 }
@@ -97,7 +92,7 @@ Write-Host "  (Antigravity & Claude Code 전역 설치기)" -ForegroundColor Cya
 Write-Host "==========================================================" -ForegroundColor Cyan
 Write-Host ""
 
-$isRemote = [string]::IsNullOrEmpty($ScriptDir) -or (-not (Test-Path (Join-Path $ScriptDir "samjil-handoff")))
+$isRemote = [string]::IsNullOrEmpty($ScriptDir) -or (-not (Test-Path (Join-Path $ScriptDir "samjil-delegate-agy")))
 
 if ($isRemote) {
     # 원격 실행 모드: GitHub에서 최신 소스 다운로드
@@ -203,8 +198,8 @@ $AgentsSkillsRoot = Join-Path $env:USERPROFILE ".agents\skills"
 if ($Full) {
 New-Item -ItemType Directory -Force -Path $AgentsSkillsRoot | Out-Null
 
-# 구버전 스킬 정리 (agent-handoff, agent-delegate-agy)
-$legacySkills = @("agent-handoff", "agent-delegate-agy")
+# 구버전 스킬 정리 (agent-handoff, agent-delegate-agy, samjil-handoff)
+$legacySkills = @("agent-handoff", "agent-delegate-agy", "samjil-handoff")
 foreach ($old in $legacySkills) {
     foreach ($rootDir in @($ClaudeSkillsRoot, $GeminiSkillsRoot)) {
         $oldPath = Join-Path $rootDir $old
@@ -221,7 +216,7 @@ foreach ($old in $legacySkills) {
 }
 }   # end if ($Full): legacy skill cleanup
 
-$targetSkills = @("samjil-handoff", "samjil-delegate-agy", "samjil-git-commit")
+$targetSkills = @("samjil-delegate-agy", "samjil-git-commit")
 
 # 대상 스킬 폴더를 ~/.agents/skills 로 가는 정션 하나로 둔다. 이미 정션이면 그대로 둔다.
 # 일반 폴더면 안에 든 것을 지우지 않고 ~/.agents/skills 로 옮긴 뒤 정션으로 바꾼다 — 사용자가 직접
@@ -369,34 +364,6 @@ if (Test-Path $srcRuntime) {
         }
     }
 
-    $srcHandoff = Join-Path $srcRuntime "handoff"
-    if (Test-Path $srcHandoff) {
-        $destHandoff = Join-Path $SamjilRoot "handoff"
-        New-Item -ItemType Directory -Force -Path $destHandoff | Out-Null
-        Copy-Item -Recurse -Force -Path (Join-Path $srcHandoff "*") -Destination $destHandoff
-        Write-Host "[+] handoff 템플릿·스크립트 배치 완료 (~/.samjil/handoff)" -ForegroundColor Green
-
-        # 3-1b. 핸드오프 자동 이어가기 Stop 훅(옵트인): agy 회신이 오면 같은 Claude 세션에서 "메시지 확인해줘" 없이 이어 간다.
-        #       Claude Code 설정을 바꾸는 일이라 -HandoffAutoHook 을 준 때만 하고, 바꾸기 전에 settings.json 을 백업한다.
-        $regHook = Join-Path $destHandoff "scripts\register-handoff-hook.ps1"
-        if (Test-Path $regHook) {
-            try {
-                $regArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $regHook)
-                if (-not $HandoffAutoHook) { $regArgs += "-Check" }
-                $regOut = (& powershell.exe @regArgs 2>&1 | Out-String).Trim()
-                if ($HandoffAutoHook) {
-                    Write-Host "[+] 핸드오프 자동 이어가기 Stop 훅 등록: $regOut (~/.claude/settings.json)" -ForegroundColor Green
-                } elseif ($regOut -eq "PRESENT") {
-                    Write-Host "[i] 핸드오프 자동 이어가기 Stop 훅이 이미 등록돼 있습니다(경로를 새로 고치려면 -HandoffAutoHook 로 다시 실행)." -ForegroundColor Gray
-                } else {
-                    Write-Host "[i] 핸드오프 자동 이어가기 Stop 훅은 등록하지 않았습니다. Claude 쪽도 자동으로 이어 가려면: .\install.ps1 -HandoffAutoHook" -ForegroundColor Gray
-                }
-            } catch {
-                Write-Warning "핸드오프 Stop 훅 등록 중 오류: $_"
-            }
-        }
-    }
-
     $srcViewer = Join-Path $srcRuntime "viewer"
     if (Test-Path $srcViewer) {
         $destViewer = Join-Path $SamjilRoot "viewer"
@@ -466,12 +433,6 @@ if (Test-Path $oldDelegateLogs) {
     Remove-Item -Recurse -Force -LiteralPath (Join-Path $SamjilRoot "samjil-delegate-agy") -ErrorAction SilentlyContinue
 }
 
-# 원격 설치 임시 파일 정리
-if ($isRemote) {
-    Remove-Item -Force $tempZip -ErrorAction SilentlyContinue
-    Remove-Item -Recurse -Force $tempExtract -ErrorAction SilentlyContinue
-}
-
 # -----------------------------------------------------------------------------
 # 4. Post-install: unblock downloaded files, answer language, agy check, watcher self-test
 #    (messages are ASCII on purpose)
@@ -504,6 +465,14 @@ if (Test-Path -LiteralPath $versionSrc) {
         } catch {}
     }
 }
+# 업데이트 확인 캐시를 지운다. 같은 날 다시 배포한 릴리스는 날짜가 같고 해시만 달라서, 설치 전에 받아 둔 옛 최신 버전과
+# 새로 설치한 버전을 비교하면 "새 버전 있음"으로 잘못 판단한다. 지우면 다음 확인 때 GitHub 에서 바로 다시 받는다.
+try { Remove-Item -LiteralPath (Join-Path $SamjilRoot "cache\update-check.json") -Force -ErrorAction SilentlyContinue } catch {}
+# 원격 설치 임시 파일 정리 (VERSION 복사까지 끝낸 뒤 지운다)
+if ($isRemote) {
+    Remove-Item -Force $tempZip -ErrorAction SilentlyContinue
+    Remove-Item -Recurse -Force $tempExtract -ErrorAction SilentlyContinue
+}
 if ($NoUpdateCheck) {
     if (-not (Test-Path -LiteralPath $SamjilRoot)) { New-Item -ItemType Directory -Force -Path $SamjilRoot | Out-Null }
     [System.IO.File]::WriteAllText((Join-Path $SamjilRoot "no-update-check"), "", $utf8NoBom)
@@ -527,6 +496,16 @@ if (Test-Path -LiteralPath $delegateHome) {
         } catch {}
     }
     Write-Host "[+] agy answers in: $shown (edit $langFile to change; write a language name such as English to fix it)" -ForegroundColor Green
+    $localModelsPath = Join-Path $delegateHome "config\models.local.json"
+    if (Test-Path -LiteralPath $localModelsPath -PathType Leaf) {
+        try {
+            $localCfgObj = ([System.IO.File]::ReadAllText($localModelsPath, [System.Text.Encoding]::UTF8).TrimStart([char]0xFEFF)) | ConvertFrom-Json
+            if ($localCfgObj.sub_accounts -and $localCfgObj.sub_accounts.enabled) {
+                $sharedDirShow = if ($localCfgObj.sub_accounts.shared_delegate_dir) { [string]$localCfgObj.sub_accounts.shared_delegate_dir } else { "C:\ProgramData\samjil\delegate-agy" }
+                Write-Host "[i] Multi-account (sub_accounts) is enabled in models.local.json. Run setup-sub-accounts.ps1 (Admin) or sync-installed.ps1 to update $sharedDirShow." -ForegroundColor Cyan
+            }
+        } catch {}
+    }
 }
 
 $agyOk = $true
@@ -572,7 +551,7 @@ if (-not $Full) {
         Write-Host "  Installed, but one thing needs your attention:" -ForegroundColor Yellow
         foreach ($p in $problems) { Write-Host "   - $p" -ForegroundColor Yellow }
     }
-    Write-Host "  Skills : ~/.claude/skills/ (samjil-delegate-agy, samjil-handoff, samjil-git-commit)" -ForegroundColor Gray
+    Write-Host "  Skills : ~/.claude/skills/ (samjil-delegate-agy, samjil-git-commit)" -ForegroundColor Gray
     Write-Host "  Tools  : ~/.samjil/   Remove skills and tools: Uninstall.cmd" -ForegroundColor Gray
     if ($AlwaysOn) { Write-Host "  Mode   : always on (Claude delegates by default in every session). Switch to on-request: Install.cmd -AlwaysOff" -ForegroundColor Gray }
     else { Write-Host "  Mode   : on request (-AlwaysOff). Delegation happens when you ask. Switch back: Install.cmd" -ForegroundColor Gray }
@@ -588,13 +567,12 @@ Write-Host "    - Claude Code        : ~/.claude/skills/ -> ~/.agents/skills/ (�
 Write-Host "    - Antigravity Skills : ~/.gemini/config/skills/ -> ~/.agents/skills/ (단일 정션, skills.json 연동)" -ForegroundColor Gray
 Write-Host "  [도구 및 웹 파일 (~/.samjil)]" -ForegroundColor White
 Write-Host "    - 통합 웹 뷰어 실행 : ~/.samjil/viewer/serve-viewer.bat (또는 .ps1)" -ForegroundColor Cyan
-Write-Host "      (브라우저에서 Delegate QA / Handoff 탭 선택 열람)" -ForegroundColor Gray
+Write-Host "      (브라우저에서 대시보드 · 에이전트 위임 · 실측 통계 열람)" -ForegroundColor Gray
 Write-Host "      (창·브라우저 탭 없이 백그라운드로 켜기: ~/.samjil/viewer/ensure-viewer-running.ps1 또는 더블클릭 start-viewer-hidden.vbs — 워처도 함께 켜짐, 끄기는 -Stop)" -ForegroundColor Gray
 Write-Host "    - 위임 워처 시작/재시작 : ~/.samjil/delegate-agy/scripts/start-agy.ps1" -ForegroundColor Gray
 Write-Host "      (창 없이 시작하려면 -Hidden)" -ForegroundColor Gray
 Write-Host "    - 위임 워처 안전 중지   : ~/.samjil/delegate-agy/scripts/stop-agy.ps1" -ForegroundColor Gray
-Write-Host "    - 대화 저장소         : ~/.samjil/handoff/channels/ (원장·자동 설정 DB: ~/.samjil/handoff/data/handoff.db)" -ForegroundColor Gray
-Write-Host "    - 핸드오프 자동 이어가기: agy 쪽은 워처가 자동 처리(채널에 AUTO.off 파일을 두면 끔). Claude 쪽은 .\install.ps1 -HandoffAutoHook 로 Stop 훅을 등록" -ForegroundColor Gray
+Write-Host "    - 멀티 계정 부계정 풀  : ~/.samjil/delegate-agy/scripts/setup-sub-accounts.ps1 (관리자 최초 1회) · switch-sub-agy.ps1" -ForegroundColor Gray
 Write-Host "==========================================================" -ForegroundColor Cyan
 Write-Host ""
 }   # end if ($Full): original summary

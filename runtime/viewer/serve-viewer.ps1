@@ -16,6 +16,7 @@ param(
     [string]$RuntimeDir = "",
     [string]$WebDir     = "",
     [string]$ClaudeProjectsDir = "",
+    [string]$AgyAppDir = "",
     [int]$Port          = 8787,
     [switch]$NoBrowser  = $false,
     [switch]$NoAgent    = $false,
@@ -28,20 +29,6 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 [Console]::InputEncoding  = [System.Text.Encoding]::UTF8
 
 $parentDir = Split-Path $PSScriptRoot -Parent
-
-if (-not $HandoffDir) {
-    if ($env:AGENT_HANDOFF_ROOT) {
-        $HandoffDir = $env:AGENT_HANDOFF_ROOT
-    } else {
-        # 핸드오프 폴더: ~\.samjil\handoff(설치본) > 이 뷰어 옆의 handoff > 저장소의 runtime\handoff. 채널은 그 안의 channels\ 에 있다.
-        # 옛 배치(~\.samjil\handoff\<채널>)가 남아 있으면 channels\ 로 한 번 옮긴다.
-        $hhHome = @((Join-Path $env:USERPROFILE ".samjil\handoff"), $(if ($parentDir) { Join-Path $parentDir "handoff" }), (Join-Path $PSScriptRoot "runtime\handoff")) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
-        if (-not $hhHome) { $hhHome = Join-Path $env:USERPROFILE ".samjil\handoff" }
-        $hhDb = @((Join-Path $hhHome "scripts\handoff-db.ps1"), (Join-Path $PSScriptRoot "..\handoff\scripts\handoff-db.ps1")) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -First 1
-        if ($hhDb) { try { . $hhDb; [void](Move-HandoffLegacyLayout $hhHome) } catch {} }
-        $HandoffDir = Join-Path $hhHome "channels"
-    }
-}
 
 # 위임 폴더 배치(runtime / data)는 agy-layout.ps1 이 정한다. 설치본 옆 · 저장소 옆 · 내 폴더 순서로 찾는다.
 $layoutCands = @(
@@ -80,12 +67,14 @@ if (-not $ClaudeProjectsDir) {
     }
 }
 
-
-if (-not (Test-Path $HandoffDir)) {
-
-    New-Item -ItemType Directory -Force -Path $HandoffDir | Out-Null
-
+if (-not $AgyAppDir) {
+    if ($env:AGY_APP_DATA_DIR) {
+        $AgyAppDir = $env:AGY_APP_DATA_DIR
+    } else {
+        $AgyAppDir = Join-Path $env:USERPROFILE ".gemini\antigravity"
+    }
 }
+
 
 New-Item -ItemType Directory -Force -Path $DataDir, (Join-Path $DataDir "cache") | Out-Null
 
@@ -128,8 +117,6 @@ if (Test-Path -LiteralPath $claudeUsageScript) {
 }
 
 $RouteMap = [ordered]@{
-
-    "/handoff/" = (Resolve-Path $HandoffDir).Path
 
     "/data/"    = (Resolve-Path (Join-Path $DataDir "cache")).Path
 
@@ -289,68 +276,6 @@ function Resolve-SafePath([string]$urlPath) {
 
 
 
-function Get-HandoffRoots {
-
-    $roots = [System.Collections.Generic.List[string]]::new()
-
-    if ($HandoffDir -and (Test-Path $HandoffDir)) {
-
-        $roots.Add((Resolve-Path $HandoffDir).Path)
-
-    }
-
-    $cands = @(
-
-        (Join-Path $env:USERPROFILE ".samjil\handoff\channels"),
-
-        (Join-Path $env:USERPROFILE ".samjil\samjil-handoff"),
-
-        (Join-Path $PSScriptRoot "runtime\handoff")
-
-    )
-
-    foreach ($c in $cands) {
-
-        if (Test-Path $c) {
-
-            $p = (Resolve-Path $c).Path
-
-            if (-not $roots.Contains($p)) {
-
-                $roots.Add($p)
-
-            }
-
-        }
-
-    }
-
-    return $roots
-
-}
-
-
-
-function Find-HandoffProjectDir([string]$projectName) {
-
-    foreach ($r in (Get-HandoffRoots)) {
-
-        $testP = Join-Path $r $projectName
-
-        if (Test-Path -LiteralPath $testP -PathType Container) {
-
-            return $testP
-
-        }
-
-    }
-
-    return $null
-
-}
-
-
-
 # delegate-agy 스크립트를 찾습니다. $RelPath 는 scripts 폴더 기준(예: "start-agy.ps1", "sub\ensure-agy-running.ps1").
 # @cwd 값 목록을 중복(대소문자, 끝의 \ 또는 / 무시)·빈 값을 빼고 줄 순서대로 배열로 만든다.
 # common.ps1 의 ConvertTo-CwdList 와 같은 규칙의 사본이다(뷰어는 common.ps1 을 불러오지 않는다). tests\delegate-agy\cwd-list.tests.ps1 이 둘이 같은지 확인한다.
@@ -393,9 +318,9 @@ function Find-DelegateScript([string]$RelPath) {
 # 기억은 최근 8개 대화까지만 둔다.
 $script:ProcessCache = @{}
 $script:TokenCache = @{}
-function Get-AgyProcessStepsCached([string]$ConversationId, $StartedAt = $null) {
+function Get-AgyProcessStepsCached([string]$ConversationId, $StartedAt = $null, [string]$ExplicitTranscript = "") {
     if (-not (Get-Command Read-AgyProcessSteps -ErrorAction SilentlyContinue)) { return @() }
-    $tp = Get-AgyTranscriptPath (Get-AgyHomeDir) $ConversationId
+    $tp = if ($ExplicitTranscript) { $ExplicitTranscript } else { Get-AgyTranscriptPath (Get-AgyHomeDir) $ConversationId }
     if (-not $tp) { return @() }
     $item = Get-Item -LiteralPath $tp -ErrorAction SilentlyContinue
     if (-not $item) { return @() }
@@ -410,7 +335,8 @@ function Get-AgyProcessStepsCached([string]$ConversationId, $StartedAt = $null) 
             if ($startedDt -ne [datetime]::MinValue) { $startTs = $startedDt.ToString("yyyyMMddHHmmss") }
         } catch {}
     }
-    $cacheKey = if ($startTs) { "$ConversationId|$startTs" } else { $ConversationId }
+    $baseKey = if ($ExplicitTranscript) { "file:$ExplicitTranscript" } else { $ConversationId }
+    $cacheKey = if ($startTs) { "$baseKey|$startTs" } else { $baseKey }
     $c = $script:ProcessCache[$cacheKey]
     if (-not $c -or $item.Length -lt $c.Offset) {
         # 처음 보는 대화이거나, 파일이 더 짧아졌으면(새로 만들어짐) 처음부터 읽는다
@@ -526,56 +452,62 @@ function Start-ProcessTranslation([string]$ConversationId, [string]$Since = "") 
     return $st
 }
 
-function Get-AgyProgress([string]$ConversationId, $StartedAt, [string]$TaskId = "", [string]$QuestionSnippet = "", [string]$Session = "") {
+function Get-AgyProgress([string]$ConversationId, $StartedAt, [string]$TaskId = "", [string]$QuestionSnippet = "", [string]$Session = "", [string]$ExplicitTranscript = "") {
     try {
         $agyHome = if ($env:AGY_HOME) { $env:AGY_HOME } else { Join-Path $env:USERPROFILE ".gemini\antigravity-cli" }
-        if (-not $ConversationId) {
-            if (-not $StartedAt) { return $null }
-            $convDir = Join-Path $agyHome "conversations"
-            if (-not (Test-Path -LiteralPath $convDir -PathType Container)) { return $null }
-            $from = $StartedAt.AddSeconds(-5); $to = $StartedAt.AddSeconds(180)
-            $cands = @(Get-ChildItem -LiteralPath $convDir -Filter '*.db' -File -ErrorAction SilentlyContinue |
-                Where-Object { $_.CreationTime -ge $from -and $_.CreationTime -le $to } |
-                Sort-Object CreationTime)
-            if ($cands.Count -eq 0) { return $null }
-            if ($cands.Count -eq 1) {
-                $ConversationId = $cands[0].BaseName
-            } else {
-                $matchedId = ""
-                foreach ($c in $cands) {
-                    $candCId = $c.BaseName
-                    $candTf = Join-Path $agyHome ("brain\{0}\.system_generated\logs\transcript.jsonl" -f $candCId)
-                    if (Test-Path -LiteralPath $candTf) {
-                        try {
-                            $firstLine = [System.IO.File]::ReadLines($candTf) | Select-Object -First 1
-                            if ($firstLine) {
-                                if ($TaskId -and $firstLine -match [regex]::Escape($TaskId)) {
-                                    $matchedId = $candCId
-                                    break
+        $hasExplicit = [bool]($ExplicitTranscript -and (Test-Path -LiteralPath $ExplicitTranscript -PathType Leaf))
+        if ($hasExplicit) {
+            if (-not $ConversationId) { $ConversationId = if ($TaskId) { "bridge-$TaskId" } else { "bridge-task" } }
+            $tf = $ExplicitTranscript
+        } else {
+            if (-not $ConversationId) {
+                if (-not $StartedAt) { return $null }
+                $convDir = Join-Path $agyHome "conversations"
+                if (-not (Test-Path -LiteralPath $convDir -PathType Container)) { return $null }
+                $from = $StartedAt.AddSeconds(-5); $to = $StartedAt.AddSeconds(180)
+                $cands = @(Get-ChildItem -LiteralPath $convDir -Filter '*.db' -File -ErrorAction SilentlyContinue |
+                    Where-Object { $_.CreationTime -ge $from -and $_.CreationTime -le $to } |
+                    Sort-Object CreationTime)
+                if ($cands.Count -eq 0) { return $null }
+                if ($cands.Count -eq 1) {
+                    $ConversationId = $cands[0].BaseName
+                } else {
+                    $matchedId = ""
+                    foreach ($c in $cands) {
+                        $candCId = $c.BaseName
+                        $candTf = Join-Path $agyHome ("brain\{0}\.system_generated\logs\transcript.jsonl" -f $candCId)
+                        if (Test-Path -LiteralPath $candTf) {
+                            try {
+                                $firstLine = [System.IO.File]::ReadLines($candTf) | Select-Object -First 1
+                                if ($firstLine) {
+                                    if ($TaskId -and $firstLine -match [regex]::Escape($TaskId)) {
+                                        $matchedId = $candCId
+                                        break
+                                    }
+                                    if ($QuestionSnippet -and $firstLine.Contains($QuestionSnippet)) {
+                                        $matchedId = $candCId
+                                        break
+                                    }
                                 }
-                                if ($QuestionSnippet -and $firstLine.Contains($QuestionSnippet)) {
-                                    $matchedId = $candCId
-                                    break
-                                }
-                            }
-                        } catch {}
+                            } catch {}
+                        }
+                    }
+                    if ($matchedId) {
+                        $ConversationId = $matchedId
+                    } else {
+                        $best = $cands | Sort-Object { [Math]::Abs(($_.CreationTime - $StartedAt).TotalSeconds) } | Select-Object -First 1
+                        $ConversationId = $best.BaseName
                     }
                 }
-                if ($matchedId) {
-                    $ConversationId = $matchedId
-                } else {
-                    $best = $cands | Sort-Object { [Math]::Abs(($_.CreationTime - $StartedAt).TotalSeconds) } | Select-Object -First 1
-                    $ConversationId = $best.BaseName
-                }
             }
+            $tf = Join-Path $agyHome ("brain\{0}\.system_generated\logs\transcript_full.jsonl" -f $ConversationId)
         }
-        $tf = Join-Path $agyHome ("brain\{0}\.system_generated\logs\transcript_full.jsonl" -f $ConversationId)
         $item = Get-Item -LiteralPath $tf -ErrorAction SilentlyContinue
         if (-not $item) { return $null }
 
         # 끝 256KB만 읽습니다(파일은 수 MB까지 커질 수 있음). 잘린 첫 줄은 버립니다.
         $tailBytes = 262144
-        $fs = [System.IO.File]::Open($tf, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $fs = New-Object System.IO.FileStream($tf, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
         try {
             $offset = [Math]::Max(0, $fs.Length - $tailBytes)
             [void]$fs.Seek($offset, [System.IO.SeekOrigin]::Begin)
@@ -646,15 +578,20 @@ function Get-AgyProgress([string]$ConversationId, $StartedAt, [string]$TaskId = 
         # 실시간 토큰 집계 (transcript.jsonl 우선, 없으면 transcript_full.jsonl — 오프셋 기반 증분 읽기)
         # 끝난 뒤 위임 기록과 같은 기준: 총 = 입력(캐시 밖) + 출력. 같은 턴의 줄은 덮어쓰고, 캐시 읽기는 따로 센다. 계산은 agy-progress.ps1 의 공용 함수.
         $tIn = [int64]0; $tOut = [int64]0; $tThink = [int64]0; $tCache = [int64]0; $tCtx = [int64]0; $tTurns = 0; $tModels = @()
-        $compactTf = Join-Path $agyHome ("brain\{0}\.system_generated\logs\transcript.jsonl" -f $ConversationId)
-        $targetTokenFile = if (Test-Path -LiteralPath $compactTf) { $compactTf } else { $tf }
+        $targetTokenFile = if ($hasExplicit) {
+            $ExplicitTranscript
+        } else {
+            $compactTf = Join-Path $agyHome ("brain\{0}\.system_generated\logs\transcript.jsonl" -f $ConversationId)
+            if (Test-Path -LiteralPath $compactTf) { $compactTf } else { $tf }
+        }
+        $tokenCacheKey = if ($hasExplicit) { "file:$ExplicitTranscript" } else { $ConversationId }
         if ($targetTokenFile -and (Get-Command Update-AgyUsageState -ErrorAction SilentlyContinue)) {
             try {
                 if ($null -eq $script:UsageCache) { $script:UsageCache = @{} }
-                $us = $script:UsageCache[$ConversationId]
+                $us = $script:UsageCache[$tokenCacheKey]
                 if (-not $us -or $us.Path -ne $targetTokenFile) {
                     $us = New-AgyUsageState $targetTokenFile
-                    $script:UsageCache[$ConversationId] = $us
+                    $script:UsageCache[$tokenCacheKey] = $us
                     if ($script:UsageCache.Count -gt 16) {
                         $oldestU = $script:UsageCache.GetEnumerator() | Sort-Object { $_.Value.Touched } | Select-Object -First 1
                         if ($oldestU) { $script:UsageCache.Remove($oldestU.Key) }
@@ -688,10 +625,10 @@ function Get-AgyProgress([string]$ConversationId, $StartedAt, [string]$TaskId = 
             $stallGraceSec = Get-AgySecondsSetting 'AGY_STALL_GRACE_SECONDS' 300 30
         }
         $waitingBg = $false
-        if ((((Get-Date) - $last).TotalSeconds -ge ($stallSec - 60)) -and (Get-Command Get-AgyPendingBackgroundTasks -ErrorAction SilentlyContinue)) {
+        if (-not $hasExplicit -and (((Get-Date) - $last).TotalSeconds -ge ($stallSec - 60)) -and (Get-Command Get-AgyPendingBackgroundTasks -ErrorAction SilentlyContinue)) {
             try { $waitingBg = (@(Get-AgyPendingBackgroundTasks $agyHome $ConversationId).Count -gt 0) } catch {}
         }
-        $stepList = @(Get-AgyProcessStepsCached $ConversationId $stepFilter)
+        $stepList = @(Get-AgyProcessStepsCached $ConversationId $stepFilter $(if ($hasExplicit) { $ExplicitTranscript } else { "" }))
 
         return [PSCustomObject]@{
             conversation_id = $ConversationId
@@ -741,6 +678,8 @@ if ($processTranslateLib) { . $processTranslateLib }
 # 실측 통계 수집기(usage-stats.ps1): 인자 없이 불러 함수만 정의한다. 수집 자체는 /api/usage-stats 요청 때 창 없는 별도 프로세스로 돌린다.
 $usageStatsLib = Find-DelegateScript "sub\usage-stats.ps1"
 if ($usageStatsLib) { try { . $usageStatsLib } catch { $usageStatsLib = $null } }
+$failureDoctorLib = Find-DelegateScript "sub\agy-failure-doctor.ps1"
+if ($failureDoctorLib) { try { . $failureDoctorLib } catch { $failureDoctorLib = $null } }
 # 위임별 Claude 토큰 집계 및 5시간/주간 한도 추정 헬퍼
 $claudeTranscriptLib = Find-DelegateScript "sub\claude-transcript.ps1"
 if ($claudeTranscriptLib) { try { . $claudeTranscriptLib } catch {} }
@@ -750,12 +689,8 @@ $usageHistoryLib = Find-DelegateScript "sub\usage-history.ps1"
 if ($usageHistoryLib) { try { . $usageHistoryLib } catch {} }
 $limitsEstimateLib = Join-Path $PSScriptRoot "limits-estimate.ps1"
 if (Test-Path -LiteralPath $limitsEstimateLib) { try { . $limitsEstimateLib } catch {} }
-# 핸드오프 채널 공용 함수(handoff-lib.ps1): 메시지 머리말의 모델과 "자동 이어가기" 상태를 읽는다. 못 찾으면 그 정보만 빠진다.
-$script:HandoffMetaCache = @{}
-$handoffLibLoaded = $false
-foreach ($hlCand in @((Join-Path $PSScriptRoot "..\handoff\scripts\handoff-lib.ps1"), (Join-Path $env:USERPROFILE ".samjil\handoff\scripts\handoff-lib.ps1"))) {
-    if (Test-Path -LiteralPath $hlCand) { try { . $hlCand; $handoffLibLoaded = $true } catch {}; break }
-}
+$accountQuotasLib = Find-DelegateScript "sub\agy-account-quotas.ps1"
+if ($accountQuotasLib) { try { . $accountQuotasLib } catch {} }
 # 업데이트 확인 헬퍼(update-check.ps1): 캐시만 읽어 새 버전 여부를 알린다(요청 경로에서 네트워크 호출 없음). 못 찾으면 조용히 건너뛴다.
 $updateCheckLib = Find-DelegateScript "sub\update-check.ps1"
 if ($updateCheckLib) { try { . $updateCheckLib } catch { $updateCheckLib = $null } }
@@ -921,7 +856,7 @@ function Format-TaskLimitsAtJson([string]$SnapshotJson, [string]$CapturedAt, $Ge
     $base = ""
     if ($SnapshotJson) {
         $trimmed = $SnapshotJson.Trim()
-        if ($trimmed.StartsWith("{") -and $trimmed.EndsWith("}")) {
+        if ($trimmed.StartsWith("{") -and $trimmed.EndsWith("}") -and $trimmed -notmatch '^\{\s*\}$') {
             $base = $trimmed
             if ($null -ne $ClaudeSessions) {
                 try {
@@ -1169,7 +1104,7 @@ function Get-ViewerQaRecordsJson([string]$DbPath, [string]$DataDir = "", [long]$
         $nowCapIso = [datetime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
         $effProjectsDir = if ($ProjectsDir) { $ProjectsDir } elseif ($ClaudeProjectsDir) { $ClaudeProjectsDir } else { "" }
 
-        $fields = if ($script:QaRecordFields) { $script:QaRecordFields } else { @('timestamp', 'computer_name', 'task_id', 'source', 'model', 'attempts', 'tried_models', 'input_tokens', 'output_tokens', 'thinking_tokens', 'total_tokens', 'elapsed_sec', 'status', 'session', 'session_id', 'question', 'answer', 'process', 'cum_input_tokens', 'cum_output_tokens', 'cum_thinking_tokens', 'cum_total_tokens', 'usage_basis') }
+        $fields = if ($script:QaRecordFields) { $script:QaRecordFields } else { @('timestamp', 'computer_name', 'task_id', 'source', 'model', 'attempts', 'tried_models', 'input_tokens', 'output_tokens', 'thinking_tokens', 'total_tokens', 'elapsed_sec', 'status', 'session', 'session_id', 'account', 'fallback_from', 'account_note', 'question', 'answer', 'process', 'cum_input_tokens', 'cum_output_tokens', 'cum_thinking_tokens', 'cum_total_tokens', 'usage_basis') }
         $seq = $Since
         $sb = New-Object System.Text.StringBuilder
         [void]$sb.Append('{"records":[')
@@ -1182,7 +1117,7 @@ function Get-ViewerQaRecordsJson([string]$DbPath, [string]$DataDir = "", [long]$
             $firstField = $true
             foreach ($k in $fields) {
                 $v = $r[$k]
-                if ($null -eq $v) { continue }
+                if ($null -eq $v -or $v -is [DBNull]) { continue }
                 if (-not $firstField) { [void]$sb.Append(',') }
                 $firstField = $false
                 [void]$sb.Append('"').Append($k).Append('":')
@@ -1209,12 +1144,27 @@ function Get-ViewerQaRecordsJson([string]$DbPath, [string]$DataDir = "", [long]$
                                     $firstField = $false
                                     [void]$sb.Append('"claude_effort":').Append((ConvertTo-AgyJsonString ([string]$metaObj.effort)))
                                 }
-                                foreach ($ak in @('agent_model', 'agent_effort', 'agent_type', 'agent_desc')) {
+                                foreach ($ak in @('agent_model', 'agent_effort', 'agent_type', 'agent_desc', 'src_model', 'src_effort', 'src_client', 'src_session')) {
                                     $prop = $metaObj.PSObject.Properties[$ak]
                                     if ($null -ne $prop -and $null -ne $prop.Value -and [string]$prop.Value) {
                                         if (-not $firstField) { [void]$sb.Append(',') }
                                         $firstField = $false
                                         [void]$sb.Append('"').Append($ak).Append('":').Append((ConvertTo-AgyJsonString ([string]$prop.Value)))
+                                    }
+                                }
+                                $cwdProp = $metaObj.PSObject.Properties['cwd']
+                                if ($null -ne $cwdProp -and $null -ne $cwdProp.Value) {
+                                    if ($cwdProp.Value -is [System.Array]) {
+                                        $cwdArr = @($cwdProp.Value | ForEach-Object { [string]$_ } | Where-Object { $_ })
+                                        if ($cwdArr.Count -gt 0) {
+                                            if (-not $firstField) { [void]$sb.Append(',') }
+                                            $firstField = $false
+                                            [void]$sb.Append('"src_cwd":').Append((ConvertTo-Json -InputObject @($cwdArr) -Compress))
+                                        }
+                                    } elseif ([string]$cwdProp.Value) {
+                                        if (-not $firstField) { [void]$sb.Append(',') }
+                                        $firstField = $false
+                                        [void]$sb.Append('"src_cwd":').Append((ConvertTo-AgyJsonString ([string]$cwdProp.Value)))
                                     }
                                 }
                                 $cuJson = Get-TaskClaudeUsageCached $db $claudeUsageMap $tId $metaObj ([string]$r['timestamp']) $effProjectsDir
@@ -1239,7 +1189,9 @@ function Get-ViewerQaRecordsJson([string]$DbPath, [string]$DataDir = "", [long]$
                         $taskLimitsMap[$tId] = $tlRow
                     } catch {}
                 }
-                $agyEst = if ($agyEstMap -and $agyEstMap.ContainsKey($tId)) { $agyEstMap.Item($tId) } else { $null }
+                $rowAcct = if ($r['account']) { ([string]$r['account']).Trim().ToLowerInvariant() } else { "primary" }
+                $isPrimaryTask = ($rowAcct -eq "primary")
+                $agyEst = if ($isPrimaryTask -and $agyEstMap -and $agyEstMap.ContainsKey($tId)) { $agyEstMap.Item($tId) } else { $null }
                 $snapStr = if ($null -ne $tlRow -and $tlRow.json) { [string]$tlRow.json } else { "" }
                 $capStr = if ($null -ne $tlRow -and $tlRow.captured_at) { [string]$tlRow.captured_at } else { "" }
                 $claudeSess = $null
@@ -1252,7 +1204,7 @@ function Get-ViewerQaRecordsJson([string]$DbPath, [string]$DataDir = "", [long]$
                             $claudeSess = (Get-CachedSessionsRatio -RuntimeDir $targetRuntime -Src "claude" -UntilUtc $capDt.ToUniversalTime())
                         }
                     }
-                    if ($null -ne $agyEst) {
+                    if ($isPrimaryTask -and $null -ne $agyEst) {
                         if (($agyEst -is [System.Collections.IDictionary]) -and $agyEst.Contains("cost_units")) {
                             if ($agyEst.Contains("sessions")) { $geminiSess = $agyEst.Item("sessions") }
                         } else {
@@ -1277,12 +1229,39 @@ function Get-ViewerQaRecordsJson([string]$DbPath, [string]$DataDir = "", [long]$
             # 끝난 위임이 큐에서 기다린 시간(초). 기록에는 저장돼 있지 않아서 작업 ID(claude_<접수 시각 epoch>_N)의 접수 시각을 쓴다:
             #   대기 = (끝난 시각 − 실행 시간) − 접수 시각. 오차는 수 초(agy 가 알리는 실행 시간이 시작·끝을 정확히 재지 않아서)이고,
             #   ID 에 접수 시각이 없거나(핸드오프 등) 값이 말이 안 되면(음수·7일 초과) 필드를 내지 않는다.
+            $waitCalcInt = 0
             if ($tId -match '^claude_(\d{9,11})_\d+' -and $r['elapsed_sec'] -ne $null -and $r['elapsed_sec'] -ne [DBNull]::Value) {
                 try {
                     $createdEpoch = [double]$Matches[1]
                     $endEpoch = [double]([DateTimeOffset][datetime]::Parse([string]$r['timestamp'], [System.Globalization.CultureInfo]::InvariantCulture)).ToUnixTimeSeconds()
                     $waitCalc = $endEpoch - [double]$r['elapsed_sec'] - $createdEpoch
-                    if ($waitCalc -ge 0 -and $waitCalc -lt 604800) { [void]$sb.Append(',"wait_sec":').Append([int][Math]::Round($waitCalc)) }
+                    if ($waitCalc -ge 0 -and $waitCalc -lt 604800) {
+                        $waitCalcInt = [int][Math]::Round($waitCalc)
+                        [void]$sb.Append(',"wait_sec":').Append($waitCalcInt)
+                    }
+                } catch {}
+            }
+            $rowStatusUpper = if ($r['status']) { ([string]$r['status']).Trim().ToUpperInvariant() } else { '' }
+            if ($rowStatusUpper -in @('ERROR', 'CANCELLED', 'BLOCKED') -and (Get-Command Get-AgyFailureCategory -ErrorAction SilentlyContinue)) {
+                try {
+                    $diagRec = @{
+                        status       = $rowStatusUpper
+                        answer       = if ($r['answer']) { [string]$r['answer'] } else { '' }
+                        question     = if ($r['question']) { [string]$r['question'] } else { '' }
+                        account_note = if ($r['account_note']) { [string]$r['account_note'] } else { '' }
+                        elapsed_sec  = $r['elapsed_sec']
+                        wait_sec     = $waitCalcInt
+                    }
+                    $diag = Get-AgyFailureCategory $diagRec
+                    if ($null -ne $diag) {
+                        $diagObj = [ordered]@{
+                            category       = $diag.category
+                            label          = $diag.label
+                            root_cause     = $diag.root_cause
+                            recommendation = $diag.recommendation
+                        }
+                        [void]$sb.Append(',"diagnosis":').Append((ConvertTo-Json -InputObject $diagObj -Compress))
+                    }
                 } catch {}
             }
 
@@ -1297,14 +1276,27 @@ function Get-ViewerQaRecordsJson([string]$DbPath, [string]$DataDir = "", [long]$
 
 
 # HTTP 리스너 기동 (충돌 시 기존 뷰어 자동 정리 및 대체 포트 탐색)
+function Get-ViewerTestDoubleEnv([string]$Name, [double]$DefaultValue) {
+    $raw = [Environment]::GetEnvironmentVariable($Name)
+    if ($raw -match '^\d+(\.\d+)?$') {
+        $parsed = [double]$raw
+        if ($parsed -gt 0) { return $parsed }
+    }
+    return $DefaultValue
+}
+
 if (-not $WorkerMode) {
     $ViewerShared = [hashtable]::Synchronized(@{})
     $ViewerShared['QaRecordsCache'] = $null
     $ViewerShared['lastClaudeScanLaunchAt'] = $null
     $ViewerShared['lastClaudeScanProc'] = $null
     $ViewerShared['LimitsCache'] = $null
+    $ViewerShared['AccountQuotaState'] = [hashtable]::Synchronized(@{})
     $ViewerShared['QuotaRefreshAt'] = $null
+    $ViewerShared['TestTreeLaunchSec'] = Get-ViewerTestDoubleEnv 'SAMJIL_TEST_TREE_LAUNCH_SEC' 5.0
+    $ViewerShared['TestRefreshGapSec'] = Get-ViewerTestDoubleEnv 'SAMJIL_TEST_REFRESH_GAP_SEC' 5.0
     $ViewerShared['PendingClaudeUsageCache'] = @{}
+    $ViewerShared['LastFailureDiagUpdateAt'] = $null
 
     if (Get-Command Initialize-UsageHistorySeed -ErrorAction SilentlyContinue) {
         try { Initialize-UsageHistorySeed -RuntimeDir $RuntimeDir -DbPath $AgyDbPath } catch {}
@@ -1389,7 +1381,6 @@ if (-not $WorkerMode) {
     Write-Host "  웹 대시보드     : $prefix" -ForegroundColor Green
     Write-Host ("  동시 처리       : 일꾼 {0}개 (SAMJIL_VIEWER_WORKERS 로 바꿈)" -f $workerCount) -ForegroundColor Green
     Write-Host "  위임 기록(/data): $DataDir" -ForegroundColor White
-    Write-Host "  대화 저장소     : $HandoffDir" -ForegroundColor White
 
     # --- agy agent (워처) 자동 연동 ---
     $watcherHealth = $null
@@ -1460,6 +1451,7 @@ if (-not $WorkerMode) {
             if ($RuntimeDir) { [void]$ps.AddParameter('RuntimeDir', $RuntimeDir) }
             if ($WebDir) { [void]$ps.AddParameter('WebDir', $WebDir) }
             if ($ClaudeProjectsDir) { [void]$ps.AddParameter('ClaudeProjectsDir', $ClaudeProjectsDir) }
+            if ($AgyAppDir) { [void]$ps.AddParameter('AgyAppDir', $AgyAppDir) }
             if ($Port) { [void]$ps.AddParameter('Port', $Port) }
 
             $asyncResult = $ps.BeginInvoke()
@@ -1489,384 +1481,7 @@ $ViewerHandleRequest = {
 
 
 
-            if ($urlPath -eq "/api/handoff/projects" -or $urlPath -eq "/api/projects") {
-
-                $projects = @()
-
-                $seenNames = @{}
-
-                foreach ($hRoot in (Get-HandoffRoots)) {
-
-                    if (-not (Test-Path $hRoot)) { continue }
-
-                    $dirs = Get-ChildItem -LiteralPath $hRoot -Directory -ErrorAction SilentlyContinue
-
-                    foreach ($d in $dirs) {
-
-                        if ($d.Name -eq "templates" -or $d.Name -eq "viewer" -or $d.Name -eq "scripts" -or $d.Name -eq "data" -or $d.Name.StartsWith(".") -or $seenNames.ContainsKey($d.Name)) { continue }
-
-                        $seenNames[$d.Name] = $true
-
-                        $briefPath = Join-Path $d.FullName "BRIEF.md"
-
-                        $indexPath = Join-Path $d.FullName "INDEX.md"
-
-                        $msgDir = Join-Path $d.FullName "msg"
-
-                        $msgCount = 0
-
-                        if (Test-Path $msgDir) {
-
-                            $msgFiles = Get-ChildItem -LiteralPath $msgDir -Filter "*.md" -File -ErrorAction SilentlyContinue
-
-                            $msgCount = if ($msgFiles) { @($msgFiles).Count } else { 0 }
-
-                        }
-
-                        $candidates = @($d.LastWriteTime)
-                        if (Test-Path $indexPath) {
-                            $idxItem = Get-Item -LiteralPath $indexPath -ErrorAction SilentlyContinue
-                            if ($idxItem) { $candidates += $idxItem.LastWriteTime }
-                        }
-                        if ($msgFiles -and $msgFiles.Count -gt 0) {
-                            $latestMsgFile = $msgFiles | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-                            if ($latestMsgFile) { $candidates += $latestMsgFile.LastWriteTime }
-                        }
-                        $maxTime = ($candidates | Sort-Object -Descending | Select-Object -First 1)
-                        $lastUpdated = $maxTime.ToString("yyyy-MM-dd HH:mm:ss")
-
-                        $latestMsg = $null
-
-                        if (Test-Path $indexPath) {
-
-                            $idxContent = Get-Content -LiteralPath $indexPath -Encoding UTF8 -ErrorAction SilentlyContinue
-
-                            if ($idxContent) {
-
-                                $tableLines = $idxContent | Where-Object { $_ -match '^\s*\|\s*\d{4}\s*\|' }
-
-                                if ($tableLines) {
-
-                                    $lastLine = @($tableLines)[-1]
-
-                                    $parts = $lastLine.Split('|') | ForEach-Object { $_.Trim() }
-
-                                    if ($parts.Length -ge 6) {
-
-                                        $latestMsg = [PSCustomObject]@{
-
-                                            num    = $parts[1]
-
-                                            time   = $parts[2]
-
-                                            dir    = $parts[3]
-
-                                            title  = $parts[4]
-
-                                            status = $parts[5]
-
-                                        }
-
-                                    }
-
-                                }
-
-                            }
-
-                        }
-
-                        $projects += [PSCustomObject]@{
-
-                            name      = $d.Name
-
-                            hasBrief  = (Test-Path $briefPath)
-
-                            hasIndex  = (Test-Path $indexPath)
-
-                            msgCount  = $msgCount
-
-                            updated   = $lastUpdated
-
-                            latestMsg = $latestMsg
-
-                        }
-
-                    }
-
-                }
-
-                $arr = @($projects | Sort-Object { $_.updated } -Descending)
-
-                if ($arr.Count -eq 0) {
-
-                    $json = "[]"
-
-                } elseif ($arr.Count -eq 1) {
-
-                    $json = "[" + ($arr[0] | ConvertTo-Json -Depth 5) + "]"
-
-                } else {
-
-                    $json = $arr | ConvertTo-Json -Depth 5
-
-                }
-
-                $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
-
-                $response.ContentType = "application/json; charset=utf-8"
-
-                $response.ContentLength64 = $bytes.Length
-
-                $response.Headers.Add("Cache-Control", "no-store")
-
-                $response.OutputStream.Write($bytes, 0, $bytes.Length)
-
-
-
-            } elseif ($urlPath -eq "/api/handoff/project" -or $urlPath -eq "/api/project") {
-
-                $params = Get-Utf8QueryParams $request.Url
-
-                $pName = $params["name"]
-
-                if ([string]::IsNullOrWhiteSpace($pName) -or $pName.Contains("..") -or $pName.Contains("/") -or $pName.Contains("\")) {
-
-                    $response.StatusCode = 400
-
-                    $bytes = [System.Text.Encoding]::UTF8.GetBytes("Invalid project name")
-
-                    $response.ContentType = "text/plain; charset=utf-8"
-
-                    $response.ContentLength64 = $bytes.Length
-
-                    $response.OutputStream.Write($bytes, 0, $bytes.Length)
-
-                } else {
-
-                    $pDir = Find-HandoffProjectDir $pName
-
-                    if (-not $pDir) {
-
-                        $response.StatusCode = 404
-
-                        $bytes = [System.Text.Encoding]::UTF8.GetBytes("Project not found")
-
-                        $response.ContentType = "text/plain; charset=utf-8"
-
-                        $response.ContentLength64 = $bytes.Length
-
-                        $response.OutputStream.Write($bytes, 0, $bytes.Length)
-
-                    } else {
-
-                        $briefPath = Join-Path $pDir "BRIEF.md"
-
-                        $briefText = if (Test-Path $briefPath) { [System.IO.File]::ReadAllText($briefPath, [System.Text.Encoding]::UTF8) } else { "" }
-
-                        
-
-                        $msgDir = Join-Path $pDir "msg"
-                        $fileList = @()
-                        $msgFilesByNum = @{}
-                        if (Test-Path $msgDir) {
-                            $files = Get-ChildItem -LiteralPath $msgDir -Filter "*.md" -File | Sort-Object Name
-                            foreach ($f in $files) {
-                                $fileList += $f.Name
-                                if ($f.Name -match '^(\d{4})-(.*)\.md$') {
-                                    $msgFilesByNum[$Matches[1]] = $f
-                                }
-                            }
-                        }
-
-                        $indexPath = Join-Path $pDir "INDEX.md"
-                        $indexLines = if (Test-Path $indexPath) { Get-Content -LiteralPath $indexPath -Encoding UTF8 } else { @() }
-                        $parsedMessages = @()
-                        foreach ($line in $indexLines) {
-                            if ($line -match '^\s*\|\s*(\d{4})\s*\|\s*([^|]*)\|\s*([^|]*)\|\s*([^|]*)\|\s*([^|]*)\|') {
-                                $mNum = $Matches[1].Trim()
-                                $mTime = $Matches[2].Trim()
-                                $mDir = $Matches[3].Trim()
-                                $mTitle = $Matches[4].Trim()
-                                $mStatus = $Matches[5].Trim()
-
-                                # 누락된 필드가 있는 경우 실제 메시지 파일에서 자동 복구
-                                if ((-not $mTitle -or -not $mDir) -and $msgFilesByNum.ContainsKey($mNum)) {
-                                    $mf = $msgFilesByNum[$mNum]
-                                    if (-not $mDir) {
-                                        if ($mf.Name -match '-(a2c|c2a)-') { $mDir = $Matches[1] }
-                                    }
-                                    if (-not $mTitle) {
-                                        try {
-                                            $firstLines = Get-Content -LiteralPath $mf.FullName -TotalCount 10 -Encoding UTF8
-                                            foreach ($fl in $firstLines) {
-                                                if ($fl -match '^#\s+(.+)$') {
-                                                    $mTitle = $Matches[1].Trim()
-                                                    break
-                                                }
-                                            }
-                                        } catch {}
-                                        if (-not $mTitle -and $mf.Name -match '^\d{4}-[a-z0-9]+-(.*)\.md$') {
-                                            $mTitle = $Matches[1].Replace('-', ' ')
-                                        }
-                                    }
-                                    if (-not $mTime) {
-                                        $mTime = $mf.LastWriteTime.ToString("yyyy-MM-dd HH:mm")
-                                    }
-                                }
-
-                                # 메시지 머리말의 모델·답장대상·자동(없으면 빈 값). 파일이 안 바뀌면 캐시를 쓴다.
-                                $mMeta = @{ model = ""; replyTo = ""; auto = $false; session = "" }
-                                if ($handoffLibLoaded -and $msgFilesByNum.ContainsKey($mNum)) {
-                                    try { $mMeta = Get-HandoffMessageMeta $msgFilesByNum[$mNum].FullName $script:HandoffMetaCache } catch {}
-                                }
-                                # 메시지 파일이 만들어진 시각(UTC, 초 단위). Claude 가 보낸 c2a 가 어느 Claude 호출에서 나왔는지 짐작하는 데 쓴다(수정해도 만든 시각은 그대로).
-                                $mCreated = ""
-                                if ($msgFilesByNum.ContainsKey($mNum)) { try { $mCreated = $msgFilesByNum[$mNum].CreationTimeUtc.ToString("yyyy-MM-ddTHH:mm:ssZ") } catch {} }
-                                $parsedMessages += [PSCustomObject]@{
-                                    num     = $mNum
-                                    time    = $mTime
-                                    dir     = $mDir
-                                    title   = $mTitle
-                                    status  = if ($mStatus) { $mStatus } else { "처리됨" }
-                                    model   = [string]$mMeta.model
-                                    effort  = [string]$mMeta.effort
-                                    replyTo = [string]$mMeta.replyTo
-                                    auto    = [bool]$mMeta.auto
-                                    session = [string]$mMeta.session
-                                    created = $mCreated
-                                }
-                            }
-                        }
-
-
-
-                        $autoSummary = $null
-                        if ($handoffLibLoaded) { try { $autoSummary = Get-HandoffAutoSummary $pDir } catch {} }
-                        $resObj = [PSCustomObject]@{
-                            name     = $pName
-                            brief    = $briefText
-                            messages = $parsedMessages
-                            files    = $fileList
-                            auto     = $autoSummary
-                        }
-
-                        $json = $resObj | ConvertTo-Json -Depth 5
-
-                        $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
-
-                        $response.ContentType = "application/json; charset=utf-8"
-
-                        $response.ContentLength64 = $bytes.Length
-
-                        $response.Headers.Add("Cache-Control", "no-store")
-
-                        $response.OutputStream.Write($bytes, 0, $bytes.Length)
-
-                    }
-
-                }
-
-            } elseif ($urlPath -eq "/api/handoff/message" -or $urlPath -eq "/api/message") {
-
-                $params = Get-Utf8QueryParams $request.Url
-
-                $pName = $params["project"]
-
-                $fName = $params["file"]
-
-                if ([string]::IsNullOrWhiteSpace($pName) -or [string]::IsNullOrWhiteSpace($fName) -or
-
-                    $pName.Contains("..") -or $pName.Contains("/") -or $pName.Contains("\") -or
-
-                    $fName.Contains("..") -or $fName.Contains("/") -or $fName.Contains("\")) {
-
-                    $response.StatusCode = 400
-
-                    $bytes = [System.Text.Encoding]::UTF8.GetBytes("Invalid project or file name")
-
-                    $response.ContentType = "text/plain; charset=utf-8"
-
-                    $response.ContentLength64 = $bytes.Length
-
-                    $response.OutputStream.Write($bytes, 0, $bytes.Length)
-
-                } else {
-
-                    $pDir = Find-HandoffProjectDir $pName
-
-                    $msgFilePath = if ($pDir) { Join-Path $pDir "msg\$fName" } else { $null }
-
-                    if (-not $msgFilePath -or -not (Test-Path -LiteralPath $msgFilePath -PathType Leaf)) {
-
-                        $response.StatusCode = 404
-
-                        $bytes = [System.Text.Encoding]::UTF8.GetBytes("Message file not found: $fName")
-
-                        $response.ContentType = "text/plain; charset=utf-8"
-
-                        $response.ContentLength64 = $bytes.Length
-
-                        $response.OutputStream.Write($bytes, 0, $bytes.Length)
-
-                    } else {
-
-                        $bytes = [System.IO.File]::ReadAllBytes($msgFilePath)
-
-                        $response.ContentType = "text/plain; charset=utf-8"
-
-                        $response.ContentLength64 = $bytes.Length
-
-                        $response.Headers.Add("Cache-Control", "no-store")
-
-                        $response.OutputStream.Write($bytes, 0, $bytes.Length)
-
-                    }
-
-                }
-
-            } elseif ($urlPath -eq "/api/handoff/auto") {
-                # 채널의 자동 이어가기 상태(GET)와 켜기·끄기·한도 초기화(POST ?action=on|off|reset).
-                # 채널 파일(AUTO.off, AUTO.json)을 바꾸는 동작이라 워처 켜기와 같이 POST + 전용 헤더만 받는다.
-                $params = Get-Utf8QueryParams $request.Url
-                $aName = [string]$params["name"]
-                $aAct = [string]$params["action"]
-                $aCode = 200
-                $aPayload = $null
-                $aMsg = ""
-                if (-not $handoffLibLoaded) {
-                    $aCode = 503; $aMsg = "handoff-lib.ps1 not found"
-                } elseif ([string]::IsNullOrWhiteSpace($aName) -or $aName.Contains("..") -or $aName.Contains("/") -or $aName.Contains("\")) {
-                    $aCode = 400; $aMsg = "Invalid project name"
-                } elseif ($request.HttpMethod -ne "GET" -and $request.HttpMethod -ne "POST") {
-                    $aCode = 405; $aMsg = "Method Not Allowed"
-                    $response.Headers.Add("Allow", "GET, POST")
-                } elseif ($request.HttpMethod -eq "POST" -and $request.Headers["X-Samjil-Viewer"] -ne "1") {
-                    $aCode = 403; $aMsg = "Forbidden"
-                } else {
-                    $aDir = Find-HandoffProjectDir $aName
-                    if (-not $aDir) {
-                        $aCode = 404; $aMsg = "Project not found"
-                    } elseif ($request.HttpMethod -eq "POST" -and -not (Set-HandoffAutoAction $aDir $aAct)) {
-                        $aCode = 400; $aMsg = "Invalid action"
-                    } else {
-                        if ($request.HttpMethod -eq "POST") {
-                            Write-Host ("[{0}] 핸드오프 자동 이어가기 {1}: {2}" -f (Get-Date -Format 'HH:mm:ss'), $aAct, $aName) -ForegroundColor Yellow
-                        }
-                        $aPayload = Get-HandoffAutoSummary $aDir
-                    }
-                }
-                $response.StatusCode = $aCode
-                if ($aPayload) {
-                    $bytes = [System.Text.Encoding]::UTF8.GetBytes(($aPayload | ConvertTo-Json -Depth 5))
-                    $response.ContentType = "application/json; charset=utf-8"
-                    $response.Headers.Add("Cache-Control", "no-store")
-                } else {
-                    $bytes = [System.Text.Encoding]::UTF8.GetBytes($aMsg)
-                    $response.ContentType = "text/plain; charset=utf-8"
-                }
-                $response.ContentLength64 = $bytes.Length
-                $response.OutputStream.Write($bytes, 0, $bytes.Length)
-            } elseif ($urlPath -eq "/api/qa/records" -or $urlPath -eq "/api/qa-records") {
+            if ($urlPath -eq "/api/qa/records" -or $urlPath -eq "/api/qa-records") {
 
                 # 위임 완료 기록. 화면은 처음에 since=0 으로 전부 받고, 이후엔 마지막으로 받은 seq 이후만 받는다.
                 $params = Get-Utf8QueryParams $request.Url
@@ -1894,6 +1509,149 @@ $ViewerHandleRequest = {
                     $bytes = [System.Text.Encoding]::UTF8.GetBytes($qaJson)
                     $response.ContentType = "application/json; charset=utf-8"
                     $response.Headers.Add("Cache-Control", "no-store")
+                }
+                $response.ContentLength64 = $bytes.Length
+                $response.OutputStream.Write($bytes, 0, $bytes.Length)
+            } elseif ($urlPath -eq "/api/qa/diagnostics") {
+
+                $params = Get-Utf8QueryParams $request.Url
+                $diagDays = 14
+                if ($params["days"]) {
+                    $parsedDays = 0
+                    if ([int]::TryParse([string]$params["days"], [ref]$parsedDays)) {
+                        $diagDays = [Math]::Min(365, [Math]::Max(1, $parsedDays))
+                    }
+                }
+                $diagLimit = 200
+                if ($params["limit"]) {
+                    $parsedLimit = 0
+                    if ([int]::TryParse([string]$params["limit"], [ref]$parsedLimit)) {
+                        $diagLimit = [Math]::Min(1000, [Math]::Max(1, $parsedLimit))
+                    }
+                }
+                if ((Test-Path -LiteralPath $AgyDbPath -PathType Leaf) -and (Get-Command Update-AgyFailureRecords -ErrorAction SilentlyContinue)) {
+                    $shouldUpdateDiag = $false
+                    $nowDiagUtc = [datetime]::UtcNow
+                    if ($null -ne $ViewerShared) {
+                        [System.Threading.Monitor]::Enter($ViewerShared.SyncRoot)
+                        try {
+                            $lastDiagUpd = $ViewerShared['LastFailureDiagUpdateAt']
+                            if ($null -eq $lastDiagUpd -or ($nowDiagUtc - [datetime]$lastDiagUpd).TotalSeconds -ge 30) {
+                                $ViewerShared['LastFailureDiagUpdateAt'] = $nowDiagUtc
+                                $shouldUpdateDiag = $true
+                            }
+                        } finally {
+                            [System.Threading.Monitor]::Exit($ViewerShared.SyncRoot)
+                        }
+                    } else {
+                        $shouldUpdateDiag = $true
+                    }
+                    if ($shouldUpdateDiag) {
+                        try { [void](Update-AgyFailureRecords -DbPath $AgyDbPath) } catch {}
+                    }
+                }
+                $diagResult = $null
+                if (Get-Command Invoke-AgyFailureDiagnostics -ErrorAction SilentlyContinue) {
+                    try {
+                        $diagResult = Invoke-AgyFailureDiagnostics -DbPath $AgyDbPath -Days $diagDays -Limit $diagLimit -ViewerBaseUrl $prefix
+                    } catch {
+                        $diagResult = $null
+                    }
+                }
+                if ($null -eq $diagResult) {
+                    $diagResult = [pscustomobject]@{
+                        generated_at        = [datetime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
+                        days                = $diagDays
+                        limit               = $diagLimit
+                        total_scanned       = 0
+                        total_failed        = 0
+                        counts_by_status    = [pscustomobject]@{ ERROR = 0; CANCELLED = 0; BLOCKED = 0 }
+                        by_category         = @()
+                        samples             = @()
+                        records             = @()
+                        unacked_total       = 0
+                        unacked_by_category = @()
+                        resolution_summary  = [pscustomobject]@{ total = 0; resolved = 0; failed = 0; remaining = 0 }
+                        handled_records     = @()
+                        fix_brief           = ''
+                    }
+                }
+                $diagJson = $diagResult | ConvertTo-Json -Depth 6
+                $bytes = [System.Text.Encoding]::UTF8.GetBytes($diagJson)
+                $response.ContentType = "application/json; charset=utf-8"
+                $response.Headers.Add("Cache-Control", "no-store")
+                $response.ContentLength64 = $bytes.Length
+                $response.OutputStream.Write($bytes, 0, $bytes.Length)
+            } elseif ($urlPath -eq "/api/qa/diagnostics/ack") {
+
+                $ackCode = 200
+                $ackPayload = $null
+                $ackMsg = ""
+                if ($request.HttpMethod -ne "POST") {
+                    $ackCode = 405
+                    $response.Headers.Add("Allow", "POST")
+                    $ackMsg = "Method Not Allowed"
+                } elseif ($request.Headers["X-Samjil-Viewer"] -ne "1") {
+                    $ackCode = 403
+                    $ackMsg = "Forbidden"
+                } else {
+                    $ackBody = ""
+                    try {
+                        $ackReader = New-Object System.IO.StreamReader($request.InputStream, (New-Object System.Text.UTF8Encoding($false)))
+                        $ackBody = $ackReader.ReadToEnd()
+                    } catch { $ackBody = "" }
+                    $ackReq = $null
+                    if ($ackBody.Length -gt 0 -and $ackBody.Length -le 262144) {
+                        try { $ackReq = $ackBody | ConvertFrom-Json } catch { $ackReq = $null }
+                    }
+                    if ($null -eq $ackReq) {
+                        $ackCode = 400
+                        $ackMsg = "Invalid JSON"
+                    } else {
+                        $hasCatProp = ($ackReq.PSObject.Properties['category'] -and $null -ne $ackReq.category)
+                        $ackCat = if ($hasCatProp) { [string]$ackReq.category } else { "" }
+                        $hasIdsProp = ($ackReq.PSObject.Properties['task_ids'] -and $null -ne $ackReq.task_ids)
+                        $ackTaskIds = if ($hasIdsProp) {
+                            @($ackReq.task_ids | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ -ne "" })
+                        } else { @() }
+
+                        if ($hasCatProp -and $ackCat -ne "" -and $ackCat -cnotmatch '^[a-z_]{1,40}$') {
+                            $ackCode = 400
+                            $ackMsg = "Invalid category"
+                        } elseif ((-not $ackCat) -and ($ackTaskIds.Count -eq 0)) {
+                            $ackCode = 400
+                            $ackMsg = "category or task_ids required"
+                        } else {
+                            $ackStatusRaw = if ($ackReq.PSObject.Properties['status'] -and $null -ne $ackReq.status) { ([string]$ackReq.status).Trim().ToLowerInvariant() } else { "resolved" }
+                            if ($ackStatusRaw -notin @('resolved', 'failed', 'open')) {
+                                $ackCode = 400
+                                $ackMsg = "Invalid status"
+                            } else {
+                                $ackNote = if ($ackReq.PSObject.Properties['note'] -and $null -ne $ackReq.note) { ([string]$ackReq.note).Trim() } else { "" }
+                                if ([string]::IsNullOrWhiteSpace($ackNote)) {
+                                    $ackNote = if ($ackStatusRaw -eq 'failed') { "뷰어에서 처리 실패 표시" } else { "뷰어에서 처리 표시" }
+                                }
+                                if ($ackNote.Length -gt 200) { $ackNote = $ackNote.Substring(0, 200) }
+                                $ackChanged = 0
+                                if (Get-Command Set-AgyFailureAck -ErrorAction SilentlyContinue) {
+                                    $ackParams = @{ DbPath = $AgyDbPath; Note = $ackNote; Status = $ackStatusRaw }
+                                    if ($ackCat) { $ackParams['Category'] = @($ackCat) }
+                                    if ($ackTaskIds.Count -gt 0) { $ackParams['TaskId'] = @($ackTaskIds) }
+                                    try { $ackChanged = [int](Set-AgyFailureAck @ackParams) } catch { $ackChanged = 0 }
+                                }
+                                $ackPayload = [ordered]@{ changed = $ackChanged; status = $ackStatusRaw }
+                            }
+                        }
+                    }
+                }
+                $response.StatusCode = $ackCode
+                if ($null -ne $ackPayload) {
+                    $bytes = [System.Text.Encoding]::UTF8.GetBytes(($ackPayload | ConvertTo-Json -Compress))
+                    $response.ContentType = "application/json; charset=utf-8"
+                    $response.Headers.Add("Cache-Control", "no-store")
+                } else {
+                    $bytes = [System.Text.Encoding]::UTF8.GetBytes($ackMsg)
+                    $response.ContentType = "text/plain; charset=utf-8"
                 }
                 $response.ContentLength64 = $bytes.Length
                 $response.OutputStream.Write($bytes, 0, $bytes.Length)
@@ -2080,7 +1838,8 @@ $ViewerHandleRequest = {
                                     $startedAt = (Get-Item -LiteralPath $claimFile).CreationTime
                                 }
                                 $qSnippet = if ($question.Length -gt 40) { $question.Substring(0, 40) } else { $question }
-                                $progress = Get-AgyProgress $convId $startedAt $f.BaseName $qSnippet $sessionVal
+                                $bridgeTr = if ($claim -and $claim.PSObject.Properties['bridge_transcript'] -and $claim.bridge_transcript) { [string]$claim.bridge_transcript } else { "" }
+                                $progress = Get-AgyProgress $convId $startedAt $f.BaseName $qSnippet $sessionVal $bridgeTr
                             }
 
                             # 5초마다 불리는 목록에 단계 전체(최대 1,500개)를 싣지 않는다. 개수만 알려 주고, 단계는 /api/delegate/process?since= 로 새 것만 받아 간다.
@@ -2090,6 +1849,7 @@ $ViewerHandleRequest = {
                                 $progress.PSObject.Properties.Remove('steps')
                             }
 
+                            $pendingAcct = if ($claim -and $claim.PSObject.Properties['account'] -and $claim.account) { [string]$claim.account } else { "primary" }
                             $pendingObj = [ordered]@{
                                 task_id    = $f.BaseName
                                 created    = $f.CreationTime.ToString("yyyy-MM-dd HH:mm:ss")
@@ -2102,7 +1862,14 @@ $ViewerHandleRequest = {
                                 session_id = $sessionId
                                 model      = $resolvedModel
                                 state      = $state
+                                account    = $pendingAcct
                                 progress   = $progress
+                            }
+                            if ($claim -and $claim.PSObject.Properties['bridge_slot'] -and $claim.bridge_slot) {
+                                $pendingObj["bridge_slot"] = [string]$claim.bridge_slot
+                            }
+                            if ($claim -and $claim.PSObject.Properties['fallback_from'] -and $claim.fallback_from) {
+                                $pendingObj["fallback_from"] = [string]$claim.fallback_from
                             }
                             if ($claim -and $claim.tried) {
                                 $pendingObj["tried_models"] = [string]$claim.tried
@@ -2129,10 +1896,19 @@ $ViewerHandleRequest = {
                                             if ($null -ne $metaData.effort -and [string]$metaData.effort) {
                                                 $pendingObj["claude_effort"] = [string]$metaData.effort
                                             }
-                                            foreach ($ak in @('agent_model', 'agent_effort', 'agent_type', 'agent_desc')) {
+                                            foreach ($ak in @('agent_model', 'agent_effort', 'agent_type', 'agent_desc', 'src_model', 'src_effort', 'src_client', 'src_session')) {
                                                 $prop = $metaData.PSObject.Properties[$ak]
                                                 if ($null -ne $prop -and $null -ne $prop.Value -and [string]$prop.Value) {
                                                     $pendingObj[$ak] = [string]$prop.Value
+                                                }
+                                            }
+                                            $cwdProp = $metaData.PSObject.Properties['cwd']
+                                            if ($null -ne $cwdProp -and $null -ne $cwdProp.Value) {
+                                                if ($cwdProp.Value -is [System.Array]) {
+                                                    $cwdArr = @($cwdProp.Value | ForEach-Object { [string]$_ } | Where-Object { $_ })
+                                                    if ($cwdArr.Count -gt 0) { $pendingObj["src_cwd"] = @($cwdArr) }
+                                                } elseif ([string]$cwdProp.Value) {
+                                                    $pendingObj["src_cwd"] = [string]$cwdProp.Value
                                                 }
                                             }
                                             if ($metaData.PSObject.Properties['session'] -and $metaData.session -and (Get-Command Get-PendingClaudeUsageCached -ErrorAction SilentlyContinue)) {
@@ -2196,18 +1972,43 @@ $ViewerHandleRequest = {
                     lastResult      = if ($watcherHealth) { [string]$watcherHealth.LastResult } else { "" }
                 }
 
-                $updateInfo = [PSCustomObject]@{ available = $false; installed = ""; latest = "" }
+                $updateRun = [PSCustomObject]@{ state = ""; message = "" }
+                if (Get-Command Get-SamjilUpdateRunState -ErrorAction SilentlyContinue) {
+                    try {
+                        $urs = Get-SamjilUpdateRunState -InstallRoot $SamjilInstallRoot
+                        if ($urs) {
+                            $stVal = [string]$urs.State
+                            if ($stVal -in @("running", "done", "failed")) {
+                                $updateRun = [PSCustomObject]@{
+                                    state   = $stVal
+                                    message = if ($null -ne $urs.Message) { [string]$urs.Message } else { "" }
+                                }
+                            }
+                        }
+                    } catch {}
+                }
+
+                $updAvail = $false
+                $updInstalled = ""
+                $updLatest = ""
                 if (Get-Command Get-SamjilUpdateNotice -ErrorAction SilentlyContinue) {
                     try {
                         $un = Get-SamjilUpdateNotice -InstallRoot $SamjilInstallRoot
                         if ($un -and $un.Available) {
-                            $updateInfo = [PSCustomObject]@{
-                                available = $true
-                                installed = [string]$un.Installed
-                                latest    = [string]$un.Latest
-                            }
+                            $updAvail = $true
+                            $updInstalled = [string]$un.Installed
+                            $updLatest = [string]$un.Latest
                         }
                     } catch {}
+                }
+                if ($updateRun.state -eq "running") {
+                    $updAvail = $true
+                }
+                $updateInfo = [PSCustomObject]@{
+                    available = $updAvail
+                    installed = $updInstalled
+                    latest    = $updLatest
+                    run       = $updateRun
                 }
 
                 $statusObj = [PSCustomObject]@{
@@ -2252,34 +2053,73 @@ $ViewerHandleRequest = {
                 $response.ContentLength64 = $bytes.Length
                 $response.OutputStream.Write($bytes, 0, $bytes.Length)
 
-            } elseif ($urlPath -eq "/api/handoff/claude-usage") {
-                # c2a 메시지 카드의 Claude 쪽 토큰: 세션(session)의 기록에서 각 시각(ts, 쉼표로 여럿) 바로 앞에 끝난 Claude 호출의 사용량.
-                # 근사치다(claude-usage.ps1 머리말). 읽기만 하고, 세션 ID 는 영문자·숫자·- 만 받는다.
-                $params = Get-Utf8QueryParams $request.Url
-                $cuSid = [string]$params["session"]
-                if ($cuSid -notmatch '^[A-Za-z0-9-]{8,64}$' -or -not (Get-Command Find-ClaudeCallBefore -ErrorAction SilentlyContinue)) {
-                    $response.StatusCode = 400
-                    $bytes = [System.Text.Encoding]::UTF8.GetBytes("Invalid session")
-                    $response.ContentType = "text/plain; charset=utf-8"
+            } elseif ($urlPath -eq "/api/update/start") {
+
+                # 업데이트 실행 요청: POST + 전용 헤더만 받습니다(요청 본문·URL 매개변수는 사용하지 않음).
+                if ($request.HttpMethod -ne "POST") {
+                    $response.StatusCode = 405
+                    $response.Headers.Add("Allow", "POST")
+                    $bytes = [System.Text.Encoding]::UTF8.GetBytes("Method Not Allowed")
+                } elseif ($request.Headers["X-Samjil-Viewer"] -ne "1") {
+                    $response.StatusCode = 403
+                    $bytes = [System.Text.Encoding]::UTF8.GetBytes("Forbidden")
                 } else {
-                    $cuPath = Get-ClaudeTranscriptPath $cuSid
-                    $cuItems = [ordered]@{}
-                    if ($cuPath) {
-                        $cuCalls = Get-ClaudeUsageCalls $cuPath
-                        foreach ($cuTs in @(([string]$params["ts"]) -split ',' | Where-Object { $_ } | Select-Object -First 200)) {
-                            $cuAt = [datetime]::MinValue
-                            if ([datetime]::TryParse($cuTs, [System.Globalization.CultureInfo]::InvariantCulture, ([System.Globalization.DateTimeStyles]::AdjustToUniversal -bor [System.Globalization.DateTimeStyles]::AssumeUniversal), [ref]$cuAt)) {
-                                $cuItems[$cuTs] = Find-ClaudeCallBefore $cuCalls $cuAt
-                            } else { $cuItems[$cuTs] = $null }
+                    $uResult = "error"
+                    $uMsg = ""
+                    $hasNotice = [bool](Get-Command Get-SamjilUpdateNotice -ErrorAction SilentlyContinue)
+                    $hasStart  = [bool](Get-Command Start-SamjilUpdate -ErrorAction SilentlyContinue)
+                    if (-not $hasNotice -or -not $hasStart) {
+                        $uResult = "error"
+                        $uMsg = "업데이트 도우미 함수를 찾을 수 없습니다."
+                    } else {
+                        $curRun = $null
+                        if (Get-Command Get-SamjilUpdateRunState -ErrorAction SilentlyContinue) {
+                            try { $curRun = Get-SamjilUpdateRunState -InstallRoot $SamjilInstallRoot } catch { $curRun = $null }
+                        }
+                        $un = $null
+                        try { $un = Get-SamjilUpdateNotice -InstallRoot $SamjilInstallRoot } catch { $un = $null }
+                        if (-not $un -or -not $un.Available) {
+                            if ($curRun -and [string]$curRun.State -eq "running") {
+                                $uResult = "running"
+                                $uMsg = if ($curRun.Message) { [string]$curRun.Message } else { "이미 업데이트가 진행 중입니다." }
+                            } else {
+                                $uResult = "none"
+                                $uMsg = "업데이트할 새 버전이 없습니다"
+                            }
+                        } else {
+                            try {
+                                $sr = Start-SamjilUpdate -InstallRoot $SamjilInstallRoot
+                                if ($sr -and $sr.Started) {
+                                    $uResult = "started"
+                                    $uMsg = if ($sr.Message) { [string]$sr.Message } else { "업데이트를 시작했습니다." }
+                                } else {
+                                    $runAfter = $null
+                                    if (Get-Command Get-SamjilUpdateRunState -ErrorAction SilentlyContinue) {
+                                        try { $runAfter = Get-SamjilUpdateRunState -InstallRoot $SamjilInstallRoot } catch { $runAfter = $null }
+                                    }
+                                    if (($runAfter -and [string]$runAfter.State -eq "running") -or ($curRun -and [string]$curRun.State -eq "running")) {
+                                        $uResult = "running"
+                                        $uMsg = if ($sr -and $sr.Message) { [string]$sr.Message } elseif ($runAfter -and $runAfter.Message) { [string]$runAfter.Message } else { "이미 업데이트가 진행 중입니다." }
+                                    } else {
+                                        $uResult = "error"
+                                        $uMsg = if ($sr -and $sr.Message) { [string]$sr.Message } else { "업데이트를 시작하지 못했습니다." }
+                                    }
+                                }
+                            } catch {
+                                $uResult = "error"
+                                $uMsg = "업데이트 시작 오류: " + $_.Exception.Message
+                            }
                         }
                     }
-                    $json = ([PSCustomObject]@{ session = $cuSid; found = [bool]$cuPath; items = $cuItems }) | ConvertTo-Json -Depth 5
+                    Write-Host ("[{0}] 화면에서 업데이트 요청: {1}" -f (Get-Date -Format 'HH:mm:ss'), $uResult) -ForegroundColor Yellow
+                    $json = ([PSCustomObject]@{ result = $uResult; message = $uMsg }) | ConvertTo-Json -Depth 3
                     $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
                     $response.ContentType = "application/json; charset=utf-8"
                     $response.Headers.Add("Cache-Control", "no-store")
                 }
                 $response.ContentLength64 = $bytes.Length
                 $response.OutputStream.Write($bytes, 0, $bytes.Length)
+
             } elseif ($urlPath -eq "/api/delegate/process") {
 
                 # 기록에 과정이 저장되지 않은 옛 위임용: agy 의 대화 id 로 대화 기록에서 도구 호출 목록을 읽어 온다.
@@ -2291,7 +2131,27 @@ $ViewerHandleRequest = {
                 $sinceN = -1
                 if ($params["since"] -match '^-?\d{1,9}$') { $sinceN = [int]$params["since"] }
                 $tp = $null
+                $explicitProcTp = ""
                 if (Get-Command Get-AgyTranscriptPath -ErrorAction SilentlyContinue) { $tp = Get-AgyTranscriptPath (Get-AgyHomeDir) $cid }
+                if ((-not $tp -or -not (Test-Path -LiteralPath $tp -PathType Leaf)) -and $cid -match '^[A-Za-z0-9_-]{1,80}$') {
+                    $runningDirP = Join-Path $runtimeDir "running"
+                    if (Test-Path -LiteralPath $runningDirP) {
+                        foreach ($rf in @(Get-ChildItem -LiteralPath $runningDirP -Filter "*.json" -File -ErrorAction SilentlyContinue)) {
+                            try {
+                                $rc = ConvertFrom-Json -InputObject ([System.IO.File]::ReadAllText($rf.FullName, [System.Text.Encoding]::UTF8).TrimStart([char]0xFEFF))
+                                if ($rc -and $rc.PSObject.Properties['bridge_transcript'] -and $rc.bridge_transcript) {
+                                    $matchConv = ($rc.conversation_id -and [string]$rc.conversation_id -eq $cid)
+                                    $matchAlias = ("bridge-" + [string]$rc.task_id) -eq $cid
+                                    if (($matchConv -or $matchAlias) -and (Test-Path -LiteralPath ([string]$rc.bridge_transcript) -PathType Leaf)) {
+                                        $tp = [string]$rc.bridge_transcript
+                                        $explicitProcTp = $tp
+                                        break
+                                    }
+                                }
+                            } catch {}
+                        }
+                    }
+                }
                 if (-not $tp) {
                     $response.StatusCode = 400
                     $bytes = [System.Text.Encoding]::UTF8.GetBytes("Invalid id")
@@ -2326,7 +2186,7 @@ $ViewerHandleRequest = {
                                 }
                             }
                         }
-                        $all = @(Get-AgyProcessStepsCached $cid $startedDt)
+                        $all = @(Get-AgyProcessStepsCached $cid $startedDt $explicitProcTp)
                         $total = $all.Count
                         $maxN = -1
                         foreach ($s in $all) { if ($null -ne $s.n -and [int]$s.n -gt $maxN) { $maxN = [int]$s.n } }
@@ -2645,8 +2505,9 @@ $ViewerHandleRequest = {
                         } catch {}
                     }
 
+                    $treeLaunchGapSec = if ($ViewerShared['TestTreeLaunchSec']) { [double]$ViewerShared['TestTreeLaunchSec'] } else { 5.0 }
                     $scanLaunchAt = $ViewerShared['lastClaudeScanLaunchAt']
-                    $recentlyLaunched = ($scanLaunchAt -and (((Get-Date) - $scanLaunchAt).TotalSeconds -lt 5))
+                    $recentlyLaunched = ($scanLaunchAt -and (((Get-Date) - $scanLaunchAt).TotalSeconds -lt $treeLaunchGapSec))
 
                     $indexExists = Test-Path -LiteralPath $indexFile
                     $indexStale = $false
@@ -2668,7 +2529,7 @@ $ViewerHandleRequest = {
                                 $scanProcNow = $ViewerShared['lastClaudeScanProc']
                                 $scanLaunchAtNow = $ViewerShared['lastClaudeScanLaunchAt']
                                 $procBusy = ($scanProcNow -and -not $scanProcNow.HasExited)
-                                $recent = ($scanLaunchAtNow -and (((Get-Date) - $scanLaunchAtNow).TotalSeconds -lt 5))
+                                $recent = ($scanLaunchAtNow -and (((Get-Date) - $scanLaunchAtNow).TotalSeconds -lt $treeLaunchGapSec))
                                 if (-not $procBusy -and -not $recent) {
                                     $ViewerShared['lastClaudeScanLaunchAt'] = Get-Date
                                     $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -2738,6 +2599,13 @@ $ViewerHandleRequest = {
                     $handoffLinks = if ($linkInfo -and $linkInfo.Msgs) { $linkInfo.Msgs } else { @{} }
                     $updated = if ($linkInfo -and $linkInfo.Updated) { [string]$linkInfo.Updated } else { "" }
 
+                    $agTree = $null
+                    if (Get-Command Get-AntigravitySessionTree -ErrorAction SilentlyContinue) {
+                        try {
+                            $agTree = Get-AntigravitySessionTree -AppDir $AgyAppDir
+                        } catch {}
+                    }
+
                     $outObj = [ordered]@{
                         available    = $available
                         scanning     = $isScanning
@@ -2746,7 +2614,10 @@ $ViewerHandleRequest = {
                         projects     = @($projectsList)
                         ungrouped    = @($ungroupedList)
                         taskLinks    = $taskLinks
-                        handoffLinks = $handoffLinks
+                        agyAvailable = [bool]($agTree -and $agTree.Available)
+                        agyProjects  = if ($agTree -and $agTree.Projects) { @($agTree.Projects) } else { @() }
+                        agyUngrouped = if ($agTree -and $agTree.Ungrouped) { @($agTree.Ungrouped) } else { @() }
+                        agyParentMap = if ($agTree -and $agTree.ParentMap) { $agTree.ParentMap } else { @{} }
                     }
 
                     $json = ConvertTo-Json -InputObject $outObj -Depth 6
@@ -2765,7 +2636,10 @@ $ViewerHandleRequest = {
                         projects     = @()
                         ungrouped    = @()
                         taskLinks    = @{}
-                        handoffLinks = @{}
+                        agyAvailable = $false
+                        agyProjects  = @()
+                        agyUngrouped = @()
+                        agyParentMap = @{}
                     }
                     $json = ConvertTo-Json -InputObject $errObj -Depth 6
                     $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
@@ -2782,6 +2656,14 @@ $ViewerHandleRequest = {
                 $params = Get-Utf8QueryParams $request.Url
                 $usDays = 7
                 if ($params["days"]) { [void][int]::TryParse([string]$params["days"], [ref]$usDays) }
+                $usRowLimit = 200
+                if ($params["limit"]) {
+                    $parsedLimit = 0
+                    if ([int]::TryParse([string]$params["limit"], [ref]$parsedLimit)) {
+                        $usRowLimit = [Math]::Min(1000, [Math]::Max(50, $parsedLimit))
+                    }
+                }
+                $usAgyBrain = if ($AgyAppDir) { Join-Path $AgyAppDir "brain" } else { "" }
                 $usJson = $null
                 if ($usageStatsLib -and (Get-Command Get-AgyUsageStatsJson -ErrorAction SilentlyContinue)) {
                     $usCollecting = $false
@@ -2792,13 +2674,21 @@ $ViewerHandleRequest = {
                         $usLast = $ViewerShared['lastUsageCollectAt']
                         if ($usProc -and -not $usProc.HasExited) { $usCollecting = $true }
                         # 화면이 열려 있는 동안 60초에 한 번, "지금 갱신"(refresh=1)은 5초에 한 번까지만 새로 수집한다
-                        $usGap = if ([string]$params["refresh"] -eq "1") { 5 } else { 60 }
+                        $usRefreshGapSec = if ($ViewerShared['TestRefreshGapSec']) { [double]$ViewerShared['TestRefreshGapSec'] } else { 5.0 }
+                        $usGap = if ([string]$params["refresh"] -eq "1") { $usRefreshGapSec } else { 60 }
                         if (-not $usCollecting -and (-not $usLast -or ((Get-Date) - $usLast).TotalSeconds -ge $usGap)) {
                             $ViewerShared['lastUsageCollectAt'] = Get-Date
                             $usRuntime = if ($RuntimeDir) { $RuntimeDir } else { Join-Path (Split-Path $DataDir -Parent) "runtime" }
                             $psi = New-Object System.Diagnostics.ProcessStartInfo
                             $psi.FileName = "powershell.exe"
-                            $psi.Arguments = ('-NoProfile -ExecutionPolicy Bypass -File "{0}" -UsageCollect -UsageDbPath "{1}" -UsageProjectsDir "{2}" -UsageRuntimeDir "{3}"' -f $usageStatsLib, $AgyDbPath, ([string]$ClaudeProjectsDir).TrimEnd('\'), ([string]$usRuntime).TrimEnd('\'))
+                            $usArgs = '-NoProfile -ExecutionPolicy Bypass -File "{0}" -UsageCollect -UsageDbPath "{1}" -UsageProjectsDir "{2}" -UsageRuntimeDir "{3}"' -f $usageStatsLib, $AgyDbPath, ([string]$ClaudeProjectsDir).TrimEnd('\'), ([string]$usRuntime).TrimEnd('\')
+                            if ($usAgyBrain) {
+                                $usCmd = Get-Command $usageStatsLib -ErrorAction SilentlyContinue
+                                if ($usCmd -and $usCmd.Parameters -and $usCmd.Parameters.ContainsKey('UsageAgyBrainDir')) {
+                                    $usArgs += (' -UsageAgyBrainDir "{0}"' -f ([string]$usAgyBrain).TrimEnd('\'))
+                                }
+                            }
+                            $psi.Arguments = $usArgs
                             $psi.UseShellExecute = $false
                             $psi.CreateNoWindow = $true
                             $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
@@ -2821,7 +2711,7 @@ $ViewerHandleRequest = {
                                 if ($fiLim) { "{0}|{1}" -f [long]$fiLim.Length, [long]$fiLim.LastWriteTimeUtc.Ticks } else { "" }
                             } else { "" }
                             $usDb = Open-AgyDb $AgyDbPath
-                            try { $usStamp = "{0}|{1}|{2}|{3}|{4}|{5}" -f $usDays, (Get-AgyMeta $usDb 'usage_updated_at'), (Get-Date).ToString("yyyy-MM-dd HH"), $usQuotaSt, $usHistSt, $usLimSt } finally { $usDb.Dispose() }
+                            try { $usStamp = "{0}|{1}|{2}|{3}|{4}|{5}|{6}" -f $usDays, $usRowLimit, (Get-AgyMeta $usDb 'usage_updated_at'), (Get-Date).ToString("yyyy-MM-dd HH"), $usQuotaSt, $usHistSt, $usLimSt } finally { $usDb.Dispose() }
                         } catch { $usStamp = "" }
                     }
                     $usCache = $ViewerShared['UsageStatsCache']
@@ -2829,7 +2719,7 @@ $ViewerHandleRequest = {
                         $usJson = [string]$usCache.Json
                         $response.Headers.Add("X-Samjil-Cache", "hit")
                     } else {
-                        try { $usJson = Get-AgyUsageStatsJson $AgyDbPath $usDays $usCollecting 200 $usRuntime ([string]$ClaudeProjectsDir) } catch { $usJson = $null }
+                        try { $usJson = Get-AgyUsageStatsJson $AgyDbPath $usDays $usCollecting $usRowLimit $usRuntime ([string]$ClaudeProjectsDir) } catch { $usJson = $null }
                         if ($usStamp -and $null -ne $usJson) { $ViewerShared['UsageStatsCache'] = @{ Stamp = $usStamp; Json = $usJson } }
                     }
                 }
@@ -2839,6 +2729,62 @@ $ViewerHandleRequest = {
                     $response.ContentType = "text/plain; charset=utf-8"
                 } else {
                     $bytes = [System.Text.Encoding]::UTF8.GetBytes($usJson)
+                    $response.ContentType = "application/json; charset=utf-8"
+                    $response.Headers.Add("Cache-Control", "no-store")
+                }
+                $response.ContentLength64 = $bytes.Length
+                $response.OutputStream.Write($bytes, 0, $bytes.Length)
+
+            } elseif ($urlPath -eq "/api/quotas") {
+
+                if ($request.HttpMethod -ne "GET") {
+                    $response.StatusCode = 405
+                    $response.Headers.Add("Allow", "GET")
+                    $bytes = [System.Text.Encoding]::UTF8.GetBytes("Method Not Allowed")
+                    $response.ContentType = "text/plain; charset=utf-8"
+                } elseif (-not (Get-Command Get-AgyAccountQuotasSnapshot -ErrorAction SilentlyContinue)) {
+                    $response.StatusCode = 503
+                    $bytes = [System.Text.Encoding]::UTF8.GetBytes("계정 한도 모듈을 불러오지 못했습니다.")
+                    $response.ContentType = "text/plain; charset=utf-8"
+                } else {
+                    if ($env:SAMJIL_DISABLE_QUOTA_REFRESH -ne '1' -and (Get-Command Request-AgyAccountQuotasRefresh -ErrorAction SilentlyContinue)) {
+                        try {
+                            [void](Request-AgyAccountQuotasRefresh -RuntimeDir $RuntimeDir -SharedState $ViewerShared['AccountQuotaState'])
+                        } catch {}
+                    }
+                    $qSnap = Get-AgyAccountQuotasSnapshot -RuntimeDir $RuntimeDir -DbPath $AgyDbPath -SharedState $ViewerShared['AccountQuotaState']
+                    $json = ConvertTo-Json -InputObject $qSnap -Depth 8 -Compress
+                    $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
+                    $response.ContentType = "application/json; charset=utf-8"
+                    $response.Headers.Add("Cache-Control", "no-store")
+                }
+                $response.ContentLength64 = $bytes.Length
+                $response.OutputStream.Write($bytes, 0, $bytes.Length)
+
+            } elseif ($urlPath -eq "/api/quotas/refresh") {
+
+                if ($request.HttpMethod -ne "POST") {
+                    $response.StatusCode = 405
+                    $response.Headers.Add("Allow", "POST")
+                    $bytes = [System.Text.Encoding]::UTF8.GetBytes("Method Not Allowed")
+                    $response.ContentType = "text/plain; charset=utf-8"
+                } elseif ($request.Headers["X-Samjil-Viewer"] -ne "1") {
+                    $response.StatusCode = 403
+                    $bytes = [System.Text.Encoding]::UTF8.GetBytes("Forbidden")
+                    $response.ContentType = "text/plain; charset=utf-8"
+                } elseif (-not (Get-Command Get-AgyAccountQuotasSnapshot -ErrorAction SilentlyContinue)) {
+                    $response.StatusCode = 503
+                    $bytes = [System.Text.Encoding]::UTF8.GetBytes("계정 한도 모듈을 불러오지 못했습니다.")
+                    $response.ContentType = "text/plain; charset=utf-8"
+                } else {
+                    if (Get-Command Request-AgyAccountQuotasRefresh -ErrorAction SilentlyContinue) {
+                        try {
+                            $reqRes = Request-AgyAccountQuotasRefresh -RuntimeDir $RuntimeDir -SharedState $ViewerShared['AccountQuotaState'] -Force
+                        } catch {}
+                    }
+                    $qSnap = Get-AgyAccountQuotasSnapshot -RuntimeDir $RuntimeDir -DbPath $AgyDbPath -SharedState $ViewerShared['AccountQuotaState']
+                    $json = ConvertTo-Json -InputObject $qSnap -Depth 8 -Compress
+                    $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
                     $response.ContentType = "application/json; charset=utf-8"
                     $response.Headers.Add("Cache-Control", "no-store")
                 }
@@ -2953,6 +2899,10 @@ try {
     } else {
 
         $pendingContext = $null
+        $waitTickMs = 1000
+        if ($env:SAMJIL_TEST_WATCHER_CHECK_MS -match '^\d+$' -and [int]$env:SAMJIL_TEST_WATCHER_CHECK_MS -gt 0) {
+            $waitTickMs = [Math]::Min(1000, [Math]::Max(50, [int]$env:SAMJIL_TEST_WATCHER_CHECK_MS))
+        }
 
         while ($listener.IsListening) {
 
@@ -2975,7 +2925,7 @@ try {
                 # 요청이 없어도 1초마다 깨어나 위 점검을 챙깁니다(GetContext 는 요청이 올 때까지 막혀서 쓸 수 없음).
                 if ($null -eq $pendingContext) { $pendingContext = $listener.GetContextAsync() }
 
-                if (-not $pendingContext.Wait(1000)) { continue }
+                if (-not $pendingContext.Wait($waitTickMs)) { continue }
 
                 $context = $pendingContext.GetAwaiter().GetResult()
 

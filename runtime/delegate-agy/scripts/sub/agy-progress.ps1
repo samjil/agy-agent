@@ -88,11 +88,16 @@ function Resolve-AgyConversation($AgyHome, $KnownId, [datetime]$StartedAt, [int]
 }
 
 # 그 대화의 마지막 활동 시각(대화 DB와 기록 파일 중 더 늦은 수정 시각). 파일이 없으면 $null.
-function Get-AgyConversationActivity($AgyHome, $Id) {
-    $paths = @(
-        (Join-Path $AgyHome "conversations\$Id.db"),
-        (Join-Path $AgyHome "brain\$Id\.system_generated\logs\transcript_full.jsonl")
-    )
+function Get-AgyConversationActivity($AgyHome, $Id, [string]$ExplicitTranscriptPath = "") {
+    $paths = @()
+    if ($ExplicitTranscriptPath) {
+        $paths += $ExplicitTranscriptPath
+    } else {
+        $paths += @(
+            (Join-Path $AgyHome "conversations\$Id.db"),
+            (Join-Path $AgyHome "brain\$Id\.system_generated\logs\transcript_full.jsonl")
+        )
+    }
     $latest = $null
     foreach ($p in $paths) {
         $item = Get-Item -LiteralPath $p -ErrorAction SilentlyContinue
@@ -139,8 +144,8 @@ function Get-AgyChildConversationActivity($AgyHome, $Id) {
 #   시작: "status":"RUNNING" 단계의 글에 "Tool is running as a background task with task id: <대화 ID>/task-N"
 #   끝:   SYSTEM_MESSAGE 단계의 글에 "sender=<대화 ID>/task-N ... finished with result: ..."
 # 시작은 있는데 같은 task-N 의 끝이 아직 없으면 "도는 중"이다. 도는 중인 명령이 영영 안 끝나는 경우는 절대 마감(AgyTimeoutSeconds)이 끊는다.
-function Get-AgyPendingBackgroundTasks($AgyHome, $Id) {
-    $tp = Get-AgyTranscriptPath $AgyHome $Id
+function Get-AgyPendingBackgroundTasks($AgyHome, $Id, [string]$ExplicitTranscriptPath = "") {
+    $tp = if ($ExplicitTranscriptPath) { $ExplicitTranscriptPath } else { Get-AgyTranscriptPath $AgyHome $Id }
     if (-not $tp -or -not (Test-Path -LiteralPath $tp)) { return @() }
     $started = [ordered]@{}
     $finished = @{}
@@ -170,8 +175,8 @@ function Get-AgyPendingBackgroundTasks($AgyHome, $Id) {
 #   도구 없이 끝난 모델 응답이 마지막                                   -> 'model-finishing'
 # 마지막 줄이 아주 클 수 있어(긴 응답) 줄 전체를 JSON 으로 읽지 않고 필요한 글자만 정규식으로 뽑는다.
 # 반환: @{ Index; Type; Status; Tools = @(도구 이름); Hint } 또는 읽을 수 없으면 $null.
-function Get-AgyLastStepSummary($AgyHome, $Id) {
-    $tp = Get-AgyTranscriptPath $AgyHome $Id
+function Get-AgyLastStepSummary($AgyHome, $Id, [string]$ExplicitTranscriptPath = "") {
+    $tp = if ($ExplicitTranscriptPath) { $ExplicitTranscriptPath } else { Get-AgyTranscriptPath $AgyHome $Id }
     if (-not $tp -or -not (Test-Path -LiteralPath $tp)) { return $null }
     $text = $null
     try {
@@ -260,9 +265,86 @@ function Get-AgySecondsSetting([string]$EnvName, [int]$Default, [int]$Min) {
 
 # 프로세스와 그 모든 자손이 지금까지 쓴 CPU 시간(초)의 합. 모델 응답을 기다리는 동안 agy 는 거의 놀지만, 도구(빌드·시험 등)가 도는 동안에는
 # 자손 프로세스가 CPU 를 쓴다. 두 시점의 차이로 "지금 뭔가 하고 있는가"를 본다.
+function Get-AgyProcessSnapEntries {
+    if (-not ('AgyProcessTreeSnap' -as [type])) {
+        try {
+            Add-Type -TypeDefinition @'
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+
+public sealed class AgyProcessSnapEntry {
+    public int ProcessId { get; set; }
+    public int ParentProcessId { get; set; }
+    public string Name { get; set; }
+}
+
+public static class AgyProcessTreeSnap {
+    private const uint TH32CS_SNAPPROCESS = 0x00000002;
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct PROCESSENTRY32W {
+        public uint dwSize;
+        public uint cntUsage;
+        public uint th32ProcessID;
+        public IntPtr th32DefaultHeapID;
+        public uint th32ModuleID;
+        public uint cntThreads;
+        public uint th32ParentProcessID;
+        public int pcPriClassBase;
+        public uint dwFlags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+        public string szExeFile;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr CreateToolhelp32Snapshot(uint dwFlags, uint th32ProcessID);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool Process32FirstW(IntPtr hSnapshot, ref PROCESSENTRY32W lppe);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool Process32NextW(IntPtr hSnapshot, ref PROCESSENTRY32W lppe);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr hObject);
+
+    public static AgyProcessSnapEntry[] List() {
+        List<AgyProcessSnapEntry> list = new List<AgyProcessSnapEntry>(512);
+        IntPtr snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snap == IntPtr.Zero || snap == new IntPtr(-1)) return list.ToArray();
+        try {
+            PROCESSENTRY32W pe = new PROCESSENTRY32W();
+            pe.dwSize = (uint)Marshal.SizeOf(typeof(PROCESSENTRY32W));
+            if (Process32FirstW(snap, ref pe)) {
+                do {
+                    list.Add(new AgyProcessSnapEntry {
+                        ProcessId = unchecked((int)pe.th32ProcessID),
+                        ParentProcessId = unchecked((int)pe.th32ParentProcessID),
+                        Name = pe.szExeFile ?? ""
+                    });
+                } while (Process32NextW(snap, ref pe));
+            }
+        } finally {
+            CloseHandle(snap);
+        }
+        return list.ToArray();
+    }
+}
+'@ -ErrorAction Stop | Out-Null
+        } catch {}
+    }
+    if ('AgyProcessTreeSnap' -as [type]) {
+        try {
+            return @([AgyProcessTreeSnap]::List())
+        } catch {}
+    }
+    return @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name -ErrorAction SilentlyContinue)
+}
+
 function Get-AgyTreeCpuSeconds([int]$RootPid) {
     $kids = @{}
-    foreach ($p in @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId -ErrorAction SilentlyContinue)) {
+    foreach ($p in @(Get-AgyProcessSnapEntries)) {
         $pp = [int]$p.ParentProcessId
         if (-not $kids.ContainsKey($pp)) { $kids[$pp] = New-Object System.Collections.ArrayList }
         [void]$kids[$pp].Add([int]$p.ProcessId)
@@ -439,16 +521,55 @@ function Test-AgyModelRequestInFlight($AgyHome, [string]$ConvId = "", [int]$Root
             $reqActive = $false
         }
     }
+    if ($reqActive -and $StartedAt -ne [datetime]::MinValue -and $null -ne $lastReqAt -and $lastReqAt -lt $StartedAt.AddSeconds(-5)) {
+        $reqActive = $false
+    }
     return @{ InFlight = [bool]$reqActive; LogPath = $logPath; RequestAt = $lastReqAt; Trace = $lastReqTrace }
 }
 
 # agy 가 실행한 도구 자식 프로세스(MCP node 서버·agy 본체·콘솔 호스트 제외)의 누적 CPU 시간(초) 합을 구합니다.
 # 테스트에서는 ProcessList(ProcessId, ParentProcessId, Name, CommandLine)와 CpuLookup(hashtable 또는 scriptblock)을 주입할 수 있습니다.
 function Get-AgyToolChildCpuSeconds([int]$RootPid, $ProcessList = $null, $CpuLookup = $null) {
-    $all = if ($null -ne $ProcessList) {
-        @($ProcessList)
+    $all = $null
+    if ($null -ne $ProcessList) {
+        $all = @($ProcessList)
     } else {
-        @(Get-CimInstance Win32_Process -Property ProcessId, ParentProcessId, Name, CommandLine -ErrorAction SilentlyContinue)
+        $snap = @(Get-AgyProcessSnapEntries)
+        $snapKids = @{}
+        $snapById = @{}
+        foreach ($sp in $snap) {
+            if ($null -eq $sp) { continue }
+            $spId = [int]$sp.ProcessId
+            $spPp = [int]$sp.ParentProcessId
+            $snapById[$spId] = $sp
+            if (-not $snapKids.ContainsKey($spPp)) { $snapKids[$spPp] = New-Object System.Collections.ArrayList }
+            [void]$snapKids[$spPp].Add($spId)
+        }
+        $bfsSeen = @{}
+        $bfsQ = New-Object System.Collections.Queue
+        $bfsQ.Enqueue($RootPid)
+        $descPids = New-Object System.Collections.ArrayList
+        $hasPotentialTool = $false
+        while ($bfsQ.Count -gt 0) {
+            $curId = [int]$bfsQ.Dequeue()
+            if ($bfsSeen.ContainsKey($curId)) { continue }
+            $bfsSeen[$curId] = $true
+            [void]$descPids.Add($curId)
+            if ($curId -ne $RootPid -and $snapById.ContainsKey($curId)) {
+                $sName = ([string]$snapById[$curId].Name).ToLowerInvariant()
+                if ($sName -notin @('agy.exe', 'conhost.exe', 'openconsole.exe')) {
+                    $hasPotentialTool = $true
+                }
+            }
+            if ($snapKids.ContainsKey($curId)) {
+                foreach ($ck in $snapKids[$curId]) { $bfsQ.Enqueue($ck) }
+            }
+        }
+        if (-not $hasPotentialTool) {
+            return @{ HasToolChild = $false; TotalCpu = 0.0; ToolPids = @() }
+        }
+        $filterStr = (@($descPids.ToArray() | ForEach-Object { "ProcessId=$_" }) -join " OR ")
+        $all = @(Get-CimInstance Win32_Process -Filter $filterStr -Property ProcessId, ParentProcessId, Name, CommandLine -ErrorAction SilentlyContinue)
     }
     $kids = @{}
     $byId = @{}
@@ -515,6 +636,7 @@ function Test-AgyToolChildActive($CpuSamples, [datetime]$Now, [int]$WindowSecond
     if ($samples.Count -lt 2) { return $false }
     $last = $samples[$samples.Count - 1]
     if (-not $last.HasToolChild) { return $false }
+    if ($Now -ne [datetime]::MinValue -and (($Now - $last.At).TotalSeconds -gt ($WindowSeconds + 15))) { return $false }
     $base = $null
     for ($i = $samples.Count - 2; $i -ge 0; $i--) {
         $age = ($last.At - $samples[$i].At).TotalSeconds
@@ -546,12 +668,12 @@ function Get-AgyStallProbeSignal($AgyHome, [string]$ConvId, [int]$RootPid, [date
 # 시간 초과로 끊을 때 "이번 호출이 띄운 agy"만 정확히 가리기 위해 씁니다. 이름만으로 고르면
 # 이 워처와 상관없는 다른 agy(사용자가 직접 띄운 것, 다른 워처의 것)까지 죽일 수 있습니다.
 function Get-DescendantProcessIdsByName([int]$RootPid, [string]$ProcessName = "agy") {
-    $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    $all = @(Get-AgyProcessSnapEntries)
     $parentOf = @{}
     foreach ($p in $all) { $parentOf[[int]$p.ProcessId] = [int]$p.ParentProcessId }
     $hits = @()
     foreach ($p in $all) {
-        if ($p.Name -ne "$ProcessName.exe") { continue }
+        if ($p.Name -ine "$ProcessName.exe") { continue }
         $cur = [int]$p.ParentProcessId
         for ($depth = 0; ($depth -lt 32) -and ($cur -gt 0); $depth++) {
             if ($cur -eq $RootPid) { $hits += [int]$p.ProcessId; break }
@@ -938,7 +1060,7 @@ function Read-AgyProcessSteps {
     $buf = $null; $read = 0
     $fs = $null
     try {
-        $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
         [void]$fs.Seek($FromOffset, [System.IO.SeekOrigin]::Begin)
         $len = [int]($fs.Length - $FromOffset)
         if ($len -le 0) { return $res }
@@ -1142,8 +1264,12 @@ function Update-AgyUsageState($State) {
             }
             if ($line -match '"type"\s*:\s*"USER_INPUT"' -or $line -match '"source"\s*:\s*"USER_EXPLICIT"') {
                 if ($line -match '"step_index"\s*:\s*(\d+)') {
+                    $uStepIdx = [int]$matches[1]
                     if ($null -eq $State.UserInputSteps) { $State.UserInputSteps = @{} }
-                    $State.UserInputSteps[[int]$matches[1]] = $createdAt
+                    $isStallAsk = ($State.UserInputSteps.Count -gt 0 -and ($line -match '직전 실행이 응답 없이|\\u[cC]9[cC]1\\u[cC]804\s*\\u[cC]2[eE]4\\u[dD]589\\u[cC]774'))
+                    if (-not $isStallAsk) {
+                        $State.UserInputSteps[$uStepIdx] = $createdAt
+                    }
                 }
             }
             $hasIn = $line -match '"input_tokens"\s*:\s*(\d+)'
@@ -1334,8 +1460,12 @@ function Get-AgyTranscriptUsageFile([string]$AgyHome, [string]$ConversationId) {
 
 # 취소(또는 작업자 비정상 종료) 직전까지 agy 가 진행한 내용을 마크다운 요약으로 만듭니다.
 # 대화 기록을 읽을 수 없거나, 단계도 남긴 말도 없으면 빈 문자열("")을 돌려줍니다.
-function Get-AgyCancelledWorkText([string]$AgyHome, [string]$ConversationId, $Since = $null) {
-    $tp = Get-AgyTranscriptPath $AgyHome $ConversationId
+function Get-AgyCancelledWorkText([string]$AgyHome, [string]$ConversationId, $Since = $null, [string]$ExplicitTranscriptPath = "") {
+    $tp = if ($ExplicitTranscriptPath -and (Test-Path -LiteralPath $ExplicitTranscriptPath -PathType Leaf)) {
+        $ExplicitTranscriptPath
+    } else {
+        Get-AgyTranscriptPath $AgyHome $ConversationId
+    }
     if (-not $tp -or -not (Test-Path -LiteralPath $tp -PathType Leaf)) { return "" }
 
     $sinceDt = $null

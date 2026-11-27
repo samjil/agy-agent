@@ -13,6 +13,12 @@
       "wait_sec": 480,
       "use": "보일러플레이트 · 단위 테스트 · 단순 UI · 명세가 분명한 반복 수정 (빠르고 Carbon 대비 한도 50%+ 절감)"
     },
+    "build-high": {
+      "model": "gemini-4-hydrogen-high",
+      "fallback": ["gemini-4-hydrogen-medium", "gemini-4-neon-medium"],
+      "wait_sec": 600,
+      "use": "Hydrogen 상위 추론 구현 · 다중 파일 수정 · Orchestrator 실행기(hydrogen-high)와 동급 부계정(agy-sub) 위임"
+    },
     "build-hard": {
       "model": "gemini-4-neon-medium",
       "fallback": ["gemini-4-neon-high", "gemini-4-hydrogen-xhigh", "gemini-4-carbon-medium"],
@@ -35,7 +41,7 @@
       "model": "gemini-4-neon-high",
       "fallback": ["gemini-4-neon-medium", "gemini-4-carbon-high", "gemini-4-hydrogen-high"],
       "wait_sec": 1200,
-      "use": "설계 검토 · 난해한 버그 원인 분석 · 상의 (협의 기본, 주력 Neon)"
+      "use": "설계 검토 · 난해한 버그 원인 분석 · 상의 (주력 Neon)"
     },
     "think-carbon": {
       "model": "gemini-4-carbon-high",
@@ -52,6 +58,7 @@
   },
   "escalate": {
     "build": "build-hard",
+    "build-high": "build-hard",
     "build-hard": "deep"
   },
   "auto": {
@@ -65,7 +72,6 @@
     "think-argon": "think-carbon",
     "feature-argon": "feature-carbon"
   },
-  "handoff_default": "think",
   "translate": "quick",
   "allowed": [
     "gemini-4-hydrogen-low",

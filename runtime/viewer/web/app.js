@@ -33,9 +33,11 @@
     qaSessionCount:       document.getElementById("qa-session-count"),
     qaSessionSearch:      document.getElementById("qa-session-search"),
     qaSessionList:        document.getElementById("qa-session-list"),
+    qaSourceTabs:         document.getElementById("qa-source-tabs"),
     qaTreeSort:           document.getElementById("qa-tree-sort"),
     modelFilter:          document.getElementById("modelfilter"),
     statusFilter:         document.getElementById("statusfilter"),
+    sidebarBackdrop:      document.getElementById("sidebar-backdrop"),
 
     // Handoff 프로젝트 사이드바
     handoffProjectCount:  document.getElementById("handoff-project-count"),
@@ -49,11 +51,15 @@
     handoffAutoBar:       document.getElementById("handoff-auto-bar"),
 
     // 사이드바 푸터 & 컨트롤
+    sidebarQuotas:        document.getElementById("sidebar-quotas"),
     watcherPulseDot:      document.getElementById("watcher-pulse-dot"),
     watcherStatusText:    document.getElementById("watcher-status-text"),
     watcherStartBtn:      document.getElementById("watcher-start"),
     watcherStartMsg:      document.getElementById("watcher-start-msg"),
     updateNotice:         document.getElementById("update-notice"),
+    updateNoticeText:     document.getElementById("update-notice-text"),
+    updateRunBtn:         document.getElementById("update-run-btn"),
+    updateRunMsg:         document.getElementById("update-run-msg"),
     autoRefresh:          document.getElementById("autorefresh"),
     refreshBtn:           document.getElementById("refresh"),
 
@@ -68,21 +74,43 @@
     viewQa:               document.getElementById("view-qa"),
     viewHandoff:          document.getElementById("view-handoff"),
     viewStats:            document.getElementById("view-stats"),
+    statsQuotasBlock:     document.getElementById("stats-quotas-block"),
+    statsQuotasMeta:      document.getElementById("stats-quotas-meta"),
+    statsQuotasRefresh:   document.getElementById("stats-quotas-refresh"),
+    statsQuotasGrid:      document.getElementById("stats-quotas-grid"),
     usageUpdated:         document.getElementById("usage-updated"),
+    usageClientFilter:    document.getElementById("usage-client-filter"),
     usageRefresh:         document.getElementById("usage-refresh"),
     usageMessage:         document.getElementById("usage-message"),
     usageCount:           document.getElementById("usage-count"),
     usageSummary:         document.getElementById("usage-summary"),
     usageModes:           document.getElementById("usage-modes"),
+    usageDiagnosticsSection: document.getElementById("usage-diagnostics-section"),
+    usageDiagSummary:     document.getElementById("usage-diag-summary"),
+    usageDiagUnacked:     document.getElementById("usage-diag-unacked"),
+    usageDiagBriefToggle: document.getElementById("usage-diag-brief-toggle"),
+    usageDiagCopy:        document.getElementById("usage-diag-copy"),
+    usageDiagCounts:      document.getElementById("usage-diag-counts"),
+    usageDiagBrief:       document.getElementById("usage-diag-brief"),
+    usageDiagGroups:      document.getElementById("usage-diag-groups"),
+    usageDiagHandled:     document.getElementById("usage-diag-handled"),
     usageModels:          document.getElementById("usage-models"),
     usageDaily:           document.getElementById("usage-daily"),
     usageRowsCount:       document.getElementById("usage-rows-count"),
     usageLimitsBanner:    document.getElementById("usage-limits-banner"),
     usageRows:            document.getElementById("usage-rows"),
+    usageLoadmore:        document.getElementById("usage-loadmore"),
+    usageLoadmore50:      document.getElementById("usage-loadmore-50"),
+    usageLoadmoreAll:     document.getElementById("usage-loadmore-all"),
+    usageLoadmoreInfo:    document.getElementById("usage-loadmore-info"),
     mainScroll:           document.getElementById("main-content-scroll"),
 
     // 대시보드 내부 엘리먼트
     dashNow:              document.getElementById("dash-now"),
+    dashQuotasBlock:      document.getElementById("dash-quotas-block"),
+    dashQuotasMeta:       document.getElementById("dash-quotas-meta"),
+    dashQuotasRefresh:    document.getElementById("dash-quotas-refresh"),
+    dashQuotasGrid:       document.getElementById("dash-quotas-grid"),
     nowStatusText:        document.getElementById("now-status-text"),
     nowAside:             document.getElementById("now-aside"),
     nowTitle:             document.getElementById("now-title"),
@@ -104,6 +132,7 @@
     chipQaModels:         document.getElementById("chip-qa-models"),
     chipQaStatus:         document.getElementById("chip-qa-status"),
     chipQaTime:           document.getElementById("chip-qa-time"),
+    qaDiagChip:           document.getElementById("qa-diag-chip"),
     cards:                document.getElementById("cards"),
     loadMoreBtn:          document.getElementById("loadmore"),
 
@@ -123,6 +152,16 @@
   var usageData = null;         // /api/usage-stats 의 마지막 응답
   var usageError = "";
   var usageTimer = null;
+  var USAGE_PAGE_SIZE = 50;
+  var usageRowsVisibleCount = USAGE_PAGE_SIZE;
+  var usageClientFilter = "";
+  var usageDiagnosticsData = null;
+  var accountQuotasData = null;
+  var quotaPollTimer = null;
+  var quotaPollCount = 0;
+  var quotaRefreshingReq = false;
+  var lastQuotaLoadAt = 0;
+  var qaSource = "all";         // "all" | "claude" | "agy"
   var currentQaSession = "";    // ""(프로젝트 전체) | 세션 노드 id
   var currentQaProject = "";    // ""(전체 프로젝트) | 프로젝트 노드 id
   var qaChipsExpanded = false;   // agy 세션 칩: 접힌 세션까지 모두 펼쳤는지
@@ -149,7 +188,11 @@
   var lastPendingKey = "";      // pending 변경 감지 키
   var refreshTimer = null;
   var watcherStarting = false;   // 켜기 요청 후 켜질 때까지 true
+  var updateStarting = false;    // 업데이트 시작 요청 진행 중
+  var updatePollTimer = null;    // 업데이트 진행 중 3초마다 /api/status 확인
+  var lastUpdateLatest = "";     // 마지막으로 본 새 버전 문자열(confirm 문구용)
   var isServerOnline = false;
+  var hasLoadedStatusOnce = false;
   var systemStatus = null;      // 마지막 /api/status 응답
   var nowTicker = null;         // "지금" 패널 경과 시간 1초 갱신 타이머
 
@@ -203,9 +246,9 @@
     if (s.indexOf("->") >= 0) {
       return s.split("->").map(function (x) { return shortAgyModel(x); }).filter(Boolean).join(" → ");
     }
-    var mx = s.match(/^gemini-4-(hydrogen|neon|carbon)-xhigh$/i);
+    var mx = s.match(/^gemini-4-(hydrogen|neon|carbon)(?:-tiered)?-xhigh$/i);
     if (mx) return mx[1].toLowerCase() + "-extra";
-    var m = s.match(/^gemini-4-(hydrogen|argon|neon|carbon)-(\w+)$/i);
+    var m = s.match(/^gemini-4-(hydrogen|argon|neon|carbon)(?:-tiered)?-(\w+)$/i);
     if (m) return m[1].toLowerCase() + "-" + m[2].toLowerCase();
     if (/^gemini-pro-orchestrator-neon$/i.test(s)) return "orchestrator-neon";
     if (/^gemini-pro-orchestrator$/i.test(s)) return "orchestrator-carbon";
@@ -216,13 +259,26 @@
     return s;
   }
 
-  // agy 모델 없이 Claude 쪽(본 세션 · 서브에이전트) 모델만 그린다. 뒤에 붙던 "→" 는 없다.
-  function claudeOnlyModelHtml(claudeModel, claudeEffort, subAgent) {
+  // agy 모델 없이 호출자 쪽(Claude · Antigravity · 서브에이전트) 모델만 그린다. 뒤에 붙던 "→" 는 없다.
+  function claudeOnlyModelHtml(claudeModel, claudeEffort, subAgent, srcInfo) {
     var parts = [];
     if (claudeModel) {
       var cShort = escapeHtml(shortClaudeModel(claudeModel) + (claudeEffort ? " (" + String(claudeEffort).toLowerCase() + ")" : ""));
       var cTitle = "이 위임을 보낸 Claude 모델: " + claudeModel + (claudeEffort ? " (effort " + claudeEffort + ")" : "");
       parts.push('<span class="dim" title="' + escapeHtml(cTitle) + '">' + cShort + '</span>');
+    } else if (srcInfo && (srcInfo.model || srcInfo.client)) {
+      var sModelOnly = srcInfo.model ? String(srcInfo.model) : "";
+      var sEffortOnly = srcInfo.effort ? String(srcInfo.effort) : "";
+      var sClientOnly = srcInfo.client ? String(srcInfo.client) : "";
+      var sClientDispOnly = sClientOnly.toLowerCase() === "antigravity" ? "Antigravity" : sClientOnly;
+      if (sModelOnly) {
+        var sBaseOnly = /^claude-/i.test(sModelOnly) ? shortClaudeModel(sModelOnly) : shortAgyModel(sModelOnly);
+        var sShortOnly = escapeHtml(sBaseOnly + (sEffortOnly ? " (" + sEffortOnly.toLowerCase() + ")" : ""));
+        var sTitleOnly = "이 위임을 보낸 " + (sClientDispOnly || "호출") + " 모델: " + sModelOnly + (sEffortOnly ? " (effort " + sEffortOnly + ")" : "");
+        parts.push('<span class="dim" title="' + escapeHtml(sTitleOnly) + '">' + sShortOnly + '</span>');
+      } else if (sClientDispOnly) {
+        parts.push('<span class="dim" title="' + escapeHtml("이 위임을 보낸 클라이언트: " + sClientDispOnly) + '">' + escapeHtml(sClientDispOnly) + '</span>');
+      }
     }
     var aModel = subAgent && subAgent.model ? String(subAgent.model) : "";
     if (aModel) {
@@ -238,11 +294,12 @@
     return parts.join(' › ');
   }
 
-  function cardModelHtml(agyModel, claudeModel, claudeEffort, fellBack, subAgent, triedModels, isOk, models) {
+  function cardModelHtml(agyModel, claudeModel, claudeEffort, fellBack, subAgent, triedModels, isOk, models, srcInfo) {
     var aModelEarly = subAgent && subAgent.model ? String(subAgent.model) : "";
-    // agy 모델이 비어 있는 기록(옛 취소 기록 등)도 Claude 쪽 모델이 있으면 그 부분만 보여 준다.
-    if (!agyModel && !claudeModel && !aModelEarly) return "";
-    if (!agyModel) return claudeOnlyModelHtml(claudeModel, claudeEffort, subAgent);
+    var hasSrcEarly = Boolean(!claudeModel && srcInfo && (srcInfo.model || srcInfo.client));
+    // agy 모델이 비어 있는 기록(옛 취소 기록 등)도 호출자 쪽 모델이 있으면 그 부분만 보여 준다.
+    if (!agyModel && !claudeModel && !aModelEarly && !hasSrcEarly) return "";
+    if (!agyModel) return claudeOnlyModelHtml(claudeModel, claudeEffort, subAgent, srcInfo);
     var full = String(agyModel);
     var agyStr = '<span title="' + escapeHtml(full) + '">' + escapeHtml(shortAgyModel(full)) + '</span>';
     // 실제로 돈 모델별 분배: 모델이 2개 이상이거나, 단일 모델의 짧은 이름이 표시된 agy 모델과 다를 때(오케스트레이터·폴백 등)만 덧붙인다.
@@ -291,12 +348,26 @@
       }
     }
     var aModel = subAgent && subAgent.model ? String(subAgent.model) : "";
-    if (!claudeModel && !aModel) return chainStr + agyStr + splitStr;
+    var hasSrc = Boolean(!claudeModel && srcInfo && (srcInfo.model || srcInfo.client));
+    if (!claudeModel && !aModel && !hasSrc) return chainStr + agyStr + splitStr;
     var prefix = "";
     if (claudeModel) {
       var cShort = escapeHtml(shortClaudeModel(claudeModel) + (claudeEffort ? " (" + String(claudeEffort).toLowerCase() + ")" : ""));
       var cTitle = "이 위임을 보낸 Claude 모델: " + claudeModel + (claudeEffort ? " (effort " + claudeEffort + ")" : "");
       prefix += '<span class="dim" title="' + escapeHtml(cTitle) + '">' + cShort + (aModel ? ' › ' : ' → ') + '</span>';
+    } else if (hasSrc) {
+      var sModel = srcInfo.model ? String(srcInfo.model) : "";
+      var sEffort = srcInfo.effort ? String(srcInfo.effort) : "";
+      var sClient = srcInfo.client ? String(srcInfo.client) : "";
+      var sClientDisp = sClient.toLowerCase() === "antigravity" ? "Antigravity" : sClient;
+      if (sModel) {
+        var sBase = /^claude-/i.test(sModel) ? shortClaudeModel(sModel) : shortAgyModel(sModel);
+        var sShort = escapeHtml(sBase + (sEffort ? " (" + sEffort.toLowerCase() + ")" : ""));
+        var sTitle = "이 위임을 보낸 " + (sClientDisp || "호출") + " 모델: " + sModel + (sEffort ? " (effort " + sEffort + ")" : "");
+        prefix += '<span class="dim" title="' + escapeHtml(sTitle) + '">' + sShort + (aModel ? ' › ' : ' → ') + '</span>';
+      } else if (sClientDisp) {
+        prefix += '<span class="dim" title="' + escapeHtml("이 위임을 보낸 클라이언트: " + sClientDisp) + '">' + escapeHtml(sClientDisp) + (aModel ? ' › ' : ' → ') + '</span>';
+      }
     }
     if (aModel) {
       var aEffort = subAgent.effort ? String(subAgent.effort) : "";
@@ -312,11 +383,11 @@
     return prefix + chainStr + agyStr + splitStr;
   }
 
-  function buildCardModelMeta(agyModel, claudeModel, claudeEffort, fellBack, subAgent, triedModels, isOk, models) {
+  function buildCardModelMeta(agyModel, claudeModel, claudeEffort, fellBack, subAgent, triedModels, isOk, models, srcInfo) {
     var item = labeledMeta("", "", "model", "모델");
     var mv = item.querySelector(".mv");
     if (mv) {
-      mv.innerHTML = cardModelHtml(agyModel, claudeModel, claudeEffort, fellBack, subAgent, triedModels, isOk, models);
+      mv.innerHTML = cardModelHtml(agyModel, claudeModel, claudeEffort, fellBack, subAgent, triedModels, isOk, models, srcInfo);
     }
     return item;
   }
@@ -402,7 +473,10 @@
         pg.last_activity_ms || "",
         tok,
         cuM,
-        cuS
+        cuS,
+        p.probe_state || "",
+        p.ask_count || 0,
+        p.interrupted ? 1 : 0
       ].join(":");
     }).join(",");
   }
@@ -655,10 +729,6 @@
     if (path === "#/stats") {
       return { nav: "stats", session: "", project: "" };
     }
-    var matchHandoff = path.match(/^#\/handoff$/);
-    if (matchHandoff) {
-      return { nav: "handoff", session: params.session || "", project: params.project || "" };
-    }
     return { nav: "dashboard", session: "", project: "" };
   }
 
@@ -677,17 +747,6 @@
       }
       if (parts.length > 0) {
         newHash += "?" + parts.join("&");
-      }
-    } else if (currentNav === "handoff") {
-      var hParts = [];
-      if (currentHandoffProject) {
-        hParts.push("project=" + encodeURIComponent(currentHandoffProject));
-      }
-      if (currentHandoffSession) {
-        hParts.push("session=" + encodeURIComponent(currentHandoffSession));
-      }
-      if (hParts.length > 0) {
-        newHash += "?" + hParts.join("&");
       }
     }
     if (window.location.hash !== newHash) {
@@ -715,7 +774,7 @@
   }
 
   function switchNav(nav, updateUrl) {
-    if (nav !== "dashboard" && nav !== "qa" && nav !== "handoff" && nav !== "stats") {
+    if (nav !== "dashboard" && nav !== "qa" && nav !== "stats") {
       nav = "dashboard";
     }
 
@@ -726,7 +785,7 @@
     currentNav = nav;
 
     // 1차 네비게이션 버튼 활성화
-    [els.navBtnDashboard, els.navBtnQa, els.navBtnHandoff, els.navBtnStats].forEach(function (btn) {
+    [els.navBtnDashboard, els.navBtnQa, els.navBtnStats].forEach(function (btn) {
       if (btn) {
         var isActive = (btn.dataset.nav === nav);
         btn.classList.toggle("active", isActive);
@@ -737,12 +796,10 @@
     // 2차 서브 패널 전환
     if (els.subDashboard) els.subDashboard.style.display = ((nav === "dashboard" || nav === "stats") ? "flex" : "none");
     if (els.subQa) els.subQa.style.display = (nav === "qa" ? "flex" : "none");
-    if (els.subHandoff) els.subHandoff.style.display = (nav === "handoff" ? "flex" : "none");
 
     // 메인 뷰 전환
     if (els.viewDashboard) els.viewDashboard.style.display = (nav === "dashboard" ? "block" : "none");
     if (els.viewQa) els.viewQa.style.display = (nav === "qa" ? "block" : "none");
-    if (els.viewHandoff) els.viewHandoff.style.display = (nav === "handoff" ? "block" : "none");
     if (els.viewStats) els.viewStats.style.display = (nav === "stats" ? "block" : "none");
 
     // 상단 브레드크럼 및 상태 갱신
@@ -774,8 +831,6 @@
       renderDashboard();
     } else if (nav === "qa") {
       applyQaFilters();
-    } else if (nav === "handoff") {
-      renderHandoffView();
     }
     if (typeof enterOrLeaveUsageStats === "function") {
       enterOrLeaveUsageStats(nav === "stats");
@@ -801,19 +856,6 @@
           els.topbarCurrent.textContent = titles.projectName + " / " + titles.sessionTitle;
         }
       }
-    } else if (currentNav === "handoff") {
-      els.topbarCategory.textContent = "에이전트 협의";
-      if (!currentHandoffProject) {
-        els.topbarCurrent.textContent = "전체 프로젝트";
-      } else {
-        var hTree = buildHandoffTree(handoffChannels, claudeTree);
-        var hTitles = findHandoffNodeTitles(hTree, currentHandoffProject, currentHandoffSession);
-        if (!currentHandoffSession) {
-          els.topbarCurrent.textContent = hTitles.projectName;
-        } else {
-          els.topbarCurrent.textContent = hTitles.projectName + " / " + hTitles.sessionTitle;
-        }
-      }
     } else if (currentNav === "stats") {
       els.topbarCategory.textContent = "실측 통계";
       els.topbarCurrent.textContent = "최근 " + usageDays + "일";
@@ -824,13 +866,14 @@
     if (!els.topbarCount || !els.topbarUpdated) return;
 
     if (currentNav === "dashboard") {
-      els.topbarCount.textContent = "총 " + allItems.length + "건 위임 / " + handoffProjects.length + "개 프로젝트";
+      els.topbarCount.textContent = "총 " + allItems.length + "건 위임";
     } else if (currentNav === "qa") {
       var count = filteredQa.length + filteredPending.length;
-      els.topbarCount.textContent = count + "건 표시 중 (전체 " + allItems.length + "건)";
-    } else if (currentNav === "handoff") {
-      var hMsgs = handoffMessagesOf(handoffChannels, claudeTree, currentHandoffProject, currentHandoffSession);
-      els.topbarCount.textContent = hMsgs.length + "개 메시지";
+      var srcTotal = qaSource === "all"
+        ? allItems.length
+        : allItems.filter(function (r) { return qaSource === "agy" ? qaIsAgyItem(r) : !qaIsAgyItem(r); }).length;
+      var srcLabel = qaSource === "agy" ? "Antigravity " : (qaSource === "claude" ? "Claude " : "");
+      els.topbarCount.textContent = srcLabel + count + "건 표시 중 (전체 " + srcTotal + "건)";
     } else if (currentNav === "stats") {
       els.topbarCount.textContent = "질문 " + ((usageData && usageData.summary) ? usageData.summary.total : 0) + "건";
     }
@@ -847,6 +890,7 @@
   function loadSystemStatus() {
     return fetchJson("/api/status")
       .then(function (status) {
+        hasLoadedStatusOnce = true;
         isServerOnline = true;
         systemStatus = status;
         if (status) {
@@ -865,6 +909,7 @@
         return status;
       })
       .catch(function () {
+        hasLoadedStatusOnce = true;
         isServerOnline = false;
         systemStatus = null;
         if (els.watcherPulseDot) els.watcherPulseDot.classList.add("offline");
@@ -877,18 +922,125 @@
       });
   }
 
+  function showUpdateRunMsg(text, isError) {
+    if (!els.updateRunMsg) return;
+    els.updateRunMsg.textContent = text || "";
+    els.updateRunMsg.classList.toggle("is-error", Boolean(isError));
+    els.updateRunMsg.hidden = !text;
+  }
+
+  function syncUpdatePoll(isRunning) {
+    if (isRunning) {
+      if (!updatePollTimer) {
+        updatePollTimer = setTimeout(function () {
+          updatePollTimer = null;
+          loadSystemStatus();
+        }, 3000);
+      }
+    } else if (updatePollTimer) {
+      clearTimeout(updatePollTimer);
+      updatePollTimer = null;
+    }
+  }
+
   function updateVersionNotice(status) {
     if (!els.updateNotice) return;
     var u = status && status.update;
-    if (u && u.available && u.latest) {
-      els.updateNotice.textContent = "새 버전 " + u.latest + " 설치 가능";
-      els.updateNotice.title = "설치본 " + (u.installed || "") + ". 눌러서 설치 방법 보기";
+    var run = u && u.run ? u.run : null;
+    var runState = run && run.state ? String(run.state) : "";
+    var runMessage = run && run.message ? String(run.message) : "";
+    var isRunning = (runState === "running") || updateStarting;
+    if (u && u.latest) {
+      lastUpdateLatest = String(u.latest);
+    }
+
+    var showNotice = Boolean((u && u.available && (u.latest || isRunning)) || isRunning);
+    var textTarget = els.updateNoticeText || els.updateNotice;
+    if (showNotice) {
+      var labelLatest = (u && u.latest) ? String(u.latest) : lastUpdateLatest;
+      textTarget.textContent = labelLatest ? ("새 버전 " + labelLatest + " 설치 가능") : "새 버전 업데이트 진행 중";
+      var tip = "설치본 " + ((u && u.installed) || "");
+      textTarget.title = tip;
+      els.updateNotice.title = tip;
       els.updateNotice.hidden = false;
+      if (els.updateRunBtn) {
+        if (isRunning) {
+          els.updateRunBtn.disabled = true;
+          els.updateRunBtn.textContent = "업데이트 중…";
+          els.updateRunBtn.setAttribute("aria-busy", "true");
+        } else {
+          els.updateRunBtn.disabled = false;
+          els.updateRunBtn.textContent = "업데이트";
+          els.updateRunBtn.removeAttribute("aria-busy");
+        }
+      }
     } else {
-      els.updateNotice.textContent = "";
+      textTarget.textContent = "";
+      textTarget.title = "";
       els.updateNotice.title = "";
       els.updateNotice.hidden = true;
+      if (els.updateRunBtn) {
+        els.updateRunBtn.disabled = false;
+        els.updateRunBtn.textContent = "업데이트";
+        els.updateRunBtn.removeAttribute("aria-busy");
+      }
     }
+
+    if (runState === "running") {
+      showUpdateRunMsg(runMessage || "업데이트를 진행하고 있습니다…", false);
+    } else if (runState === "done") {
+      showUpdateRunMsg("업데이트 완료. 뷰어 서버를 다시 시작하면 새 코드가 적용됩니다", false);
+    } else if (runState === "failed") {
+      var failText = (runMessage ? (runMessage + " · ") : "") + "로그: ~/.samjil/cache/update-run.log";
+      showUpdateRunMsg(failText, true);
+    }
+
+    syncUpdatePoll(runState === "running");
+  }
+
+  function startUpdate() {
+    if (updateStarting) return;
+    var u = systemStatus && systemStatus.update;
+    var latest = (u && u.latest) ? String(u.latest) : lastUpdateLatest;
+    var confirmText = "새 버전 " + (latest || "") + " 로 업데이트합니다. 위임 워처가 다시 시작될 수 있습니다. 진행할까요?";
+    if (typeof window !== "undefined" && typeof window.confirm === "function") {
+      if (!window.confirm(confirmText)) return;
+    }
+    updateStarting = true;
+    showUpdateRunMsg("", false);
+    if (els.updateRunBtn) {
+      els.updateRunBtn.disabled = true;
+      els.updateRunBtn.textContent = "업데이트 중…";
+      els.updateRunBtn.setAttribute("aria-busy", "true");
+    }
+    fetch("/api/update/start", { method: "POST", headers: { "X-Samjil-Viewer": "1" } })
+      .then(function (r) {
+        return r.json().then(function (body) { return { ok: r.ok, body: body }; });
+      })
+      .then(function (res) {
+        updateStarting = false;
+        if (!res.ok || !res.body) { throw new Error("서버가 요청을 받지 않았습니다"); }
+        var result = res.body.result;
+        var msg = res.body.message || "";
+        if (result === "started" || result === "running") {
+          showUpdateRunMsg(msg || "업데이트를 시작했습니다.", false);
+          syncUpdatePoll(true);
+          loadSystemStatus();
+          return;
+        }
+        if (result === "none") {
+          showUpdateRunMsg(msg || "업데이트할 새 버전이 없습니다", false);
+          updateVersionNotice(systemStatus);
+          return;
+        }
+        showUpdateRunMsg((msg || "업데이트를 시작하지 못했습니다.") + " · 로그: ~/.samjil/cache/update-run.log", true);
+        updateVersionNotice(systemStatus);
+      })
+      .catch(function (err) {
+        updateStarting = false;
+        showUpdateRunMsg("업데이트를 시작하지 못했습니다: " + err.message, true);
+        updateVersionNotice(systemStatus);
+      });
   }
 
   // 켜기 버튼: 워처가 꺼져 있고 서버가 켜 줄 수 있을 때만 보인다. 켜는 중에는 켜질 때까지 남겨 둔다.
@@ -1123,6 +1275,14 @@
 
   var QA_UNGROUPED = "__ungrouped__";
   var QA_UNLINKED = "__unlinked__";
+  var QA_AGY_UNLINKED = "__agy_unlinked__";
+
+  function qaIsAgyItem(item) {
+    if (!item || typeof item !== "object") return false;
+    var sc = String(item.src_client || "").trim().toLowerCase();
+    var src = String(item.source || "").trim().toLowerCase();
+    return sc === "antigravity" || sc === "agy" || src === "agy";
+  }
 
   // 폴더 경로 비교용 키(대소문자·슬래시 방향·끝의 구분자 무시)
   function qaCwdKey(p) {
@@ -1167,6 +1327,7 @@
   }
 
   function qaNodeOf(item, tree) {
+    var agyUnlinkedId = (typeof QA_AGY_UNLINKED !== "undefined") ? QA_AGY_UNLINKED : "__agy_unlinked__";
     var link = (tree && tree.taskLinks && item && item.task_id) ? tree.taskLinks[item.task_id] : null;
     if (link) {
       if (tree && Array.isArray(tree.projects)) {
@@ -1200,13 +1361,63 @@
           }
         }
       }
+      if (tree && Array.isArray(tree.agyProjects)) {
+        for (var ai = 0; ai < tree.agyProjects.length; ai++) {
+          var ap = tree.agyProjects[ai];
+          if (ap && Array.isArray(ap.sessions)) {
+            for (var aj = 0; aj < ap.sessions.length; aj++) {
+              var as = ap.sessions[aj];
+              if (as && as.id === link) {
+                return {
+                  projectId: ap.id,
+                  projectName: ap.name,
+                  sessionId: link,
+                  sessionTitle: as.title ? as.title : link.slice(0, 8),
+                  source: "agy"
+                };
+              }
+            }
+          }
+        }
+      }
+    }
+    var srcSess = (item && item.src_session) ? String(item.src_session).trim() : "";
+    var mappedSess = (!srcSess && tree && tree.agyParentMap && item && item.task_id) ? tree.agyParentMap[item.task_id] : srcSess;
+    if (mappedSess && tree && Array.isArray(tree.agyProjects)) {
+      for (var api = 0; api < tree.agyProjects.length; api++) {
+        var ap2 = tree.agyProjects[api];
+        if (ap2 && Array.isArray(ap2.sessions)) {
+          for (var apj = 0; apj < ap2.sessions.length; apj++) {
+            var as2 = ap2.sessions[apj];
+            if (as2 && as2.id === mappedSess) {
+              return {
+                projectId: ap2.id,
+                projectName: ap2.name,
+                sessionId: mappedSess,
+                sessionTitle: as2.title ? as2.title : mappedSess.slice(0, 8),
+                source: "agy"
+              };
+            }
+          }
+        }
+      }
     }
     // 대기·진행 중인 작업(완료 기록과 달리 timestamp 가 없고 state 가 있다)은 작업 폴더로 세션을 짐작해 본다
     if (item && item.state && !item.timestamp) {
       var guessed = qaGuessSessionByCwd(item, tree);
       if (guessed) return guessed;
     }
+    var isAgy = Boolean(item && (String(item.src_client || "").trim().toLowerCase() === "antigravity" || String(item.src_client || "").trim().toLowerCase() === "agy" || String(item.source || "").trim().toLowerCase() === "agy"));
     var sName = (item && item.session != null && String(item.session).trim() !== "") ? String(item.session) : "";
+    if (isAgy) {
+      return {
+        projectId: agyUnlinkedId,
+        projectName: "Antigravity (연결 안 됨)",
+        sessionId: "u:" + (sName ? sName : "__none__"),
+        sessionTitle: sName ? sName : "단발성 (세션 없음)",
+        source: "agy"
+      };
+    }
     return {
       projectId: QA_UNLINKED,
       projectName: "연결 안 됨",
@@ -1215,20 +1426,24 @@
     };
   }
 
-  function buildQaTree(records, pendings, tree) {
+  function buildQaTree(records, pendings, tree, opts) {
     var recs = Array.isArray(records) ? records : [];
     var pends = Array.isArray(pendings) ? pendings : [];
+    var sourceFilter = (opts && opts.source) ? String(opts.source) : "all";
+    var agyUnlinkedId = (typeof QA_AGY_UNLINKED !== "undefined") ? QA_AGY_UNLINKED : "__agy_unlinked__";
 
     var projectList = [];
+    var agyProjectList = [];
     var sessionLookup = {};
 
-    if (tree && Array.isArray(tree.projects)) {
+    if (sourceFilter !== "agy" && tree && Array.isArray(tree.projects)) {
       for (var i = 0; i < tree.projects.length; i++) {
         var p = tree.projects[i];
         if (!p) continue;
         var pNode = {
           id: p.id,
           name: p.name || "",
+          source: "claude",
           total: 0,
           pending: 0,
           errors: 0,
@@ -1259,11 +1474,50 @@
       }
     }
 
+    if (sourceFilter !== "claude" && tree && Array.isArray(tree.agyProjects)) {
+      for (var ai = 0; ai < tree.agyProjects.length; ai++) {
+        var ap = tree.agyProjects[ai];
+        if (!ap) continue;
+        var apNode = {
+          id: ap.id,
+          name: ap.name || "",
+          source: "agy",
+          total: 0,
+          pending: 0,
+          errors: 0,
+          latestTime: "",
+          sessions: []
+        };
+        if (Array.isArray(ap.sessions)) {
+          for (var aj = 0; aj < ap.sessions.length; aj++) {
+            var as = ap.sessions[aj];
+            if (!as) continue;
+            var asNode = {
+              id: as.id,
+              title: as.title ? as.title : String(as.id || "").slice(0, 8),
+              cwd: as.cwd || "",
+              total: 0,
+              pending: 0,
+              errors: 0,
+              latestTime: "",
+              archived: Boolean(as.archived),
+              forkOf: as.forkOf || "",
+              lastActivity: as.lastActivity || ""
+            };
+            apNode.sessions.push(asNode);
+            sessionLookup[as.id] = asNode;
+          }
+        }
+        agyProjectList.push(apNode);
+      }
+    }
+
     var ungroupedNode = null;
-    if (tree && Array.isArray(tree.ungrouped) && tree.ungrouped.length > 0) {
+    if (sourceFilter !== "agy" && tree && Array.isArray(tree.ungrouped) && tree.ungrouped.length > 0) {
       ungroupedNode = {
         id: QA_UNGROUPED,
         name: "그룹 없음",
+        source: "claude",
         total: 0,
         pending: 0,
         errors: 0,
@@ -1292,6 +1546,7 @@
     var unlinkedNode = {
       id: QA_UNLINKED,
       name: "연결 안 됨",
+      source: "claude",
       total: 0,
       pending: 0,
       errors: 0,
@@ -1300,9 +1555,25 @@
     };
     var unlinkedSessionMap = {};
 
+    var agyUnlinkedNode = {
+      id: agyUnlinkedId,
+      name: "Antigravity (연결 안 됨)",
+      source: "agy",
+      total: 0,
+      pending: 0,
+      errors: 0,
+      latestTime: "",
+      sessions: []
+    };
+    var agyUnlinkedSessionMap = {};
+
     function processItem(item, isPending) {
       if (!item || typeof item !== "object") return;
       var nodeInfo = qaNodeOf(item, tree);
+      var itemIsAgy = (nodeInfo.source === "agy") || (nodeInfo.projectId === agyUnlinkedId);
+      if (sourceFilter === "agy" && !itemIsAgy) return;
+      if (sourceFilter === "claude" && itemIsAgy) return;
+
       var time = isPending ? (item.created || "") : (item.timestamp || "");
       var isErr = !isPending && item.status && !isOkStatus(item);
 
@@ -1323,6 +1594,23 @@
           };
           unlinkedSessionMap[nodeInfo.sessionId] = targetSession;
           unlinkedNode.sessions.push(targetSession);
+        }
+      } else if (nodeInfo.projectId === agyUnlinkedId) {
+        targetSession = agyUnlinkedSessionMap[nodeInfo.sessionId];
+        if (!targetSession) {
+          targetSession = {
+            id: nodeInfo.sessionId,
+            title: nodeInfo.sessionTitle,
+            cwd: "",
+            total: 0,
+            pending: 0,
+            errors: 0,
+            latestTime: "",
+            archived: false,
+            lastActivity: ""
+          };
+          agyUnlinkedSessionMap[nodeInfo.sessionId] = targetSession;
+          agyUnlinkedNode.sessions.push(targetSession);
         }
       } else {
         targetSession = sessionLookup[nodeInfo.sessionId];
@@ -1413,6 +1701,11 @@
       result.push(projectList[pI]);
     }
 
+    for (var aI = 0; aI < agyProjectList.length; aI++) {
+      finalizeProject(agyProjectList[aI]);
+      result.push(agyProjectList[aI]);
+    }
+
     if (ungroupedNode) {
       finalizeProject(ungroupedNode);
       if (ungroupedNode.sessions.length > 0) {
@@ -1420,9 +1713,18 @@
       }
     }
 
-    finalizeProject(unlinkedNode);
-    if (unlinkedNode.sessions.length > 0 && (unlinkedNode.total + unlinkedNode.pending > 0)) {
-      result.push(unlinkedNode);
+    if (sourceFilter !== "agy") {
+      finalizeProject(unlinkedNode);
+      if (unlinkedNode.sessions.length > 0 && (unlinkedNode.total + unlinkedNode.pending > 0)) {
+        result.push(unlinkedNode);
+      }
+    }
+
+    if (sourceFilter !== "claude") {
+      finalizeProject(agyUnlinkedNode);
+      if (agyUnlinkedNode.sessions.length > 0 && (agyUnlinkedNode.total + agyUnlinkedNode.pending > 0)) {
+        result.push(agyUnlinkedNode);
+      }
     }
 
     return result;
@@ -1475,9 +1777,11 @@
     return result;
   }
 
-  function qaItemMatchesSelection(item, tree, projectId, sessionId) {
-    if (!projectId) return true;
+  function qaItemMatchesSelection(item, tree, projectId, sessionId, sourceFilter) {
     var node = qaNodeOf(item, tree);
+    if (sourceFilter === "agy" && node.source !== "agy") return false;
+    if (sourceFilter === "claude" && node.source === "agy") return false;
+    if (!projectId) return true;
     if (node.projectId !== projectId) return false;
     if (sessionId && node.sessionId !== sessionId) return false;
     return true;
@@ -2521,7 +2825,7 @@
   function renderQaTree() {
     if (!els.qaSessionList) return;
 
-    var allNodes = buildQaTree(allItems, pendingItems, claudeTree);
+    var allNodes = buildQaTree(allItems, pendingItems, claudeTree, { source: qaSource });
     if (els.qaSessionCount) {
       els.qaSessionCount.textContent = allNodes.length;
     }
@@ -2532,6 +2836,14 @@
     var hasQuery = Boolean(q);
 
     var frag = document.createDocumentFragment();
+
+    var feedCount = 0;
+    if (qaSource === "all") {
+      feedCount = allItems.length + pendingItems.length;
+    } else {
+      feedCount = allItems.filter(function (r) { return qaItemMatchesSelection(r, claudeTree, "", "", qaSource); }).length +
+        pendingItems.filter(function (p) { return qaItemMatchesSelection(p, claudeTree, "", "", qaSource); }).length;
+    }
 
     // 1. [전체 프로젝트 피드] 항목
     var allItem = document.createElement("div");
@@ -2544,7 +2856,7 @@
       '  <span class="project-name">전체 프로젝트 피드</span>',
       '  <span class="project-sub session-sub">모든 위임을 시간순으로</span>',
       '</div>',
-      '<span class="project-badge">' + (allItems.length + pendingItems.length) + '</span>'
+      '<span class="project-badge">' + feedCount + '</span>'
     ].join("");
     makeActivatable(allItem);
     allItem.onclick = function () { selectQaProject(""); };
@@ -2556,7 +2868,7 @@
       var isProjectActive = (currentQaProject === p.id && currentQaSession === "");
 
       var pItem = document.createElement("div");
-      var pClass = "project-item tree-project" + (isProjectActive ? " active" : "") + (isOpen ? " open" : "");
+      var pClass = "project-item tree-project" + (p.source === "agy" ? " tree-project-agy" : "") + (isProjectActive ? " active" : "") + (isOpen ? " open" : "");
       pItem.className = pClass;
       pItem.dataset.project = p.id;
       pItem.setAttribute("role", "treeitem");
@@ -2571,10 +2883,12 @@
         badgeHtml = '<span class="pending-pulse-dot" title="진행/대기 중 ' + p.pending + '건"></span> ' + badgeHtml;
       }
 
+      var srcBadge = p.source === "agy" ? '<span class="tree-src-badge is-agy">agy</span>' : '';
+
       pItem.innerHTML = [
         '<span class="project-icon">' + icon("folder") + '</span>',
         '<div class="project-info">',
-        '  <span class="project-name" title="' + escapeHtml(p.name) + '">' + escapeHtml(p.name) + '</span>',
+        '  <span class="project-name" title="' + escapeHtml(p.name) + '">' + escapeHtml(p.name) + srcBadge + '</span>',
         '  ' + subHtml,
         '</div>',
         '<span class="tree-chevron" aria-hidden="true"></span>',
@@ -2999,6 +3313,7 @@
   function renderDashboard() {
     if (currentNav !== "dashboard") return;
     renderNow();
+    renderAccountQuotas();
     renderAttention();
     renderTimeline();
     renderStats();
@@ -3049,7 +3364,14 @@
     var meta = [];
     var clickItem = null;
 
-    if (!isServerOnline) {
+    if (!hasLoadedStatusOnce) {
+      state = "loading";
+      statusText = "상태 확인 중";
+      title = "잠시만 기다려 주세요";
+      meta.push('<span class="skel skel-sm" aria-hidden="true"></span>');
+      meta.push('<span class="skel skel-xs" aria-hidden="true"></span>');
+      meta.push('<span class="skel skel-md" aria-hidden="true"></span>');
+    } else if (!isServerOnline) {
       state = "offline";
       statusText = "뷰어 서버에 연결할 수 없습니다";
       title = "serve-viewer.ps1이 실행 중인지 확인하세요";
@@ -3134,6 +3456,10 @@
   // 최근 위임 결과를 한 칸에 한 건씩, 오래된 것부터 왼쪽에 놓는다.
   function renderOutcomeStrip() {
     if (!els.outcomeStrip) return;
+    if (!hasLoadedStatusOnce) {
+      els.outcomeStrip.innerHTML = '<span class="skel skel-strip" aria-hidden="true"></span>';
+      return;
+    }
     var recent = allItems.filter(function (r) { return r && r.status; }).slice(0, 30).reverse();
     if (recent.length === 0) {
       els.outcomeStrip.innerHTML = "";
@@ -3601,16 +3927,30 @@
     });
   }
 
+  function dashSkeletonRowsHtml(count) {
+    var html = "";
+    for (var i = 0; i < count; i++) {
+      html += '<li><div class="row is-skeleton" aria-hidden="true">' +
+        '<span class="row-bar" aria-hidden="true"></span>' +
+        '<span class="row-when"><span class="skel skel-xs"></span></span>' +
+        '<div class="row-main">' +
+          '<div class="row-title"><span class="skel skel-wide"></span></div>' +
+          '<div class="row-sub"><span class="skel skel-sub"></span></div>' +
+        '</div>' +
+        '<div class="row-side"><span class="skel skel-pill"></span></div>' +
+      '</div></li>';
+    }
+    return html;
+  }
+
   function renderAttention() {
     if (!els.dashAttention) return;
+    if (!hasLoadedStatusOnce) {
+      if (els.dashAttentionCount) els.dashAttentionCount.textContent = "";
+      els.dashAttention.innerHTML = dashSkeletonRowsHtml(3);
+      return;
+    }
     var items = [];
-
-    handoffProjects.forEach(function (p) {
-      var m = p.latestMsg;
-      if (m && (m.status === "보냄" || m.status === "읽음")) {
-        items.push({ time: m.time || p.updated || "", node: function () { return handoffRow(p.name, m); } });
-      }
-    });
 
     var dayAgo = Date.now() - 86400000;
     allItems.forEach(function (r) {
@@ -3642,7 +3982,7 @@
 
     els.dashAttention.innerHTML = "";
     if (items.length === 0) {
-      els.dashAttention.innerHTML = '<li class="row-empty">확인할 항목이 없습니다. 처리를 기다리는 협의 메시지나 최근 24시간 안에 실패한 위임이 생기면 여기에 나옵니다.</li>';
+      els.dashAttention.innerHTML = '<li class="row-empty">확인할 항목이 없습니다. 최근 24시간 안에 실패한 위임이 생기면 여기에 나옵니다.</li>';
       return;
     }
     var frag = document.createDocumentFragment();
@@ -3652,6 +3992,10 @@
 
   function renderTimeline() {
     if (!els.dashTimeline) return;
+    if (!hasLoadedStatusOnce) {
+      els.dashTimeline.innerHTML = dashSkeletonRowsHtml(5);
+      return;
+    }
     var entries = [];
 
     activePending().forEach(function (p) {
@@ -3692,18 +4036,12 @@
       });
     });
 
-    handoffProjects.forEach(function (p) {
-      var m = p.latestMsg;
-      if (!m) return;
-      entries.push({ time: m.time || p.updated || "", node: function () { return handoffRow(p.name, m, "협의"); } });
-    });
-
     entries.sort(function (a, b) { return String(b.time).localeCompare(String(a.time)); });
     entries = entries.slice(0, 10);
 
     els.dashTimeline.innerHTML = "";
     if (entries.length === 0) {
-      els.dashTimeline.innerHTML = '<li class="row-empty">아직 기록이 없습니다. Claude가 agy에 작업을 위임하거나 협의 메시지를 보내면 여기에 쌓입니다.</li>';
+      els.dashTimeline.innerHTML = '<li class="row-empty">아직 기록이 없습니다. Claude나 Antigravity가 작업을 위임하면 여기에 쌓입니다.</li>';
       return;
     }
     var frag = document.createDocumentFragment();
@@ -3712,6 +4050,26 @@
   }
 
   function renderStats() {
+    if (!hasLoadedStatusOnce) {
+      if (els.dashStats) {
+        var labels = ["누적 위임", "오늘", "성공률", "평균 소요"];
+        els.dashStats.innerHTML = labels.map(function (lb) {
+          return '<div aria-hidden="true"><dt>' + lb + '</dt><dd><span class="skel skel-md"></span></dd></div>';
+        }).join("");
+      }
+      if (els.modelBarsContainer) {
+        var mHtml = "";
+        for (var mi = 0; mi < 3; mi++) {
+          mHtml += '<div class="model-bar-row is-skeleton" aria-hidden="true">' +
+            '<span class="skel skel-sub"></span>' +
+            '<div class="model-bar-track"><span class="skel skel-bar" style="margin:0"></span></div>' +
+            '<span class="skel skel-sm"></span>' +
+          '</div>';
+        }
+        els.modelBarsContainer.innerHTML = mHtml;
+      }
+      return;
+    }
     var totalQa = allItems.length;
     var okCount = 0;
     var errCount = 0;
@@ -3736,17 +4094,12 @@
     var successRate = decided > 0 ? Math.round((okCount / decided) * 100) + "%" : "-";
     var avgSec = elapsedItemCount > 0 ? formatDuration(totalElapsed / elapsedItemCount) : "-";
 
-    var totalHandoffMsgs = 0;
-    handoffProjects.forEach(function (p) { totalHandoffMsgs += (p.msgCount || 0); });
-
     if (els.dashStats) {
       var stats = [
         ["누적 위임", totalQa.toLocaleString() + "건"],
         ["오늘", todayCount + "건"],
         ["성공률", successRate],
-        ["평균 소요", avgSec],
-        ["협의 채널", handoffProjects.length + "개"],
-        ["메시지", totalHandoffMsgs.toLocaleString() + "개"]
+        ["평균 소요", avgSec]
       ];
       els.dashStats.innerHTML = stats.map(function (s) {
         return '<div' + (s[2] ? ' title="' + escapeHtml(s[2]) + '"' : '') + '><dt>' + s[0] + '</dt><dd>' + escapeHtml(s[1]) + '</dd></div>';
@@ -3760,6 +4113,18 @@
     if (!els.quickSessionsList) return;
     var sessions = groupQaSessions();
     if (sessions.length === 0) {
+      if (!hasLoadedStatusOnce) {
+        var sHtml = "";
+        for (var si = 0; si < 5; si++) {
+          sHtml += '<div class="quick-link-item is-skeleton" aria-hidden="true">' +
+            '<span class="skel skel-xs" style="width:14px;height:14px"></span>' +
+            '<span class="skel skel-wide"></span>' +
+            '<span class="skel skel-xs" style="width:22px"></span>' +
+          '</div>';
+        }
+        els.quickSessionsList.innerHTML = sHtml;
+        return;
+      }
       els.quickSessionsList.innerHTML = '<span class="empty-hint">세션 기록이 없습니다.</span>';
       return;
     }
@@ -3859,27 +4224,53 @@
       ["위임", count("delegate").toLocaleString() + "건", "agy 에 작업을 보낸 질문"],
       ["대화", count("chat").toLocaleString() + "건", "도구 호출 없이 답한 질문"],
       ["위임 작업", "성공 " + (t.ok || 0) + " · 실패 " + (t.fail || 0) + " · 취소 " + (t.cancel || 0), "위임 질문들이 보낸 agy 작업의 결과"],
-      ["사유 기록", rate, "사유가 남은 직접 · 위임 질문의 비율. 사유는 Claude 가 남긴 것만 보입니다."]
+      ["사유 기록", rate, "사유가 남은 직접 · 위임 질문의 비율."]
     ];
     if (s.auto > 0) out.push(["자동 진행", s.auto + "건", "/loop · 예약 실행으로 이어진 질문(구간을 나눌 수 없어 한 건으로 셉니다)"]);
+    if (s.by_client && s.by_client.agy) {
+      var agyDirNode = (s.by_client.agy.by_mode && s.by_client.agy.by_mode.direct != null) ? s.by_client.agy.by_mode.direct : s.by_client.agy.direct;
+      if (agyDirNode != null) {
+        var agyDirectCnt = typeof agyDirNode === "object" ? Number(agyDirNode.count || 0) : Number(agyDirNode || 0);
+        if (agyDirectCnt > 0) {
+          out.push(["agy 직접", agyDirectCnt.toLocaleString() + "건", "Antigravity 가 위임 없이 직접 처리한 질문"]);
+        }
+      }
+    }
     return out;
   }
 
   function usageModeTableHtml(summary) {
     var m = (summary && summary.by_mode) || {};
+    var bc = (summary && summary.by_client) || null;
     var head = '<thead><tr><th scope="col">방식</th><th scope="col" class="num">건수</th><th scope="col" class="num">소요 시간(중앙값)</th>' +
       '<th scope="col" class="num">총 토큰(중앙값)</th><th scope="col" class="num">캐시 읽기(중앙값)</th><th scope="col" class="num">agy 토큰(중앙값)</th>' +
       '<th scope="col" class="num">총 토큰 합</th><th scope="col" class="num">소요 시간 합</th></tr></thead>';
-    var body = ["direct", "delegate", "chat"].map(function (k) {
-      var x = m[k] || {};
-      return '<tr><th scope="row"><span class="badge usage-' + k + '">' + usageModeLabel(k) + '</span></th>' +
+    var rowHtml = function (labelHtml, x, isDelegate, trClass) {
+      return '<tr' + (trClass ? ' class="' + trClass + '"' : '') + '><th scope="row">' + labelHtml + '</th>' +
         '<td class="num">' + (x.count || 0).toLocaleString() + '</td>' +
         '<td class="num">' + usageDur(x.dur_median) + '</td>' +
         '<td class="num">' + usageNum(x.tokens_median) + '</td>' +
         '<td class="num">' + usageNum(x.cr_median) + '</td>' +
-        '<td class="num">' + (k === "delegate" ? usageNum(x.agy_tokens_median) : "") + '</td>' +
+        '<td class="num">' + (isDelegate ? usageNum(x.agy_tokens_median) : "") + '</td>' +
         '<td class="num">' + (x.count ? usageNum(x.tokens_sum) : "-") + '</td>' +
         '<td class="num">' + (x.count ? usageDur(x.dur_sum) : "-") + '</td></tr>';
+    };
+    var body = ["direct", "delegate", "chat"].map(function (k) {
+      var x = m[k] || {};
+      var html = rowHtml('<span class="badge usage-' + k + '">' + usageModeLabel(k) + '</span>', x, k === "delegate", "");
+      if (k === "direct" && bc && (bc.claude || bc.agy)) {
+        var cRaw = bc.claude ? ((bc.claude.by_mode && bc.claude.by_mode.direct != null) ? bc.claude.by_mode.direct : bc.claude.direct) : null;
+        var aRaw = bc.agy ? ((bc.agy.by_mode && bc.agy.by_mode.direct != null) ? bc.agy.by_mode.direct : bc.agy.direct) : null;
+        var cDir = cRaw != null ? (typeof cRaw === "object" ? cRaw : (Number(cRaw) > 0 ? { count: Number(cRaw) } : null)) : null;
+        var aDir = aRaw != null ? (typeof aRaw === "object" ? aRaw : (Number(aRaw) > 0 ? { count: Number(aRaw) } : null)) : null;
+        if (cDir && (cDir.count || 0) > 0) {
+          html += rowHtml('<span class="usage-sub-indent">↳</span> <span class="badge usage-claude">Claude 직접</span>', cDir, false, "usage-sub-row");
+        }
+        if (aDir && (aDir.count || 0) > 0) {
+          html += rowHtml('<span class="usage-sub-indent">↳</span> <span class="badge usage-agy-direct">agy 직접</span>', aDir, true, "usage-sub-row");
+        }
+      }
+      return html;
     }).join("");
     return head + "<tbody>" + body + "</tbody>";
   }
@@ -3928,26 +4319,70 @@
     return head + body;
   }
 
-  // 일별 쌓은 막대(직접 · 위임 · 대화). 날짜 이름은 칸이 많으면 띄엄띄엄 붙인다.
+  // 일별 쌓은 막대(직접 · 위임 · 대화). claude/agy 분리가 있으면 날마다 왼쪽 Claude · 오른쪽 Agy 두 막대로 나란히 그린다.
   function usageDailyHtml(daily) {
     var days = daily || [];
-    var max = 0;
-    days.forEach(function (d) { max = Math.max(max, (d.direct || 0) + (d.delegate || 0) + (d.chat || 0)); });
-    if (!days.length || max === 0) return "";
+    var hasSplit = days.some(function (d) { return Boolean(d && (d.claude || d.agy)); });
+    var maxDay = 0;
+    var maxBar = 0;
+    days.forEach(function (d) {
+      var tot = (d.direct || 0) + (d.delegate || 0) + (d.chat || 0);
+      maxDay = Math.max(maxDay, tot);
+      if (hasSplit) {
+        var c = d.claude || {};
+        var a = d.agy || {};
+        var cTot = (c.direct || 0) + (c.delegate || 0) + (c.chat || 0);
+        var aTot = (a.direct || 0) + (a.delegate || 0) + (a.chat || 0);
+        maxBar = Math.max(maxBar, cTot, aTot);
+      } else {
+        maxBar = Math.max(maxBar, tot);
+      }
+    });
+    if (!days.length || maxDay === 0) return "";
     var step = days.length <= 10 ? 1 : (days.length <= 31 ? 5 : 15);
+    var showSub = (hasSplit && days.length <= 14);
+    function stackHtml(cls, obj, labelPrefix, dateLabel) {
+      var dr = (obj && obj.direct) || 0;
+      var dl = (obj && obj.delegate) || 0;
+      var ch = (obj && obj.chat) || 0;
+      var tot = dr + dl + ch;
+      var segs = [["chat", ch], ["delegate", dl], ["direct", dr]].map(function (p) {
+        return p[1] > 0 ? '<span class="usage-seg usage-seg-' + p[0] + '" style="flex:' + p[1] + '"></span>' : "";
+      }).join("");
+      var hPct = (tot > 0 && maxBar > 0) ? Math.max(3, Math.round((tot / maxBar) * 100)) : 0;
+      var tip = dateLabel + (labelPrefix ? " · " + labelPrefix + " " + tot + "건 (" : " · ") +
+        "직접 " + dr + " · 위임 " + dl + " · 대화 " + ch + (labelPrefix ? ")" : "");
+      return '<div class="usage-bar-stack ' + cls + '" style="height:' + hPct + '%" title="' + escapeHtml(tip) + '">' + segs + '</div>';
+    }
     var cols = days.map(function (d, i) {
-      var total = (d.direct || 0) + (d.delegate || 0) + (d.chat || 0);
       var label = String(d.date || "").slice(5);
+      var showLabel = ((days.length - 1 - i) % step === 0);
+      if (hasSplit) {
+        var c = d.claude || { direct: 0, delegate: 0, chat: 0 };
+        var a = d.agy || { direct: 0, delegate: 0, chat: 0 };
+        var cTot = (c.direct || 0) + (c.delegate || 0) + (c.chat || 0);
+        var aTot = (a.direct || 0) + (a.delegate || 0) + (a.chat || 0);
+        var colTip = label + " · Claude " + cTot + "건 · Agy " + aTot + "건 (합계 " + (cTot + aTot) + "건)";
+        var pair = '<div class="usage-bar-pair">' +
+          '<div class="usage-bar-slot">' + stackHtml("usage-bar-claude", c, "Claude", label) + (showSub ? '<span class="usage-bar-sub usage-bar-sub-claude">C</span>' : '') + '</div>' +
+          '<div class="usage-bar-slot">' + stackHtml("usage-bar-agy", a, "Agy", label) + (showSub ? '<span class="usage-bar-sub usage-bar-sub-agy">A</span>' : '') + '</div>' +
+        '</div>';
+        return '<div class="usage-bar-col usage-bar-col-dual" title="' + escapeHtml(colTip) + '">' + pair +
+          '<span class="usage-bar-label">' + (showLabel ? escapeHtml(label) : "") + '</span></div>';
+      }
+      var total = (d.direct || 0) + (d.delegate || 0) + (d.chat || 0);
       var tip = label + " · 직접 " + (d.direct || 0) + " · 위임 " + (d.delegate || 0) + " · 대화 " + (d.chat || 0);
       var segs = [["chat", d.chat], ["delegate", d.delegate], ["direct", d.direct]].map(function (p) {
         return p[1] > 0 ? '<span class="usage-seg usage-seg-' + p[0] + '" style="flex:' + p[1] + '"></span>' : "";
       }).join("");
-      var showLabel = ((days.length - 1 - i) % step === 0);
       return '<div class="usage-bar-col" title="' + escapeHtml(tip) + '">' +
-        '<div class="usage-bar-stack" style="height:' + (total > 0 ? Math.max(3, Math.round((total / max) * 100)) : 0) + '%">' + segs + '</div>' +
+        '<div class="usage-bar-stack" style="height:' + (total > 0 ? Math.max(3, Math.round((total / maxBar) * 100)) : 0) + '%">' + segs + '</div>' +
         '<span class="usage-bar-label">' + (showLabel ? escapeHtml(label) : "") + '</span></div>';
     }).join("");
-    return '<p class="usage-bars-max">가장 많은 날 ' + max + '건</p><div class="usage-bars" role="img" aria-label="일별 질문 수(직접 · 위임 · 대화)">' + cols + '</div>';
+    var maxLine = hasSplit
+      ? '가장 많은 날 ' + maxDay + '건 <span class="usage-bars-hint">· 왼쪽 C(Claude) / 오른쪽 A(Agy)</span>'
+      : '가장 많은 날 ' + maxDay + '건';
+    return '<p class="usage-bars-max">' + maxLine + '</p><div class="usage-bars' + (hasSplit ? ' usage-bars-dual' : '') + '" role="img" aria-label="일별 질문 수(Claude · Agy)">' + cols + '</div>';
   }
 
   // 토큰 칸: 직접 · 대화는 Claude 총 토큰, 위임은 agy 총 토큰(Claude 가 제출 · 검토에 쓴 몫은 툴팁)
@@ -3970,6 +4405,10 @@
         firstHtml = usageWrapModelNames(first.slice(0, subCut)) +
           ' <span class="usage-model-sub" title="' + escapeHtml(subTitle) + '">' + usageWrapModelNames(first.slice(subCut + 1)) + '</span>';
       }
+    } else if (r.src_client) {
+      var srcClientDisp = String(r.src_client).toLowerCase() === "antigravity" ? "Antigravity" : String(r.src_client);
+      var srcTip = r.src_model ? ("이 위임을 보낸 " + srcClientDisp + " 모델: " + r.src_model) : ("이 위임을 보낸 클라이언트: " + srcClientDisp);
+      firstHtml = '<span title="' + escapeHtml(srcTip) + '">' + firstHtml + '</span>';
     }
     var failed = (Array.isArray(r.agy_failed) ? r.agy_failed : (r.agy_failed ? [r.agy_failed] : [])).map(function (m) { return usageAgyShort(m); }).filter(Boolean);
     var agy = String(r.agy_models || "").split(",").map(function (m) { return usageAgyShort(m); }).filter(Boolean);
@@ -4062,6 +4501,7 @@
   }
 
   function usageFormatSharePct(p) {
+    if (p === null || p === undefined || p === "" || typeof p === "boolean") return USAGE_DASH;
     var v = Number(p);
     if (!isFinite(v) || v < 0) return USAGE_DASH;
     return v < 0.1 ? "<0.1%" : v.toFixed(1) + "%";
@@ -4094,7 +4534,9 @@
   function usageShareData(r, src, winKey) {
     var q = r && r.quota;
     if (!q || typeof q !== "object") return null;
-    if (src === "agy" && r.mode !== "delegate") return null;
+    var sc = String((r && r.src_client) || "").trim().toLowerCase();
+    var isAgySrc = (sc === "antigravity" || sc === "agy");
+    if (src === "agy" && r.mode !== "delegate" && !isAgySrc) return null;
     var side = q[src];
     var entry = side && side[winKey];
     if (!entry || !(Number(entry.est_cost) > 0 || Number(entry.est) > 0)) return null;
@@ -4112,9 +4554,9 @@
       }
     }
     var pct = Number(entry.share_pct);
-    // 퍼센트 옆에 보이는 토큰은 바로 위 토큰 장부의 합계와 같은 값으로 맞춘다(장부: tokens_detail.<출처>.total).
+    // 퍼센트 옆에 보이는 토큰은 분모(entry.est)와 같은 단위로 맞춘다(Claude 는 raw_tokens, agy 는 tokens_detail.agy.total).
     var tdSide = r && r.tokens_detail && r.tokens_detail[src];
-    var shownRaw = tdSide && Number(tdSide.total) > 0 ? Number(tdSide.total) : (Number(raw) || 0);
+    var shownRaw = (src !== "claude" && tdSide && Number(tdSide.total) > 0) ? Number(tdSide.total) : (Number(raw) || 0);
     return { src: src, pct: pct, text: usageFormatSharePct(pct), raw: shownRaw, limit: Number(entry.est) || 0, tip: usageQuotaTip(src === "claude" ? "Opus" : "Neon", raw, entry, mDelta, mFrom, mTo) };
   }
   // 작은 막대(100% 에서 멈춤) + 퍼센트. withLabel 이면 앞에 출처 이름.
@@ -4191,7 +4633,8 @@
   function usageQuotaBlockHtml(r) {
     var dash = '<span class="usage-muted">' + USAGE_DASH + '</span>';
     // 출처마다 자리를 고정한다: 값이 없는 출처도 "–" 로 자리를 채워, Claude 주간이 없을 때 agy 값이 Claude 자리로 밀리지 않게 한다.
-    var srcs = r && r.mode === "delegate" ? ["claude", "agy"] : ["claude"];
+    var isNonClaude = Boolean(r && r.src_client && !r.claude_model && !(r.quota && r.quota.claude) && !(Number(r.tokens) > 0));
+    var srcs = isNonClaude ? ["agy"] : (r && r.mode === "delegate" ? ["claude", "agy"] : ["claude"]);
     var rowHtml = function (label, winKey) {
       var cells = srcs.map(function (s) {
         var d = usageShareData(r, s, winKey);
@@ -4268,7 +4711,8 @@
   }
   function usageComboText(r) {
     // Claude 모델은 노력 단계까지("opus-5-5 (high)"). 예전 기록처럼 노력을 모르면 모델만.
-    var claude = r.claude_label || r.claude_model || String(r.combo || "").split(" → ")[0] || "?";
+    var srcCaller = r.src_label || r.src_model || (r.src_client ? (String(r.src_client).toLowerCase() === "antigravity" ? "Antigravity" : String(r.src_client)) : "");
+    var claude = srcCaller || r.claude_label || r.claude_model || String(r.combo || "").split(" → ")[0] || "?";
     if (r.mode !== "delegate") return claude;
     if (r.agent_label && claude.indexOf(" › 서브 ") < 0) claude += " › 서브 " + r.agent_label;
     var agy = String(r.agy_models || "").split(",").map(function (m) { return usageAgyShort(m); }).filter(Boolean);
@@ -4327,7 +4771,8 @@
       parts.push(escapeHtml(usageTaskStatusLabel(t.status)));
       if (t.sec !== null && t.sec !== undefined) parts.push(escapeHtml(usageDur(t.sec)));
       var cls = "usage-chip" + (t.status === "OK" ? "" : (t.status ? " usage-chip-bad" : " usage-chip-wait"));
-      return '<a class="' + cls + '" href="#/qa?task=' + encodeURIComponent(id) + '" title="' + escapeHtml(id + (t.model ? " · " + t.model : "")) + '">' + parts.join(" · ") + '</a>';
+      var acctTip = (t.account && t.account !== "primary") ? (" [" + t.account + "]") : "";
+      return '<a class="' + cls + '" href="#/qa?task=' + encodeURIComponent(id) + '" title="' + escapeHtml(id + (t.model ? " · " + t.model : "") + acctTip) + '">' + parts.join(" · ") + '</a>';
     }).join("");
     return '<div class="usage-chips ur-tasks">' + chips + '</div>';
   }
@@ -4335,9 +4780,54 @@
   // 모델 줄: 모델 기록이 없으면 흐린 안내
   function usageModelLineHtml(r) {
     var agy = String(r.agy_models || "").trim();
-    var claude = r.claude_label || r.claude_model || "";
+    var claude = r.src_label || r.src_model || r.src_client || r.claude_label || r.claude_model || "";
     if (!claude && !agy) return '<span class="usage-muted">모델 기록 없음</span>';
     return usageComboHtml(r);
+  }
+
+  function usageAccountBadgeHtml(account, fallbackFrom) {
+    var acct = account ? String(account).trim() : "";
+    var fb = fallbackFrom ? String(fallbackFrom).trim() : "";
+    var labelFor = function (s) {
+      var m = /^sub(\d+)$/i.exec(s);
+      return m ? ("부계정 " + m[1]) : s;
+    };
+    if (acct && acct.toLowerCase() !== "primary") {
+      var lbl = labelFor(acct);
+      var tip = fb ? (lbl + " 실행 (" + fb + " 한도/미응답 대체)") : (lbl + " 슬롯 실행");
+      var txt = fb ? (lbl + " ← 대체") : lbl;
+      return '<span class="badge acct-badge acct-sub" title="' + escapeHtml(tip) + '">' + escapeHtml(txt) + '</span>';
+    }
+    if (fb) {
+      var tipFb = "부계정(" + fb + ") 한도 소진/미응답으로 주 계정 폴백 실행";
+      return '<span class="badge acct-badge acct-fallback" title="' + escapeHtml(tipFb) + '">주 ← 부계정 폴백</span>';
+    }
+    return "";
+  }
+
+  function usageRowAccountBadgesHtml(r) {
+    if (!r) return "";
+    if (Array.isArray(r.tasks) && r.tasks.length > 0) {
+      var seen = {};
+      var badges = [];
+      r.tasks.forEach(function (t) {
+        if (!t) return;
+        var a = t.account ? String(t.account).trim() : "primary";
+        var fb = t.fallback_from ? String(t.fallback_from).trim() : "";
+        if (a.toLowerCase() === "primary" && !fb) return;
+        var k = a + "|" + fb;
+        if (seen[k]) return;
+        seen[k] = true;
+        var b = usageAccountBadgeHtml(a, fb);
+        if (b) badges.push(b);
+      });
+      if (badges.length > 0) return badges.join(" ");
+    }
+    if (Array.isArray(r.sub_accounts) && r.sub_accounts.length > 0) {
+      if (r.sub_accounts.length === 1) return usageAccountBadgeHtml(r.sub_accounts[0], r.fallback_from);
+      return r.sub_accounts.map(function (sa) { return usageAccountBadgeHtml(sa, ""); }).filter(Boolean).join(" ");
+    }
+    return usageAccountBadgeHtml(r.account, r.fallback_from);
   }
 
   function usageRowHtml(r, index) {
@@ -4349,16 +4839,36 @@
     var preview = r.preview ? escapeHtml(r.preview) : '<span class="usage-muted">(글 없음)</span>';
     var tokTip = (function () {
       var p = usageTokenParts(r);
+      if (r && r.src_client && p.claudeTotal <= 0) return "agy " + usageDashNum(p.agyTotal);
       return "Claude " + usageDashNum(p.claudeTotal) + (r.mode === "delegate" ? " · agy " + usageDashNum(p.agyTotal) : "");
+    })();
+    var acctBadge = usageRowAccountBadgesHtml(r);
+    var scLower = String((r && r.src_client) || "").trim().toLowerCase();
+    var isAgySrc = (scLower === "antigravity" || scLower === "agy");
+    var rowModeBadgeHtml = (function () {
+      if (r.mode === "direct") {
+        return isAgySrc
+          ? '<span class="badge usage-agy-direct" title="Antigravity 직접 처리">Agy</span>'
+          : '<span class="badge usage-direct" title="Claude 직접 처리">Claude</span>';
+      }
+      if (r.mode === "delegate") {
+        return isAgySrc
+          ? '<span class="badge usage-delegate usage-a2a" title="Antigravity → Agy 위임">A → A</span>'
+          : '<span class="badge usage-delegate usage-c2a" title="Claude → Agy 위임">C → A</span>';
+      }
+      var chatTip = isAgySrc ? "Antigravity 대화" : "Claude 대화";
+      return '<span class="badge usage-' + escapeHtml(r.mode) + '" title="' + chatTip + '">' + usageModeLabel(r.mode) + '</span>';
     })();
     var reason = r.reason
       ? '<span class="ur-reason-k">사유</span> <span class="ur-reason-v">' + escapeHtml(r.reason) + '</span>'
       : '<span class="ur-reason-k">사유</span> <span class="usage-muted">기록 없음</span>';
     var qFull = String(r.preview || "");
+    var toksHtml = usageTokensVisibleHtml(r);
+    var subMetaHtml = toksHtml + (acctBadge ? '<span class="ur-accts">' + acctBadge + '</span>' : '');
     return '<div class="ur" role="listitem" data-row="' + escapeHtml(key) + '">' +
       '<div class="ur-sum" role="button" tabindex="0" aria-expanded="' + (open ? "true" : "false") + '" aria-controls="' + detailId + '">' +
         '<span class="ur-when">' + usageWhen(r.q_ts) + '</span>' +
-        '<span class="ur-mode"><span class="badge usage-' + escapeHtml(r.mode) + '">' + usageModeLabel(r.mode) + '</span>' +
+        '<span class="ur-mode">' + rowModeBadgeHtml +
           (r.auto ? ' <span class="badge" title="자동 진행: /loop · 예약 실행으로 이어진 구간이라 한 건으로 묶였습니다">자동</span>' : '') + '</span>' +
         '<span class="ur-proj" title="' + escapeHtml(r.project || "") + '">' + (project ? escapeHtml(project) : USAGE_DASH) + '</span>' +
         '<span class="ur-q">' + preview + '</span>' +
@@ -4367,7 +4877,7 @@
           '<span class="ur-tok" title="' + escapeHtml(tokTip) + '">' + usageDashNum(total) + '</span>' +
           '<span class="ur-share">' + usageSummaryMeterHtml(r) + '</span>' +
         '</span>' +
-        (usageTokensVisibleHtml(r) ? '<div class="ur-toks">' + usageTokensVisibleHtml(r) + '</div>' : '') +
+        (subMetaHtml ? '<div class="ur-toks">' + subMetaHtml + '</div>' : '') +
       '</div>' +
       '<div class="ur-detail" id="' + detailId + '"' + (open ? "" : " hidden") + '>' +
         usageTaskChipsHtml(r) +
@@ -4421,50 +4931,657 @@
     return "";
   }
 
+  function usageFilterRows(rows, clientFilter) {
+    var list = Array.isArray(rows) ? rows : [];
+    if (!clientFilter) return list;
+    return list.filter(function (r) {
+      if (!r) return false;
+      var sc = String(r.src_client || "").trim().toLowerCase();
+      var isAgy = (sc === "antigravity" || sc === "agy");
+      if (clientFilter === "claude") return !isAgy;
+      if (clientFilter === "agy") return isAgy;
+      if (clientFilter === "claude_direct") return !isAgy && r.mode === "direct";
+      if (clientFilter === "agy_direct") return isAgy && r.mode === "direct";
+      if (clientFilter === "agy_delegate") return r.mode === "delegate";
+      return true;
+    });
+  }
+
+  function usageDiagGroupView(group, unackedList, samples) {
+    var g = group || {};
+    var cat = g.category || "";
+    var label = g.label || cat || "기타";
+    var count = Number(g.count || 0);
+    var unacked = 0;
+    if (Array.isArray(unackedList)) {
+      for (var i = 0; i < unackedList.length; i++) {
+        var u = unackedList[i];
+        if (u && u.category === cat) {
+          unacked = Number(u.count || 0);
+          break;
+        }
+      }
+    }
+    var list = Array.isArray(samples) ? samples : [];
+    var rows = list.filter(function (s) { return s && s.category === cat; }).slice(0, 3).map(function (s) {
+      var rawDetail = String(s.detail || "").split(/\r?\n/)[0].trim();
+      var text = rawDetail.length > 80 ? rawDetail.slice(0, 77) + "..." : rawDetail;
+      return {
+        when: usageWhen(s.timestamp || s.created_at || ""),
+        text: text,
+        taskId: String(s.task_id || s.id || ""),
+        acked: Boolean(s.acked)
+      };
+    });
+    return { label: label, count: count, unacked: unacked, rows: rows };
+  }
+
+  function renderUsageDiagnostics() {
+    if (!els.usageDiagnosticsSection) return;
+    var diag = usageDiagnosticsData;
+    if (!diag || !Number(diag.total_failed)) {
+      els.usageDiagnosticsSection.hidden = true;
+      return;
+    }
+    els.usageDiagnosticsSection.hidden = false;
+    if (els.usageDiagSummary) {
+      els.usageDiagSummary.textContent = "최근 " + (diag.days || 14) + "일 · 실패/취소 " + diag.total_failed + "건 (스캔 " + (diag.total_scanned || 0) + "건)";
+    }
+    var resSum = diag.resolution_summary || null;
+    var samplesList = Array.isArray(diag.samples) ? diag.samples : (Array.isArray(diag.records) ? diag.records : []);
+    var resolvedN = resSum && resSum.resolved != null ? Number(resSum.resolved) : 0;
+    var failedN = resSum && resSum.failed != null ? Number(resSum.failed) : 0;
+    var remainingN = resSum && resSum.remaining != null ? Number(resSum.remaining) : (diag.unacked_total != null ? Number(diag.unacked_total) : 0);
+    if (!resSum && samplesList.length > 0) {
+      resolvedN = 0; failedN = 0; remainingN = 0;
+      for (var si = 0; si < samplesList.length; si++) {
+        var st = String(samplesList[si].ack_status || (samplesList[si].acked ? "resolved" : "open"));
+        if (st === "resolved") resolvedN++;
+        else if (st === "failed") failedN++;
+        else remainingN++;
+      }
+    }
+    if (els.usageDiagUnacked) {
+      if (resSum || (diag.unacked_total != null && typeof diag.unacked_total !== "boolean" && !isNaN(Number(diag.unacked_total)))) {
+        els.usageDiagUnacked.hidden = false;
+        if (remainingN > 0 && failedN > 0) {
+          els.usageDiagUnacked.className = "usage-diag-unacked is-failed";
+          els.usageDiagUnacked.textContent = "남은 " + remainingN + "건 · 처리 실패 " + failedN + "건";
+        } else if (remainingN > 0) {
+          els.usageDiagUnacked.className = "usage-diag-unacked";
+          els.usageDiagUnacked.textContent = "남은 건 " + remainingN + "건";
+        } else if (failedN > 0) {
+          els.usageDiagUnacked.className = "usage-diag-unacked is-failed";
+          els.usageDiagUnacked.textContent = "처리 실패 " + failedN + "건";
+        } else {
+          els.usageDiagUnacked.className = "usage-diag-unacked is-acked";
+          els.usageDiagUnacked.textContent = "모두 완료";
+        }
+      } else {
+        els.usageDiagUnacked.hidden = true;
+        els.usageDiagUnacked.textContent = "";
+      }
+    }
+    if (els.usageDiagCounts) {
+      var cb = diag.counts_by_status || {};
+      var statusPills = [
+        ["실패 (ERROR)", cb.ERROR || 0, ""],
+        ["취소 (CANCELLED)", cb.CANCELLED || 0, ""],
+        ["차단 (BLOCKED)", cb.BLOCKED || 0, ""],
+        ["완료", resolvedN, " is-resolved"],
+        ["처리 실패", failedN, failedN > 0 ? " is-failed" : ""],
+        ["남은 건", remainingN, remainingN > 0 ? " is-remaining" : ""]
+      ];
+      els.usageDiagCounts.innerHTML = statusPills.map(function (p) {
+        return '<span class="usage-diag-count-pill' + p[2] + '">' + escapeHtml(p[0]) + ": " + Number(p[1]).toLocaleString() + "건</span>";
+      }).join("");
+    }
+    if (els.usageDiagBrief) {
+      els.usageDiagBrief.textContent = diag.fix_brief || "";
+    }
+    if (els.usageDiagGroups) {
+      var cats = Array.isArray(diag.by_category) ? diag.by_category : [];
+      var unackedList = Array.isArray(diag.unacked_by_category) ? diag.unacked_by_category : [];
+      var samples = samplesList;
+      var orderedCats = cats.filter(function (g) { return g && g.category !== "user_cancelled"; })
+        .concat(cats.filter(function (g) { return g && g.category === "user_cancelled"; }));
+      els.usageDiagGroups.innerHTML = orderedCats.map(function (g) {
+        var cat = g.category || "";
+        var view = usageDiagGroupView(g, unackedList, samples);
+        var isCancelled = (cat === "user_cancelled");
+        var unackedBadge = view.unacked > 0
+          ? '<span class="usage-diag-unacked">미처리 ' + view.unacked + '건</span>'
+          : '';
+        var ackBtn = view.unacked > 0
+          ? '<button type="button" class="usage-diag-ack" data-category="' + escapeHtml(cat) + '" data-label="' + escapeHtml(view.label) + '" data-unacked="' + view.unacked + '">처리 표시</button>'
+          : '';
+        var headLeft = isCancelled ? ('▸ ' + escapeHtml(view.label)) : escapeHtml(view.label);
+        var headInner = '<span>' + headLeft + '</span>' +
+          '<span style="display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap">' +
+            '<span>' + view.count + '건</span>' + unackedBadge + ackBtn +
+          '</span>';
+        var casesHtml = view.rows.map(function (r) {
+          var linkHtml = r.taskId
+            ? '<a class="usage-diag-sample-link" href="#/qa?task=' + encodeURIComponent(r.taskId) + '" title="' + escapeHtml(r.taskId) + '">' + escapeHtml(r.taskId.slice(-12)) + '</a>'
+            : '';
+          var lineHtml = "";
+          if (r.text) {
+            var parts = [];
+            if (r.when) parts.push(escapeHtml(r.when));
+            parts.push(escapeHtml(r.text));
+            if (linkHtml) parts.push(linkHtml);
+            lineHtml = parts.join(" · ");
+          } else {
+            lineHtml = linkHtml;
+          }
+          if (!lineHtml) return "";
+          return '<div class="usage-diag-case' + (r.acked ? ' is-acked' : '') + '">' + lineHtml + '</div>';
+        }).join("");
+        var bodyHtml = (g.root_cause ? '<div class="usage-diag-group-cause">' + escapeHtml(g.root_cause) + '</div>' : '') +
+          (g.recommendation ? '<div class="usage-diag-group-rec">권장: ' + escapeHtml(g.recommendation) + '</div>' : '') +
+          casesHtml;
+        if (isCancelled) {
+          return '<details class="usage-diag-group is-acked"><summary class="usage-diag-group-head" style="cursor:pointer">' + headInner + '</summary>' + bodyHtml + '</details>';
+        }
+        return '<div class="usage-diag-group"><div class="usage-diag-group-head">' + headInner + '</div>' + bodyHtml + '</div>';
+      }).join("");
+    }
+    if (els.usageDiagHandled) {
+      var handled = Array.isArray(diag.handled_records) ? diag.handled_records : [];
+      if (handled.length === 0) {
+        els.usageDiagHandled.hidden = true;
+        els.usageDiagHandled.innerHTML = "";
+      } else {
+        els.usageDiagHandled.hidden = false;
+        var handledSummary = "처리된 내역 · 완료 " + resolvedN + "건 · 처리 실패 " + failedN + "건 · 남은 건 " + remainingN + "건";
+        var handledRowsHtml = handled.map(function (h) {
+          var st = String(h.ack_status || "resolved");
+          var badgeCls = st === "failed" ? "is-failed" : "is-resolved";
+          var badgeText = st === "failed" ? "처리 실패" : "완료";
+          var whenStr = usageWhen(h.acked_at || h.timestamp || "");
+          var tid = String(h.task_id || "");
+          var linkHtml = tid
+            ? '<a class="usage-diag-sample-link" href="#/qa?task=' + encodeURIComponent(tid) + '" title="' + escapeHtml(tid) + '">' + escapeHtml(tid.slice(-12)) + '</a>'
+            : '';
+          var noteText = String(h.ack_note || "").trim() || "(메모 없음)";
+          return '<div class="usage-diag-handled-row">' +
+            '<span class="usage-diag-status-badge ' + badgeCls + '">' + badgeText + '</span>' +
+            '<span class="usage-diag-handled-cat">' + escapeHtml(h.label || h.category || "기타") + '</span>' +
+            '<span class="usage-diag-handled-note" title="' + escapeHtml(noteText) + '">' + escapeHtml(noteText) + '</span>' +
+            '<span class="usage-diag-handled-when">' + escapeHtml(whenStr) + '</span>' +
+            linkHtml +
+          '</div>';
+        }).join("");
+        els.usageDiagHandled.innerHTML =
+          '<details class="usage-diag-handled-box">' +
+            '<summary class="usage-diag-handled-head"><span>' + escapeHtml(handledSummary) + '</span><span class="usage-diag-handled-count">' + handled.length + '건 표시</span></summary>' +
+            '<div class="usage-diag-handled-list">' + handledRowsHtml + '</div>' +
+          '</details>';
+      }
+    }
+  }
+
+  function loadUsageDiagnostics() {
+    return fetchJson("/api/qa/diagnostics?days=14&limit=200")
+      .then(function (d) {
+        usageDiagnosticsData = d;
+        if (currentNav === "stats") renderUsageDiagnostics();
+      })
+      .catch(function () {
+        // 진단 API 실패 시 조용히 숨김 유지
+      });
+  }
+
+  // ==========================================================================
+  // 계정별 남은 한도 (클 · 주 · 부1 · 부2)
+  // ==========================================================================
+
+  function quotaLevelClass(remPct) {
+    if (remPct == null || remPct === "" || typeof remPct === "boolean" || isNaN(Number(remPct))) {
+      return "is-empty";
+    }
+    var n = Number(remPct);
+    if (n <= 10) return "is-danger";
+    if (n <= 30) return "is-warn";
+    return "is-ok";
+  }
+
+  function formatQuotaResetText(win) {
+    if (!win || !win.available) return "-";
+    if (win.reset_passed) return "리셋됨";
+    if (win.idle_window) return "현재 창 미사용";
+    var sec;
+    if (win.reset_in_sec != null && win.reset_in_sec !== "" && typeof win.reset_in_sec !== "boolean" && !isNaN(Number(win.reset_in_sec)) && Number(win.reset_in_sec) >= 0) {
+      sec = Number(win.reset_in_sec);
+    } else if (win.reset_at) {
+      var ms = Date.parse(win.reset_at);
+      if (isNaN(ms)) return "-";
+      sec = Math.floor((ms - Date.now()) / 1000);
+    } else {
+      return "-";
+    }
+    if (sec <= 0) return "곧 리셋";
+    if (sec < 3600) return Math.max(1, Math.round(sec / 60)) + "분 후 리셋";
+    if (sec < 86400) {
+      var h = Math.floor(sec / 3600);
+      var m = Math.floor((sec % 3600) / 60);
+      return m === 0 ? (h + "시간 후 리셋") : (h + "시간 " + m + "분 후 리셋");
+    }
+    var d = Math.floor(sec / 86400);
+    var h2 = Math.floor((sec % 86400) / 3600);
+    return h2 === 0 ? (d + "일 후 리셋") : (d + "일 " + h2 + "시간 후 리셋");
+  }
+
+  function formatQuotaAgoText(isoStr) {
+    if (!isoStr) return "측정 기록 없음";
+    var ms = Date.parse(isoStr);
+    if (isNaN(ms)) return "측정 기록 없음";
+    var sec = Math.floor((Date.now() - ms) / 1000);
+    if (sec < 60) return "방금 전";
+    if (sec < 3600) return Math.floor(sec / 60) + "분 전";
+    if (sec < 86400) return Math.floor(sec / 3600) + "시간 전";
+    return Math.floor(sec / 86400) + "일 전";
+  }
+
+  function formatQuotaPctText(val) {
+    var clamped = Math.max(0, Math.min(100, Number(val)));
+    if (Math.abs(clamped - Math.round(clamped)) < 0.005) {
+      return Math.round(clamped) + "%";
+    }
+    return clamped.toFixed(2) + "%";
+  }
+
+  function quotaHueOf(remPct) {
+    var p = Math.max(0, Math.min(100, Number(remPct)));
+    return Math.round((p / 100) * 132);
+  }
+
+  function accountQuotaWindowHtml(title, win) {
+    var hasPct = Boolean(win && win.available && win.remaining_pct != null && win.remaining_pct !== "" && typeof win.remaining_pct !== "boolean" && !isNaN(Number(win.remaining_pct)));
+    var num = hasPct ? Number(win.remaining_pct) : null;
+    var clamped = hasPct ? Math.max(0, Math.min(100, num)) : 0;
+    var lvl = hasPct ? quotaLevelClass(num) : "is-empty";
+    var pctText = hasPct ? formatQuotaPctText(clamped) : "\u2013";
+    var hueStyle = hasPct ? (' style="--q-hue:' + quotaHueOf(clamped) + '"') : "";
+    var barStyle = 'width:' + clamped.toFixed(2).replace(/\.?0+$/, "") + '%' + (hasPct ? (';--q-hue:' + quotaHueOf(clamped)) : "");
+    var resetText = formatQuotaResetText(win);
+    var tip = title + ": " + (hasPct ? ("남은 한도 " + pctText + " · " + resetText) : "측정 데이터 없음");
+    return '<div class="quota-win-row" title="' + escapeHtml(tip) + '">' +
+      '<div class="quota-win-head">' +
+        '<span class="quota-win-label">' + escapeHtml(title) + '</span>' +
+        '<span class="quota-win-pct ' + lvl + (hasPct ? ' has-q-hue' : '') + '"' + hueStyle + '>' + escapeHtml(pctText) + '</span>' +
+      '</div>' +
+      '<div class="quota-bar"><span class="quota-bar-fill ' + lvl + (hasPct ? ' has-q-hue' : '') + '" style="' + barStyle + '"></span></div>' +
+      '<div class="quota-win-reset">' + escapeHtml(resetText) + '</div>' +
+    '</div>';
+  }
+
+  function accountQuotaCardHtml(acct) {
+    var a = acct || {};
+    var id = a.id || "";
+    var provider = a.provider || "";
+    var badgeCls = provider === "claude" ? "is-claude" : ((provider === "primary" || id === "primary") ? "is-primary" : "is-sub");
+    var stText = "대기";
+    var stCls = "is-idle";
+    if (a.refreshing) {
+      stText = "갱신 중…";
+      stCls = "is-refreshing";
+    } else if (a.status === "cooldown") {
+      stText = "쿨다운";
+      stCls = "is-cooldown";
+    } else if (a.status === "offline") {
+      stText = "오프라인";
+      stCls = "is-offline";
+    } else if (a.status === "idle") {
+      stText = "대기";
+      stCls = "is-idle";
+    } else if (provider === "claude" && a.refreshable === false) {
+      stText = "자동 기록";
+      stCls = "is-claude";
+    } else if (a.status === "online") {
+      stText = "정상";
+      stCls = "is-online";
+    } else if (provider === "claude") {
+      stText = "대기";
+      stCls = "is-idle";
+    }
+    var agoText = formatQuotaAgoText(a.measured_at);
+    var tipParts = [];
+    if (a.measured_at) tipParts.push("측정 시각: " + a.measured_at);
+    if (a.note) tipParts.push(a.note);
+    var footTip = tipParts.join(" · ");
+    var subHtml = a.sub_label ? '<span class="quota-card-sub">' + escapeHtml(a.sub_label) + '</span>' : '';
+    return '<article class="quota-card ' + badgeCls + (a.refreshing ? ' is-refreshing' : '') + (a.status ? ' status-' + escapeHtml(a.status) : '') + '" data-account-id="' + escapeHtml(id) + '" data-provider="' + escapeHtml(provider) + '">' +
+      '<header class="quota-card-head">' +
+        '<span class="quota-short-badge ' + badgeCls + '">' + escapeHtml(a.short_label || "") + '</span>' +
+        '<div class="quota-card-titles">' +
+          '<span class="quota-card-name">' + escapeHtml(a.label || id) + '</span>' +
+          subHtml +
+        '</div>' +
+        '<span class="quota-status-pill ' + stCls + '">' + escapeHtml(stText) + '</span>' +
+      '</header>' +
+      '<div class="quota-card-windows">' +
+        accountQuotaWindowHtml("5시간", a.five_hour) +
+        accountQuotaWindowHtml("주간", a.weekly) +
+      '</div>' +
+      '<footer class="quota-card-foot"' + (footTip ? ' title="' + escapeHtml(footTip) + '"' : '') + '>' +
+        '<span class="quota-card-ago">' + escapeHtml(agoText) + '</span>' +
+      '</footer>' +
+    '</article>';
+  }
+
+  function accountQuotasGridHtml(accounts) {
+    var list = Array.isArray(accounts) ? accounts : [];
+    if (!list.length) return "";
+    return list.map(function (a) { return accountQuotaCardHtml(a); }).join("");
+  }
+
+  function sidebarQuotasHtml(accounts) {
+    var list = Array.isArray(accounts) ? accounts : [];
+    if (!list.length) return "";
+    var chips = list.map(function (a) {
+      a = a || {};
+      var id = a.id || "";
+      var provider = a.provider || "";
+      var shortLbl = a.short_label || a.label || id;
+      var fh = a.five_hour;
+      var wk = a.weekly;
+      var fhValid = Boolean(fh && fh.available && fh.remaining_pct != null && fh.remaining_pct !== "" && typeof fh.remaining_pct !== "boolean" && !isNaN(Number(fh.remaining_pct)));
+      var wkValid = Boolean(wk && wk.available && wk.remaining_pct != null && wk.remaining_pct !== "" && typeof wk.remaining_pct !== "boolean" && !isNaN(Number(wk.remaining_pct)));
+      var minPct = null;
+      if (fhValid && wkValid) {
+        minPct = Math.min(Number(fh.remaining_pct), Number(wk.remaining_pct));
+      } else if (fhValid) {
+        minPct = Number(fh.remaining_pct);
+      } else if (wkValid) {
+        minPct = Number(wk.remaining_pct);
+      }
+      var lvl = minPct != null ? quotaLevelClass(minPct) : "is-empty";
+      var pctText = minPct != null ? (Math.round(Math.max(0, Math.min(100, minPct))) + "%") : "\u2013";
+      var stText = a.refreshing ? "갱신 중…" : (a.status === "cooldown" ? "쿨다운" : (a.status === "offline" ? "오프라인" : (a.status === "idle" ? "대기" : (provider === "claude" ? "자동 기록" : (a.status === "online" ? "정상" : "대기")))));
+      var fhTxt = fhValid ? (formatQuotaPctText(fh.remaining_pct) + " (" + formatQuotaResetText(fh) + ")") : "-";
+      var wkTxt = wkValid ? (formatQuotaPctText(wk.remaining_pct) + " (" + formatQuotaResetText(wk) + ")") : "-";
+      var titleStr = (a.label || shortLbl) + (a.sub_label ? " (" + a.sub_label + ")" : "") + " · " + stText + "\n5시간: " + fhTxt + "\n주간: " + wkTxt;
+      var chipHueStyle = minPct != null ? (' style="--q-hue:' + quotaHueOf(minPct) + '"') : "";
+      return '<button type="button" class="sidebar-quota-chip ' + lvl + (a.refreshing ? ' is-refreshing' : '') + '" data-account-id="' + escapeHtml(id) + '"' + chipHueStyle + ' title="' + escapeHtml(titleStr) + '">' +
+        '<span class="sq-label">' + escapeHtml(shortLbl) + '</span>' +
+        '<span class="sq-pct">' + escapeHtml(pctText) + '</span>' +
+      '</button>';
+    }).join("");
+    return '<div class="sidebar-quotas-head">' +
+        '<span>남은 한도</span>' +
+        '<button type="button" class="sidebar-quotas-refresh" id="sidebar-quotas-refresh" title="계정별 한도 새로고침" aria-label="계정별 한도 새로고침">↻</button>' +
+      '</div>' +
+      '<div class="sidebar-quotas-row">' + chips + '</div>';
+  }
+
+  function sidebarQuotasSkeletonHtml() {
+    var chips = "";
+    for (var i = 0; i < 4; i++) {
+      chips += '<span class="sidebar-quota-chip is-skeleton" aria-hidden="true"><span class="skel skel-xs" style="width:32px;height:11px"></span></span>';
+    }
+    return '<div class="sidebar-quotas-head"><span>남은 한도</span><span class="sidebar-quotas-refresh" aria-hidden="true">↻</span></div>' +
+      '<div class="sidebar-quotas-row">' + chips + '</div>';
+  }
+
+  function accountQuotasSkeletonHtml() {
+    var html = "";
+    for (var i = 0; i < 4; i++) {
+      html += '<article class="quota-card is-skeleton" aria-hidden="true">' +
+        '<div class="quota-card-head"><span class="skel skel-badge"></span><span class="skel skel-title"></span><span class="skel skel-pill"></span></div>' +
+        '<div class="quota-win"><div class="quota-win-row"><span class="skel skel-sm"></span><span class="skel skel-xs"></span></div><div class="skel skel-bar"></div><span class="skel skel-sub"></span></div>' +
+        '<div class="quota-win"><div class="quota-win-row"><span class="skel skel-sm"></span><span class="skel skel-xs"></span></div><div class="skel skel-bar"></div><span class="skel skel-sub"></span></div>' +
+        '<div class="quota-card-foot"><span class="skel skel-xs"></span></div>' +
+      '</article>';
+    }
+    return html;
+  }
+
+  function usageSkeletonSummaryHtml() {
+    var html = "";
+    for (var i = 0; i < 6; i++) {
+      html += '<div aria-hidden="true"><dt><span class="skel skel-xs"></span></dt><dd><span class="skel skel-md"></span></dd></div>';
+    }
+    return html;
+  }
+
+  function usageSkeletonRowsHtml(count) {
+    var html = "";
+    for (var i = 0; i < count; i++) {
+      html += '<div class="skel-row" aria-hidden="true"><span class="skel skel-sm"></span><span class="skel skel-wide"></span><span class="skel skel-sm"></span></div>';
+    }
+    return html;
+  }
+
+  function renderAccountQuotas() {
+    var d = accountQuotasData;
+    var isInitialLoading = (d === null);
+    var accounts = (d && Array.isArray(d.accounts)) ? d.accounts : [];
+    var hasAccounts = accounts.length > 0;
+    var showBlock = isInitialLoading || hasAccounts;
+    var isRefreshing = Boolean((d && d.refreshing) || quotaRefreshingReq);
+    var metaText = "";
+    if (d && d.cooldown_sec > 0) {
+      metaText = "쿨다운 " + d.cooldown_sec + "초 후 다시 시도 가능";
+    } else if (isRefreshing) {
+      metaText = "남은 한도를 조회하는 중…";
+    } else if (d && d.measured_at) {
+      metaText = "마지막 측정 " + formatQuotaAgoText(d.measured_at);
+    }
+
+    var gridHtml = isInitialLoading ? accountQuotasSkeletonHtml() : (hasAccounts ? accountQuotasGridHtml(accounts) : "");
+
+    if (els.dashQuotasBlock) els.dashQuotasBlock.hidden = !showBlock;
+    if (els.dashQuotasGrid && showBlock) els.dashQuotasGrid.innerHTML = gridHtml;
+    if (els.dashQuotasMeta) els.dashQuotasMeta.textContent = metaText;
+    if (els.dashQuotasRefresh) {
+      els.dashQuotasRefresh.disabled = isRefreshing;
+      els.dashQuotasRefresh.textContent = isRefreshing ? "조회 중…" : "한도 새로고침";
+    }
+
+    if (els.statsQuotasBlock) els.statsQuotasBlock.hidden = !showBlock;
+    if (els.statsQuotasGrid && showBlock) els.statsQuotasGrid.innerHTML = gridHtml;
+    if (els.statsQuotasMeta) els.statsQuotasMeta.textContent = metaText;
+    if (els.statsQuotasRefresh) {
+      els.statsQuotasRefresh.disabled = isRefreshing;
+      els.statsQuotasRefresh.textContent = isRefreshing ? "조회 중…" : "한도 새로고침";
+    }
+
+    if (els.sidebarQuotas) {
+      els.sidebarQuotas.hidden = !showBlock;
+      if (isInitialLoading) {
+        els.sidebarQuotas.innerHTML = sidebarQuotasSkeletonHtml();
+      } else if (hasAccounts) {
+        els.sidebarQuotas.innerHTML = sidebarQuotasHtml(accounts);
+        var sbBtn = els.sidebarQuotas.querySelector("#sidebar-quotas-refresh");
+        if (sbBtn) {
+          sbBtn.disabled = isRefreshing;
+          sbBtn.classList.toggle("is-spinning", isRefreshing);
+        }
+      } else {
+        els.sidebarQuotas.innerHTML = "";
+      }
+    }
+  }
+
+  var QUOTA_AUTO_RELOAD_MS = 5 * 60 * 1000;
+
+  function scheduleQuotaPoll() {
+    if (quotaPollTimer) { clearTimeout(quotaPollTimer); quotaPollTimer = null; }
+    if (quotaPollCount < 18) {
+      quotaPollTimer = setTimeout(function () {
+        quotaPollCount++;
+        loadAccountQuotas();
+      }, 2500);
+    }
+  }
+
+  function loadAccountQuotas() {
+    lastQuotaLoadAt = Date.now();
+    return fetchJson("/api/quotas")
+      .then(function (d) {
+        if (!d || !Array.isArray(d.accounts) || !d.accounts.length) {
+          if (quotaPollTimer) { clearTimeout(quotaPollTimer); quotaPollTimer = null; }
+          accountQuotasData = d || null;
+          renderAccountQuotas();
+          return d;
+        }
+        accountQuotasData = d;
+        renderAccountQuotas();
+        if (d.refreshing && quotaPollCount < 18) {
+          scheduleQuotaPoll();
+        } else if (quotaPollTimer) {
+          clearTimeout(quotaPollTimer);
+          quotaPollTimer = null;
+        }
+        return d;
+      })
+      .catch(function () {
+        if (quotaPollTimer) { clearTimeout(quotaPollTimer); quotaPollTimer = null; }
+        return null;
+      });
+  }
+
+  function triggerAccountQuotasRefresh() {
+    if (quotaRefreshingReq) return;
+    quotaRefreshingReq = true;
+    if (quotaPollTimer) { clearTimeout(quotaPollTimer); quotaPollTimer = null; }
+    renderAccountQuotas();
+    return fetch("/api/quotas/refresh", { method: "POST", headers: { "X-Samjil-Viewer": "1" } })
+      .then(function (r) {
+        if (!r.ok) { throw new Error("HTTP " + r.status); }
+        return r.text().then(function (t) {
+          if (!t) return null;
+          if (t.charCodeAt(0) === 0xFEFF) { t = t.slice(1); }
+          return JSON.parse(t);
+        });
+      })
+      .then(function (d) {
+        quotaRefreshingReq = false;
+        quotaPollCount = 0;
+        if (d) {
+          if (Array.isArray(d.accounts)) {
+            accountQuotasData = d;
+          } else if (accountQuotasData) {
+            accountQuotasData = {
+              accounts: accountQuotasData.accounts,
+              refreshing: Boolean(d.refreshing),
+              cooldown_sec: d.cooldown_sec || 0,
+              measured_at: d.measured_at || accountQuotasData.measured_at
+            };
+          } else {
+            accountQuotasData = d;
+          }
+        }
+        renderAccountQuotas();
+        if (d && d.refreshing) {
+          scheduleQuotaPoll();
+        }
+      })
+      .catch(function () {
+        quotaRefreshingReq = false;
+        renderAccountQuotas();
+      });
+  }
+
   function renderUsageStats() {
     if (!els.viewStats) return;
     Array.prototype.forEach.call(document.querySelectorAll(".usage-day-btn"), function (btn) {
       btn.setAttribute("aria-pressed", parseInt(btn.dataset.days, 10) === usageDays ? "true" : "false");
     });
     var d = usageData;
+    var summary = (d && d.summary) || null;
+    var isInitialLoading = (!d && !usageError);
     var msg = usageMessageText(d, usageError);
+    // 최초 로딩(스켈레톤으로 공간 고정) 또는 이미 데이터가 있는 백그라운드 수집 중일 때는 상단 배너를 띄우지 않아 레이아웃 밀림을 방지한다.
+    var inlineCollecting = Boolean(!usageError && (isInitialLoading || (d && d.collecting && summary && summary.total > 0)));
     if (els.usageMessage) {
-      els.usageMessage.textContent = msg;
-      els.usageMessage.hidden = !msg;
+      els.usageMessage.textContent = inlineCollecting ? "" : msg;
+      els.usageMessage.hidden = inlineCollecting || !msg;
       els.usageMessage.classList.toggle("usage-message-error", !!usageError);
     }
     if (els.usageUpdated) {
-      els.usageUpdated.textContent = (d && d.collecting) ? "수집 중" : ((d && d.updated_at) ? usageWhen(d.updated_at) + " 갱신" : "");
+      if (isInitialLoading) {
+        els.usageUpdated.textContent = "불러오는 중";
+        els.usageUpdated.title = "실측 통계를 불러오는 중입니다.";
+      } else if (d && d.collecting) {
+        els.usageUpdated.textContent = "수집 중";
+        els.usageUpdated.title = "대화 기록을 읽는 중입니다. 읽은 만큼 먼저 보입니다.";
+      } else {
+        els.usageUpdated.textContent = (d && d.updated_at) ? usageWhen(d.updated_at) + " 갱신" : "";
+        els.usageUpdated.title = "";
+      }
     }
-    var summary = (d && d.summary) || null;
     if (els.usageCount) els.usageCount.textContent = "최근 " + usageDays + "일";
     if (els.usageSummary) {
       els.usageSummary.innerHTML = summary ? usageSummaryStats(summary).map(function (s) {
         return '<div' + (s[2] ? ' title="' + escapeHtml(s[2]) + '"' : '') + '><dt>' + s[0] + '</dt><dd>' + escapeHtml(s[1]) + '</dd></div>';
-      }).join("") : "";
+      }).join("") : (isInitialLoading ? usageSkeletonSummaryHtml() : "");
     }
-    if (els.usageModes) els.usageModes.innerHTML = (summary && summary.total > 0) ? usageModeTableHtml(summary) : "";
-    if (els.usageModels) els.usageModels.innerHTML = d ? (usageModelTableHtml(d.by_model) || "") : "";
-    if (els.usageDaily) els.usageDaily.innerHTML = d ? (usageDailyHtml(d.daily) || '<span class="empty-hint">표시할 날이 없습니다.</span>') : "";
+    if (els.usageModes) {
+      els.usageModes.innerHTML = (summary && summary.total > 0)
+        ? usageModeTableHtml(summary)
+        : (isInitialLoading ? '<tbody><tr><td>' + usageSkeletonRowsHtml(4) + '</td></tr></tbody>' : "");
+    }
+    if (els.usageModels) {
+      els.usageModels.innerHTML = d ? (usageModelTableHtml(d.by_model) || "") : (isInitialLoading ? usageSkeletonRowsHtml(3) : "");
+    }
+    if (els.usageDaily) {
+      els.usageDaily.innerHTML = d ? (usageDailyHtml(d.daily) || '<span class="empty-hint">표시할 날이 없습니다.</span>') : (isInitialLoading ? '<div class="skel-chart" aria-hidden="true"></div>' : "");
+    }
     if (els.usageLimitsBanner) {
       var limBanner = d ? usageLimitBannerHtml(d.limits) : "";
+      if (summary && summary.sub_quotas && typeof summary.sub_quotas === "object") {
+        var sqKeys = Object.keys(summary.sub_quotas).sort();
+        if (sqKeys.length) {
+          var sqParts = sqKeys.map(function (sk) {
+            var q = summary.sub_quotas[sk];
+            if (!q) return "";
+            var m = /^sub(\d+)$/i.exec(sk);
+            var nm = m ? ("부계정 " + m[1]) : sk;
+            var f = (q.five_used != null) ? (Math.round(Number(q.five_used)) + "%") : "-";
+            var w = (q.week_used != null) ? (Math.round(Number(q.week_used)) + "%") : "-";
+            return '<span class="usage-subquota-pill" title="부계정 참고 실측 (' + escapeHtml(q.measured_at || "") + ')">' + escapeHtml(nm + " 5h " + f + " · 주간 " + w) + '</span>';
+          }).filter(Boolean);
+          if (sqParts.length) {
+            limBanner = (limBanner ? limBanner + ' ' : '') + '<span class="usage-subquotas">' + sqParts.join(" ") + '</span>';
+          }
+        }
+      }
       els.usageLimitsBanner.innerHTML = limBanner;
       els.usageLimitsBanner.hidden = !limBanner;
     }
-    if (els.usageRows) els.usageRows.innerHTML = d ? usageRowsHtml(d.rows) : "";
-    if (els.usageRowsCount) {
-      var shown = (d && d.rows) ? d.rows.length : 0;
-      var total = summary ? summary.total : 0;
-      els.usageRowsCount.textContent = shown < total ? "최근 " + shown + "건 (전체 " + total.toLocaleString() + "건)" : shown + "건";
+    var filteredRows = usageFilterRows(d ? d.rows : [], usageClientFilter);
+    var visibleRows = filteredRows.slice(0, usageRowsVisibleCount);
+    if (els.usageRows) els.usageRows.innerHTML = d ? usageRowsHtml(visibleRows) : (isInitialLoading ? usageSkeletonRowsHtml(5) : "");
+    if (els.usageLoadmore) {
+      var remaining = filteredRows.length - visibleRows.length;
+      els.usageLoadmore.hidden = remaining <= 0;
+      if (els.usageLoadmoreInfo) {
+        els.usageLoadmoreInfo.textContent = remaining > 0 ? ("남은 " + remaining.toLocaleString() + "건") : "";
+      }
     }
+    if (els.usageRowsCount) {
+      var shown = visibleRows.length;
+      var filteredTotal = filteredRows.length;
+      var total = summary ? summary.total : 0;
+      els.usageRowsCount.textContent = shown < filteredTotal
+        ? shown + " / " + filteredTotal.toLocaleString() + "건 (전체 " + total.toLocaleString() + "건)"
+        : (filteredTotal < total ? filteredTotal + "건 (전체 " + total.toLocaleString() + "건)" : shown + "건");
+    }
+    renderUsageDiagnostics();
     updateTopbarMeta();
   }
 
   // 화면 전환 때: 실측 통계로 들어오면 그리고 불러오고, 나가면 다시 묻기 예약을 푼다.
   function enterOrLeaveUsageStats(entering) {
     if (entering) {
+      renderAccountQuotas();
+      if (!lastQuotaLoadAt || (Date.now() - lastQuotaLoadAt >= QUOTA_AUTO_RELOAD_MS)) { loadAccountQuotas(); }
+      if (allItems.length > 0 || pendingItems.length > 0) { renderQuickSessions(); }
       renderUsageStats();
       loadUsageStats(false);
+      if (!usageDiagnosticsData) { loadUsageDiagnostics(); }
     } else if (usageTimer) {
       clearTimeout(usageTimer);
       usageTimer = null;
@@ -4474,7 +5591,7 @@
   function loadUsageStats(refresh) {
     if (usageTimer) { clearTimeout(usageTimer); usageTimer = null; }
     var asked = usageDays;
-    return fetchJson("/api/usage-stats?days=" + asked + (refresh ? "&refresh=1" : ""))
+    return fetchJson("/api/usage-stats?days=" + asked + "&limit=200" + (refresh ? "&refresh=1" : ""))
       .then(function (d) {
         if (asked !== usageDays) return;
         usageData = d;
@@ -4634,7 +5751,7 @@
       filteredPending = pendingItems.filter(function (p) {
         if (!p || !p.task_id) return false;
         if (finishedTaskIds[p.task_id]) return false;
-        if (!qaItemMatchesSelection(p, claudeTree, currentQaProject, currentQaSession)) return false;
+        if (!qaItemMatchesSelection(p, claudeTree, currentQaProject, currentQaSession, qaSource)) return false;
         if (!qaItemMatchesAgy(p, currentQaAgy)) return false;
         if (model && p.model !== model) return false;
         if (q) {
@@ -4649,13 +5766,16 @@
 
     // 3. 완료 레코드 필터링
     filteredQa = allItems.filter(function (r) {
-      if (!qaItemMatchesSelection(r, claudeTree, currentQaProject, currentQaSession)) return false;
+      if (!qaItemMatchesSelection(r, claudeTree, currentQaProject, currentQaSession, qaSource)) return false;
       if (!qaItemMatchesAgy(r, currentQaAgy)) return false;
       if (model && recordModel(r) !== model) return false;
       if (status) {
+        var stUp = String(r.status || "").trim().toUpperCase();
         var isOkRec = isOkStatus(r);
         if (status === "OK" && !isOkRec) return false;
         if (status === "ERROR" && isOkRec) return false;
+        if (status === "CANCELLED" && stUp !== "CANCELLED") return false;
+        if (status === "BLOCKED" && stUp !== "BLOCKED") return false;
       }
       if (q) {
         var hay = [recordModel(r), r.computer_name, r.task_id, r.source, r.session, r.session_id, r.question, r.answer]
@@ -4759,6 +5879,27 @@
     if (els.chipQaStatus) {
       var sVal = els.statusFilter ? els.statusFilter.value : "";
       els.chipQaStatus.textContent = "상태: " + (sVal || "전체");
+    }
+    if (els.qaDiagChip) {
+      var errCnt = 0, cancelCnt = 0, blockCnt = 0;
+      filteredQa.forEach(function (r) {
+        var su = String((r && r.status) || "").trim().toUpperCase();
+        if (su === "CANCELLED") cancelCnt++;
+        else if (su === "BLOCKED") blockCnt++;
+        else if (su && !isOkStatus(r)) errCnt++;
+      });
+      var totalBad = errCnt + cancelCnt + blockCnt;
+      if (totalBad > 0) {
+        var parts = [];
+        if (errCnt > 0) parts.push("실패 " + errCnt);
+        if (cancelCnt > 0) parts.push("취소 " + cancelCnt);
+        if (blockCnt > 0) parts.push("차단 " + blockCnt);
+        els.qaDiagChip.textContent = "진단: " + parts.join(" · ");
+        els.qaDiagChip.classList.toggle("active", Boolean(els.statusFilter && (els.statusFilter.value === "ERROR" || els.statusFilter.value === "CANCELLED" || els.statusFilter.value === "BLOCKED")));
+        els.qaDiagChip.hidden = false;
+      } else {
+        els.qaDiagChip.hidden = true;
+      }
     }
   }
 
@@ -5163,6 +6304,9 @@
     // 백틱 없이 적힌 <!--주석-->, 닫히지 않은 <script ...> 등이 HTML 블록으로 해석되어
     // marked/DOMPurify 에서 뒤쪽 본문 전체가 잘리는 현상을 막는다.
     s = s.replace(/<(?![hH][tT][tT][pP][sS]?:\/\/[^\s<>]+>)/g, "&lt;");
+
+    // 4-1. 단독 '~'(예: 1~5줄, 약 ~10분)가 취소선(~~...~~)이나 아래첨자로 오해석되지 않게 이스케이프한다(~~ / ~~~ 는 보존).
+    s = s.replace(/(^|[^~])~(?![~])/g, "$1&#126;");
 
     // 5. 코드 블록 복원
     codeBlocks.forEach(function (code, i) {
@@ -5708,12 +6852,12 @@
     return taskId ? String(taskId) : String(dataKey || "");
   }
 
-  function buildModelRow(agyModel, claudeModel, claudeEffort, fellBack, subAgent, triedModels, isOk, models) {
-    if (!agyModel && !claudeModel && !(subAgent && subAgent.model)) return null;
+  function buildModelRow(agyModel, claudeModel, claudeEffort, fellBack, subAgent, triedModels, isOk, models, srcInfo) {
+    if (!agyModel && !claudeModel && !(subAgent && subAgent.model) && !(srcInfo && (srcInfo.model || srcInfo.client))) return null;
     var row = document.createElement("div");
     row.className = "meta model-meta";
     row.appendChild(metaHead("모델"));
-    row.appendChild(buildCardModelMeta(agyModel, claudeModel, claudeEffort, fellBack, subAgent, triedModels, isOk, models));
+    row.appendChild(buildCardModelMeta(agyModel, claudeModel, claudeEffort, fellBack, subAgent, triedModels, isOk, models, srcInfo));
     return row;
   }
 
@@ -5833,8 +6977,9 @@
       var mCtx = (mr._liveCtx) || recordContexts[recordContextKey(mr)] || null;
       var mName = recordModel(mr) || null;
       var mAgent = mr.agent_model ? { model: mr.agent_model, effort: mr.agent_effort, type: mr.agent_type, desc: mr.agent_desc } : null;
+      var mSrc = (mr.src_model || mr.src_client) ? { model: mr.src_model || "", effort: mr.src_effort || "", client: mr.src_client || "" } : null;
       var mOk = isOkStatus(mr.status);
-      mv.innerHTML = cardModelHtml(mName, mr.claude_model, mr.claude_effort, false, mAgent, mr.tried_models, mOk, mCtx && mCtx.models);
+      mv.innerHTML = cardModelHtml(mName, mr.claude_model, mr.claude_effort, false, mAgent, mr.tried_models, mOk, mCtx && mCtx.models, mSrc);
     }
   }
 
@@ -7152,6 +8297,39 @@
     if (src.opts.convId) loadProcessTranslation(src.opts.convId);
   }
 
+  function qaDiagnoseItem(r) {
+    if (!r || typeof r !== "object") return null;
+    var st = String(r.status || "").trim().toUpperCase();
+    if (st !== "ERROR" && st !== "CANCELLED" && st !== "BLOCKED") return null;
+    if (r.diagnosis && (r.diagnosis.label || r.diagnosis.root_cause || r.diagnosis.recommendation)) {
+      return r.diagnosis;
+    }
+    var ans = String(r.answer || "").toLowerCase();
+    var note = String(r.account_note || "").toLowerCase();
+    if (st === "CANCELLED") {
+      if (ans.indexOf("timeout") >= 0 || ans.indexOf("시간 초과") >= 0 || ans.indexOf("watchdog") >= 0 || ans.indexOf("멈춤") >= 0) {
+        return { category: "timeout", label: "시간 초과/중단", root_cause: "응답 대기 시간 초과 또는 워치독에 의해 취소되었습니다.", recommendation: "작업을 더 작은 단위로 나누거나 제한 시간을 늘려 재시도하세요." };
+      }
+      return { category: "cancelled", label: "작업 취소", root_cause: "사용자 또는 상위 세션에 의해 작업이 취소되었습니다.", recommendation: "중단 시점 이후 작업이 필요하면 새 위임으로 이어서 실행하세요." };
+    }
+    if (st === "BLOCKED") {
+      return { category: "blocked", label: "실행 차단", root_cause: "권한, 샌드박스 또는 접근 제한으로 작업이 차단되었습니다.", recommendation: "대상 경로 권한 또는 실행 환경 제약을 확인하세요." };
+    }
+    if (ans.indexOf("지정한 @model 을 쓸 수 없습니다") >= 0 || ans.indexOf("is not recognized as a known model") >= 0 || ans.indexOf("invalid model selection") >= 0 || ans.indexOf("알 수 없는 모델") >= 0) {
+      return { category: "stale_model_catalog", label: "모델 카탈로그 불일치", root_cause: "지정한 모델명 또는 로컬 모델 카탈로그가 현재 지원 목록과 일치하지 않습니다.", recommendation: "models.json 모델 카탈로그를 재동기화하고 사용 가능한 모델명을 확인하세요." };
+    }
+    if (ans.indexOf("끝내지 못하고 사라졌습니다") >= 0 || ans.indexOf("강제 종료됐을 수 있습니다") >= 0 || ans.indexOf("비정상 종료") >= 0) {
+      return { category: "worker_crash_or_exit", label: "워커 비정상 종료", root_cause: "실행 중인 워커 프로세스가 예기치 않게 종료되었습니다.", recommendation: "워커 로그와 시스템 상태를 확인하고 워처를 재시작하세요." };
+    }
+    if (ans.indexOf("429") >= 0 || ans.indexOf("quota") >= 0 || ans.indexOf("rate limit") >= 0 || ans.indexOf("한도") >= 0 || note.indexOf("한도") >= 0) {
+      return { category: "quota", label: "할당량/한도 초과", root_cause: "모델 요청 한도(429/quota)에 도달했습니다.", recommendation: "다른 모델 또는 부계정 슬롯으로 전환하거나 잠시 후 재시도하세요." };
+    }
+    if (ans.indexOf("timeout") >= 0 || ans.indexOf("timed out") >= 0 || ans.indexOf("시간 초과") >= 0 || ans.indexOf("최대 대기 시간") >= 0 || ans.indexOf("후에도 멈춤") >= 0) {
+      return { category: "timeout", label: "실행 시간 초과", root_cause: "모델 또는 명령 실행이 제한 시간 내에 끝나지 않았습니다.", recommendation: "프롬프트 범위를 줄이고 단계별로 나누어 위임하세요." };
+    }
+    return { category: "error", label: "실행 오류", root_cause: "위임 실행 중 오류가 발생했습니다.", recommendation: "답변 본문과 과정 로그에서 실패 원인을 확인하세요." };
+  }
+
   function buildCard(r) {
     var st = (r.status == null ? "" : String(r.status)).trim();
     var isOk = isOkStatus(r);
@@ -7189,10 +8367,19 @@
     if (r.attempts && Number(r.attempts) > 1) { meta.appendChild(metaItem("시도 " + r.attempts + "회")); }
     // 위임 경로: 대부분은 inbox 파일 위임(bridge)이라 따로 표시하지 않고, Claude 가 antigravity MCP 로 직접 부른 기록만 "MCP" 로 표시한다.
     if (viaMcp(r)) { meta.appendChild(metaItem("MCP", "src-mcp", "위임 경로: Claude 가 antigravity MCP 로 직접 호출한 기록")); }
+    if ((r.account && String(r.account).toLowerCase() !== "primary") || r.fallback_from) {
+      var rAcctWrap = document.createElement("span");
+      rAcctWrap.innerHTML = usageAccountBadgeHtml(r.account, r.fallback_from);
+      if (rAcctWrap.firstElementChild) {
+        if (r.account_note) rAcctWrap.firstElementChild.title = String(r.account_note);
+        meta.appendChild(rAcctWrap.firstElementChild);
+      }
+    }
     card.appendChild(meta);
 
     var rCtx = (r && r._liveCtx) || recordContexts[recordContextKey(r)] || null;
-    var modelRow = buildModelRow(modelName, r.claude_model, r.claude_effort, false, rAgent, r.tried_models, isOk, rCtx && rCtx.models);
+    var rSrc = (r.src_model || r.src_client) ? { model: r.src_model || "", effort: r.src_effort || "", client: r.src_client || "" } : null;
+    var modelRow = buildModelRow(modelName, r.claude_model, r.claude_effort, false, rAgent, r.tried_models, isOk, rCtx && rCtx.models, rSrc);
     if (modelRow) {
       modelRow.setAttribute("data-model-task", tokenRecordKey(r));
       card.appendChild(modelRow);
@@ -7202,6 +8389,18 @@
     var metaToggleBtn = attachMetaMore(card, dataKey, r.task_id, [
       buildSessionMeta(r.session, r.session_id, r.task_id)   // 식별 줄: 모든 카드에(세션이 없으면 "세션 없음")
     ]);
+
+    var diag = (typeof qaDiagnoseItem === "function") ? qaDiagnoseItem(r) : null;
+    if (diag) {
+      var stLower = String(r.status || "").trim().toLowerCase();
+      var diagBox = document.createElement("div");
+      diagBox.className = "qa-diag-box" + (stLower === "cancelled" ? " is-cancelled" : (stLower === "blocked" ? " is-blocked" : ""));
+      diagBox.innerHTML =
+        '<div class="qa-diag-head"><span class="qa-diag-label">' + escapeHtml(diag.label || diag.category || "진단") + '</span></div>' +
+        (diag.root_cause ? '<div class="qa-diag-cause">' + escapeHtml(diag.root_cause) + '</div>' : '') +
+        (diag.recommendation ? '<div class="qa-diag-rec">권장: ' + escapeHtml(diag.recommendation) + '</div>' : '');
+      card.appendChild(diagBox);
+    }
 
     var dq = document.createElement("details");
     dq.className = "qa q";
@@ -7543,6 +8742,8 @@
         var sig = h.label + "|" + h.detail;
         if (el.getAttribute("data-sig") !== sig) { el.innerHTML = healthInnerHtml(h); el.setAttribute("data-sig", sig); }
       }
+      var cardEl = el.closest ? el.closest(".card.pending-card") : null;
+      if (cardEl) { cardEl.setAttribute("data-health", h.kind); }
       var barEl = document.querySelector('.pending-progress-bar[data-health-bar-task="' + tid + '"]');
       if (barEl) {
         var nextBarState = getPendingBarState(h.kind, (p.state === "processing"), Boolean(p.interrupted));
@@ -7619,6 +8820,12 @@
     if (p.task_id && (isProcessing || p.interrupted)) { stateBadge.setAttribute("data-health-task", p.task_id); }
     meta.appendChild(stateBadge);
 
+    if ((p.account && String(p.account).toLowerCase() !== "primary") || p.fallback_from) {
+      var pAcctWrap = document.createElement("span");
+      pAcctWrap.innerHTML = usageAccountBadgeHtml(p.account, p.fallback_from);
+      if (pAcctWrap.firstElementChild) meta.appendChild(pAcctWrap.firstElementChild);
+    }
+
     var pAgent = p.agent_model ? { model: p.agent_model, effort: p.agent_effort, type: p.agent_type, desc: p.agent_desc } : null;
 
     if (isProcessing) {
@@ -7661,7 +8868,8 @@
     card.appendChild(meta);
 
     var pendRec = pendingTokenRecord(p);
-    var modelRow = buildModelRow(p.model, p.claude_model, p.claude_effort, false, pAgent, p.tried_models, true, pendRec._liveCtx && pendRec._liveCtx.models);
+    var pSrc = (p.src_model || p.src_client) ? { model: p.src_model || "", effort: p.src_effort || "", client: p.src_client || "" } : null;
+    var modelRow = buildModelRow(p.model, p.claude_model, p.claude_effort, false, pAgent, p.tried_models, true, pendRec._liveCtx && pendRec._liveCtx.models, pSrc);
     if (modelRow) card.appendChild(modelRow);
 
     var dataKey = card.getAttribute("data-key");
@@ -8203,7 +9411,20 @@
     var hlParts = [];
     for (var h = 0; h < hlKeys.length; h++) { hlParts.push(hlKeys[h] + "=" + hl[hlKeys[h]]); }
 
-    return [pParts.join("|"), uParts.join("|"), tlParts.join(","), hlParts.join(",")].join("#");
+    var agParts = [];
+    var agyProjects = Array.isArray(data.agyProjects) ? data.agyProjects : [];
+    for (var ai = 0; ai < agyProjects.length; ai++) {
+      var ap = agyProjects[ai] || {};
+      var asParts = [];
+      var asess = Array.isArray(ap.sessions) ? ap.sessions : [];
+      for (var aj = 0; aj < asess.length; aj++) {
+        var as = asess[aj] || {};
+        asParts.push([as.id || "", as.title || "", as.cwd || "", as.lastActivity || "", as.archived ? 1 : 0].join("~"));
+      }
+      agParts.push((ap.id || "") + ":" + (ap.name || "") + "[" + asParts.join(",") + "]");
+    }
+
+    return [pParts.join("|"), uParts.join("|"), tlParts.join(","), hlParts.join(","), agParts.join("|")].join("#");
   }
 
   function loadClaudeTree() {
@@ -8222,16 +9443,18 @@
   }
 
   function refresh(force) {
+    if (force || !lastQuotaLoadAt || (Date.now() - lastQuotaLoadAt >= QUOTA_AUTO_RELOAD_MS)) {
+      loadAccountQuotas();
+    }
     return Promise.all([
       loadSystemStatus(),
       loadAllQa(force),
       loadPending(),
-      loadHandoffProjects(force),
       loadClaudeTree()
     ]).then(function (results) {
       var qaRes = results[1] || { changed: false };
       var pList = results[2] || [];
-      var treeRes = results[4] || { changed: false };
+      var treeRes = results[3] || { changed: false };
 
       var pKey = pendingKeyOf(pList);
       var pChanged = (pKey !== lastPendingKey);
@@ -8246,7 +9469,7 @@
       }
       // 사이드바 트리는 스크롤을 보존하며 상대 시간("3분 전" 등)을 매번 최신으로 갱신한다
       renderQaTree();
-      renderHandoffTree();
+      renderQuickSessions();
 
       if (currentNav === "dashboard") {
         renderDashboard();
@@ -8257,12 +9480,6 @@
           updateQaHeader();
           renderProcessDialog();
         }
-      } else if (currentNav === "handoff") {
-        if (force || treeRes.changed || qaRes.changed) {   // qaRes: 새 위임 기록이 들어오면 회신 카드의 토큰 칩도 갱신
-          renderHandoffView();
-        }
-        refreshHandoffLive();
-        renderProcessDialog();
       }
       updateTopbarMeta();
     }).catch(function (err) {
@@ -8437,13 +9654,105 @@
     if (els.navBtnQa) els.navBtnQa.addEventListener("click", function () { switchNav("qa"); });
     if (els.navBtnHandoff) els.navBtnHandoff.addEventListener("click", function () { switchNav("handoff"); });
     if (els.navBtnStats) els.navBtnStats.addEventListener("click", function () { switchNav("stats"); });
-    if (els.usageRefresh) els.usageRefresh.addEventListener("click", function () { loadUsageStats(true); });
+    if (els.usageRefresh) els.usageRefresh.addEventListener("click", function () {
+      usageRowsVisibleCount = USAGE_PAGE_SIZE;
+      loadUsageStats(true);
+      loadUsageDiagnostics();
+      loadAccountQuotas();
+    });
+    if (els.dashQuotasRefresh) els.dashQuotasRefresh.addEventListener("click", triggerAccountQuotasRefresh);
+    if (els.statsQuotasRefresh) els.statsQuotasRefresh.addEventListener("click", triggerAccountQuotasRefresh);
+    if (els.sidebarQuotas) {
+      els.sidebarQuotas.addEventListener("click", function (e) {
+        var refreshBtn = e.target && e.target.closest ? e.target.closest("#sidebar-quotas-refresh") : null;
+        if (refreshBtn) {
+          e.stopPropagation();
+          triggerAccountQuotasRefresh();
+          return;
+        }
+        var chip = e.target && e.target.closest ? e.target.closest(".sidebar-quota-chip") : null;
+        if (chip) {
+          switchNav("stats");
+        }
+      });
+    }
+    if (els.usageClientFilter) els.usageClientFilter.addEventListener("change", function () {
+      usageClientFilter = els.usageClientFilter.value || "";
+      usageRowsVisibleCount = USAGE_PAGE_SIZE;
+      renderUsageStats();
+    });
+    if (els.usageLoadmore50) els.usageLoadmore50.addEventListener("click", function () {
+      usageRowsVisibleCount += USAGE_PAGE_SIZE;
+      renderUsageStats();
+    });
+    if (els.usageLoadmoreAll) els.usageLoadmoreAll.addEventListener("click", function () {
+      usageRowsVisibleCount = Infinity;
+      renderUsageStats();
+    });
+    if (els.usageDiagBriefToggle) els.usageDiagBriefToggle.addEventListener("click", function () {
+      if (!els.usageDiagBrief) return;
+      var nextHidden = !els.usageDiagBrief.hidden;
+      els.usageDiagBrief.hidden = nextHidden;
+      els.usageDiagBriefToggle.textContent = nextHidden ? "지시문 보기" : "지시문 접기";
+    });
+    if (els.usageDiagCopy) els.usageDiagCopy.addEventListener("click", function () {
+      var text = (usageDiagnosticsData && usageDiagnosticsData.fix_brief) ? usageDiagnosticsData.fix_brief : "";
+      if (!text) return;
+      var done = function () {
+        var orig = els.usageDiagCopy.textContent;
+        els.usageDiagCopy.textContent = "복사됨 ✓";
+        setTimeout(function () { els.usageDiagCopy.textContent = orig; }, 1800);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done).catch(function () {});
+      } else {
+        var ta = document.createElement("textarea");
+        ta.value = text;
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand("copy"); done(); } catch (e) {}
+        document.body.removeChild(ta);
+      }
+    });
+    if (els.usageDiagGroups) els.usageDiagGroups.addEventListener("click", function (e) {
+      var btn = e.target && e.target.closest ? e.target.closest(".usage-diag-ack") : null;
+      if (!btn) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (btn.disabled) return;
+      var cat = btn.getAttribute("data-category") || "";
+      var label = btn.getAttribute("data-label") || cat;
+      var cnt = btn.getAttribute("data-unacked") || "0";
+      if (!cat) return;
+      if (!window.confirm(label + " " + cnt + "건을 처리됨으로 표시할까요?")) return;
+      btn.disabled = true;
+      var prevErr = btn.nextElementSibling && btn.nextElementSibling.getAttribute && btn.nextElementSibling.getAttribute("data-ack-err") === "1" ? btn.nextElementSibling : null;
+      if (prevErr && prevErr.parentNode) prevErr.parentNode.removeChild(prevErr);
+      fetch("/api/qa/diagnostics/ack", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Samjil-Viewer": "1" },
+        body: JSON.stringify({ category: cat })
+      }).then(function (res) {
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        return res.json();
+      }).then(function () {
+        return loadUsageDiagnostics();
+      }).catch(function () {
+        btn.disabled = false;
+        var errSpan = document.createElement("span");
+        errSpan.setAttribute("data-ack-err", "1");
+        errSpan.style.color = "var(--err)";
+        errSpan.textContent = "실패";
+        btn.insertAdjacentElement("afterend", errSpan);
+      });
+    });
     Array.prototype.forEach.call(document.querySelectorAll(".usage-day-btn"), function (btn) {
       btn.addEventListener("click", function () {
         var d = parseInt(btn.dataset.days, 10);
         if (d === usageDays) return;
         usageDays = d;
         usageData = null;
+        usageRowsVisibleCount = USAGE_PAGE_SIZE;
         renderUsageStats();
         updateBreadcrumbs();
         loadUsageStats(false);
@@ -8462,7 +9771,16 @@
 
     if (els.topbarMenuToggle) {
       els.topbarMenuToggle.addEventListener("click", function () {
-        if (els.appSidebar) els.appSidebar.classList.toggle("open");
+        if (els.appSidebar) {
+          var isOpen = els.appSidebar.classList.toggle("open");
+          if (els.sidebarBackdrop) els.sidebarBackdrop.classList.toggle("open", isOpen);
+        }
+      });
+    }
+    if (els.sidebarBackdrop) {
+      els.sidebarBackdrop.addEventListener("click", function () {
+        if (els.appSidebar) els.appSidebar.classList.remove("open");
+        els.sidebarBackdrop.classList.remove("open");
       });
     }
 
@@ -8473,13 +9791,36 @@
         switchNav("qa");
       });
     }
-    if (els.btnViewAllHandoff) {
-      els.btnViewAllHandoff.addEventListener("click", function () {
-        switchNav("handoff");
-      });
-    }
 
     // QA 세션 사이드바 검색 및 필터
+    if (els.qaSourceTabs) {
+      els.qaSourceTabs.addEventListener("click", function (e) {
+        var btn = e.target && e.target.closest ? e.target.closest("[data-qa-source]") : null;
+        if (!btn) return;
+        var nextSrc = btn.getAttribute("data-qa-source") || "all";
+        if (nextSrc === qaSource) return;
+        qaSource = nextSrc;
+        Array.prototype.forEach.call(els.qaSourceTabs.querySelectorAll("[data-qa-source]"), function (b) {
+          var active = b.getAttribute("data-qa-source") === qaSource;
+          b.classList.toggle("active", active);
+          b.setAttribute("aria-selected", active ? "true" : "false");
+        });
+        currentQaProject = "";
+        currentQaSession = "";
+        currentQaAgy = "";
+        renderQaTree();
+        updateBreadcrumbs();
+        updateHash();
+        applyQaFilters();
+      });
+    }
+    if (els.qaDiagChip) {
+      els.qaDiagChip.addEventListener("click", function () {
+        if (!els.statusFilter) return;
+        els.statusFilter.value = (els.statusFilter.value === "ERROR") ? "" : "ERROR";
+        applyQaFilters();
+      });
+    }
     if (els.qaSessionSearch) els.qaSessionSearch.addEventListener("input", renderQaTree);
     if (els.modelFilter) els.modelFilter.addEventListener("change", applyQaFilters);
     if (els.statusFilter) els.statusFilter.addEventListener("change", applyQaFilters);
@@ -8499,12 +9840,6 @@
 
     // 푸터 새로고침 & 자동 갱신
     if (els.refreshBtn) els.refreshBtn.addEventListener("click", function () { refresh(true); });
-    if (els.handoffCards) {
-      els.handoffCards.addEventListener("click", function (e) {
-        var procBtn = e.target && e.target.closest ? e.target.closest(".proc-open") : null;
-        if (procBtn) { openProcessDialog(procBtn.getAttribute("data-proc-key")); }
-      });
-    }
     if (els.cards) {
       els.cards.addEventListener("click", function (e) {
         var procBtn = e.target && e.target.closest ? e.target.closest(".proc-open") : null;
@@ -8527,6 +9862,7 @@
       });
     }
     if (els.watcherStartBtn) els.watcherStartBtn.addEventListener("click", startWatcher);
+    if (els.updateRunBtn) els.updateRunBtn.addEventListener("click", startUpdate);
     if (els.autoRefresh) els.autoRefresh.addEventListener("change", scheduleAutoRefresh);
 
     // role="button" 으로 표시한 div 항목은 Enter/Space 로도 누를 수 있게 한다.
@@ -8562,8 +9898,6 @@
             applyQaFilters();
           }
         }
-      } else if (parsed.nav === "handoff" && (parsed.project !== currentHandoffProject || parsed.session !== currentHandoffSession)) {
-        selectHandoffSession(parsed.session, parsed.project);
       }
 
       if (hashRouting && !parsed.task && typeof restoreScrollForHash === "function") {
@@ -8589,6 +9923,16 @@
 
     window.addEventListener("hashchange", handleHistoryNavigation);
     window.addEventListener("popstate", handleHistoryNavigation);
+    document.addEventListener("visibilitychange", function () {
+      if (document.visibilityState === "visible" && (!lastQuotaLoadAt || Date.now() - lastQuotaLoadAt >= QUOTA_AUTO_RELOAD_MS)) {
+        loadAccountQuotas();
+      }
+    });
+    window.addEventListener("focus", function () {
+      if (!lastQuotaLoadAt || Date.now() - lastQuotaLoadAt >= QUOTA_AUTO_RELOAD_MS) {
+        loadAccountQuotas();
+      }
+    });
   }
 
   // 초기화 실행
@@ -8610,9 +9954,6 @@
     if (initialRoute.session) { currentQaSession = initialRoute.session; }
     if (initialRoute.project) { currentQaProject = initialRoute.project; }
     if (initialRoute.agy) { currentQaAgy = initialRoute.agy; }
-  } else if (initialRoute.nav === "handoff") {
-    if (initialRoute.session) { currentHandoffSession = initialRoute.session; }
-    if (initialRoute.project) { currentHandoffProject = initialRoute.project; }
   }
 
   // 최초 네비게이션 적용

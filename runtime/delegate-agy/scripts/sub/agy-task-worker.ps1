@@ -8,10 +8,90 @@
 param(
     [string]$RepoRoot = "",
     [string]$RuntimeDir = "",
-    [Parameter(Mandatory = $true)][string]$WorkerTask,
-    [switch]$SkipPermissions
+    [string]$WorkerTask = "",
+    [switch]$SkipPermissions,
+    [string]$SubSlot = "",
+    [string]$SubBridgeDir = "",
+    [string]$SubUsageTaskId = "",
+    [string]$SubUsageQuotaFile = "",
+    [string]$SubUsageSlotFile = "",
+    [int]$SubUsageTimeoutSec = 40,
+    [string]$PrimaryQuotaCacheFile = "",
+    [string]$ClaudeQuotaCacheFile = ""
 )
 
+if (-not [string]::IsNullOrWhiteSpace($SubUsageTaskId)) {
+    try {
+        if (-not [string]::IsNullOrWhiteSpace($SubSlot)) { $env:AGY_SUB_SLOT = $SubSlot }
+        $bridgeLib = Join-Path $PSScriptRoot "agy-sub-bridge.ps1"
+        $quotaLib  = Join-Path $PSScriptRoot "agy-quota.ps1"
+        if (Test-Path -LiteralPath $bridgeLib) { . $bridgeLib }
+        if (Test-Path -LiteralPath $quotaLib) { . $quotaLib }
+        if ((Get-Command Invoke-AgyUsageCommand -ErrorAction SilentlyContinue) -and (Get-Command ConvertFrom-AgyUsageText -ErrorAction SilentlyContinue)) {
+            $rawUsage = Invoke-AgyUsageCommand "agy" $SubUsageTimeoutSec
+            if ($rawUsage) {
+                $parsed = ConvertFrom-AgyUsageText ([string]$rawUsage)
+                if ($parsed -and ($parsed.Contains('gemini_5h') -or $parsed.Contains('gemini_weekly'))) {
+                    $fiveUsed = $null; $fiveReset = ""
+                    $weekUsed = $null; $weekReset = ""
+                    if ($parsed.Contains('gemini_5h')) {
+                        $e5 = $parsed.Item('gemini_5h')
+                        $fiveUsed = [Math]::Round([Math]::Max(0.0, [Math]::Min(100.0, 100.0 - [double]$e5.pct)), 2)
+                        $fiveReset = [string]$e5.reset
+                    }
+                    if ($parsed.Contains('gemini_weekly')) {
+                        $ew = $parsed.Item('gemini_weekly')
+                        $weekUsed = [Math]::Round([Math]::Max(0.0, [Math]::Min(100.0, 100.0 - [double]$ew.pct)), 2)
+                        $weekReset = [string]$ew.reset
+                    }
+                    $qObj = [ordered]@{
+                        task_id     = $SubUsageTaskId
+                        slot_id     = $SubSlot
+                        measured_at = ([datetime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"))
+                        five_used   = $fiveUsed
+                        five_reset  = $fiveReset
+                        week_used   = $weekUsed
+                        week_reset  = $weekReset
+                    }
+                    if ($SubUsageQuotaFile) { [void](Write-BridgeJsonAtomic $SubUsageQuotaFile $qObj) }
+                    if ($SubUsageSlotFile)  { [void](Write-BridgeJsonAtomic $SubUsageSlotFile $qObj) }
+                }
+            }
+        }
+    } catch {}
+    exit 0
+}
+
+if (-not [string]::IsNullOrWhiteSpace($PrimaryQuotaCacheFile)) {
+    try {
+        $quotaLib = Join-Path $PSScriptRoot "agy-quota.ps1"
+        if (Test-Path -LiteralPath $quotaLib) { . $quotaLib }
+        if (Get-Command Get-AgyQuotaSnapshot -ErrorAction SilentlyContinue) {
+            [void](Get-AgyQuotaSnapshot -CacheFile $PrimaryQuotaCacheFile -MaxAgeSec 0 -TimeoutSec $SubUsageTimeoutSec)
+        }
+    } catch {}
+    exit 0
+}
+
+if (-not [string]::IsNullOrWhiteSpace($ClaudeQuotaCacheFile)) {
+    try {
+        $quotaLib = Join-Path $PSScriptRoot "agy-quota.ps1"
+        if (Test-Path -LiteralPath $quotaLib) { . $quotaLib }
+        if (Get-Command Update-ClaudeLimitsCache -ErrorAction SilentlyContinue) {
+            [void](Update-ClaudeLimitsCache -CacheFile $ClaudeQuotaCacheFile -MaxAgeSec 0 -TimeoutSec $SubUsageTimeoutSec)
+        }
+    } catch {}
+    exit 0
+}
+
 $watcher = Join-Path $PSScriptRoot "watch-agy.ps1"
-& $watcher -RepoRoot $RepoRoot -RuntimeDir $RuntimeDir -WorkerTask $WorkerTask -SkipPermissions:$SkipPermissions.IsPresent
+$callArgs = @{
+    RepoRoot   = $RepoRoot
+    RuntimeDir = $RuntimeDir
+    WorkerTask = $WorkerTask
+}
+if ($SkipPermissions.IsPresent) { $callArgs['SkipPermissions'] = $true }
+if (-not [string]::IsNullOrWhiteSpace($SubSlot)) { $callArgs['SubSlot'] = $SubSlot }
+if (-not [string]::IsNullOrWhiteSpace($SubBridgeDir)) { $callArgs['SubBridgeDir'] = $SubBridgeDir }
+& $watcher @callArgs
 exit $LASTEXITCODE
